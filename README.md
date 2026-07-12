@@ -54,7 +54,9 @@ Apple's server-side at-rest encryption, not end-to-end/device-locked
 encryption. Decompressing them yields the same protobuf "mergeable data"
 format used on-device in `NoteStore.sqlite`, which existing open-source
 projects (e.g. `apple_cloud_notes_parser`) have already reverse-engineered in
-useful detail.
+useful detail. The compression container (gzip vs. zlib) varies per record
+depending on whichever client last wrote it, not on which endpoint served the
+read — decoding has to try both.
 
 ## Current status
 
@@ -81,6 +83,39 @@ This is enough to build and test the read/write CloudKit client work in
 Phases 1–3 against a real account without having to fight the login flow on
 every iteration. Real SRP + 2FA login will replace the HAR-import step once
 the rest of the pipeline is proven out.
+
+`npm run cli -- clone <directory>` is implemented: it walks the whole Notes
+zone, decodes plain-text note bodies, and writes one file per note into the
+target directory, skipping notes with attachments, notes in Trash, and
+anything that fails to decode. It also writes `.icloud-notes-sync/state.json`
+in the target directory (per-note record name → file/changeTag/modification
+date, plus the zone's syncToken) as the foundation for `pull`'s incremental
+fetch and change detection.
+
+## Commands
+
+Deliberately reusing git's own vocabulary rather than inventing new terms,
+since the tool is explicitly modeled on git's fetch/push workflow and these
+words are already the most discoverable choice for what each one does:
+
+- **`clone <directory>`** *(implemented)* — full initial export: fetch every
+  note and write it into a fresh directory, alongside sync state.
+- **`pull`** *(not yet implemented)* — run inside a cloned directory;
+  fetches whatever changed remotely since the last sync (using the stored
+  `syncToken`) and updates local files accordingly. Named `pull`, not
+  `fetch`, because there's no separate remote-tracking ref to update
+  first — it goes straight to the working directory, same as `git pull`
+  without a merge step.
+- **`push`** *(not yet implemented)* — send local edits back up. Refuses to
+  push a note whose remote `recordChangeTag` has moved since the last
+  `clone`/`pull` baseline, surfacing that as a conflict instead of
+  overwriting newer remote content — the safety mechanism this needs isn't a
+  full merge, just "don't clobber a change you haven't seen."
+
+No `commit`/`branch`/`merge` equivalents are planned — the working directory
+*is* the local state, and conflicts are meant to be resolved by hand (or via
+whatever the actual git repo wrapping the folder offers), not by the tool
+itself.
 
 ## Phased roadmap
 
