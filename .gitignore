@@ -1,0 +1,9 @@
+node_modules/
+dist/
+
+# Session cookies, HAR captures, and anything else that carries live
+# iCloud credentials. Never commit these.
+.auth/
+*.har
+*.local.json
+*.local.*
