@@ -42,14 +42,19 @@ https://p<N>-ckdatabasews.icloud.com/database/1/com.apple.notes/production/priva
 
 using the same request shapes as CloudKit JS (`records/query`,
 `records/lookup`, `records/modify`, `changes/zone`, with a `syncToken` /
-`moreComing` model for incremental sync). Authentication is the standard
-Apple ID web login flow: SRP-6a (a nonstandard "GSA" variant, via the
-[`@foxt/js-srp`](https://github.com/foxt/js-srp-gsa) package) plus 2FA
-against `idmsa.apple.com`. `pyicloud`, despite being the usual reference for
-this kind of project, turns out not to implement SRP at all (it uses a
-legacy plaintext `/signin` call); the SRP flow implemented here instead
-follows [`icloud-photos-sync`](https://github.com/steilerDev/icloud-photos-sync),
-which does.
+`moreComing` model for incremental sync). Authentication is deliberately
+*not* reimplemented: `login` opens a real (headed) browser window via
+Playwright, Apple's own pages run the entire sign-in flow — password,
+whatever 2FA variant the account uses, CAPTCHAs, interstitials — and once
+the page's own `setup.icloud.com` bootstrap call succeeds, the session
+cookies are harvested from the browser and the window closes. This keeps
+the reverse-engineered surface down to the *result* of login (a cookie jar
+plus client identifiers) rather than Apple's login protocol itself, which
+they actively churn (their current web client uses a device-attested
+`bridge/*` 2FA flow that plain HTTP can't replicate). A direct SRP-6a
+login (`login --srp`, via [`@foxt/js-srp`](https://github.com/foxt/js-srp-gsa),
+following [`icloud-photos-sync`](https://github.com/steilerDev/icloud-photos-sync))
+remains as an opt-in fallback for accounts that don't need interactive 2FA.
 
 Note title and body are stored in fields named things like `TitleEncrypted`
 and `TextDataEncrypted`. Despite the name, in accounts *without* Advanced
@@ -65,43 +70,45 @@ read — decoding has to try both.
 
 ## Current status
 
-Phase 0 is mostly done. `npm run cli -- login` performs a real Apple ID
-login against `idmsa.apple.com` (SRP-6a + trusted-device push 2FA) and
-writes `~/.config/icloud-notes-sync/session.local.json` directly — no
-browser/HAR step required for the common case. The session (and a
-request/response debug log - see below) is shared across every vault, not
-scoped to whichever directory the CLI happens to be invoked from: `login`
-once, then any number of `clone`/`pull` targets reuse the same session.
-This only supports one Apple ID at a time:
+Phase 0 is mostly done. `npm run cli -- login` opens a browser window on
+`www.icloud.com`, waits for you to complete sign-in there (any 2FA variant
+works — Apple's own pages are doing the work), then captures the session
+cookies, verifies them against `/validate`, writes
+`~/.config/icloud-notes-sync/session.local.json`, and closes the window.
+The session (and a request/response debug log - see below) is shared across
+every vault, not scoped to whichever directory the CLI happens to be
+invoked from: `login` once, then any number of `clone`/`pull` targets reuse
+the same session. This only supports one Apple ID at a time:
 
-1. `npm run cli -- login` prompts for your Apple ID and password (password
-   entry is silent — no echo, no asterisks, same as `sudo`).
-2. If your account needs 2FA, a code is pushed to your trusted devices
-   automatically and the command blocks on stdin for it. Trusted-device push
-   is the **only** 2FA method implemented — if your account uses SMS/phone
-   verification instead (or the server does something else unrecognized),
-   `login` fails with a clear error rather than hanging or crashing, and
-   asks you to file a GitHub issue so that path can be added.
-3. On success, a trust token is saved alongside the session. Re-running
-   `login` while that trust token is still valid skips the 2FA prompt
-   entirely (the server recognizes the previously-trusted login).
+1. One-time setup: `npx playwright install chromium` (the login browser;
+   a one-off ~150 MB download).
+2. `npm run cli -- login` opens the browser window; sign in as you normally
+   would. The command detects completion on its own, verifies the captured
+   session, and closes the window. Closing the window yourself aborts.
+3. The login browser keeps a persistent profile under
+   `~/.config/icloud-notes-sync/browser-profile/`, so after the first
+   sign-in Apple treats it as a trusted, returning browser — later `login`
+   runs typically skip 2FA (and may need no interaction at all if the
+   profile's own session is still alive).
 4. `npm run cli -- verify-auth` calls the same `/setup/ws/1/validate`
    endpoint the web client calls on page load, using that session. Success
    confirms the session is valid and prints the account's `dsid` and the
    partition-specific CloudKit host (e.g. `p43-ckdatabasews.icloud.com`)
    that all Notes calls need.
 
-The old HAR-import bootstrap (`npm run import-har -- <path-to-file.har>`,
-extracting cookies from a Chrome DevTools export) still exists as a fallback
-— useful mainly for accounts hitting the SMS/phone-2FA gap above, or for
-debugging against a known-good browser session — but `login` is now the
-primary path.
+Two fallback bootstrap paths also exist:
 
-**Known limitation:** there's no reliable signal from the server that
-distinguishes "trusted-device 2FA" from "phone-only 2FA" *before* prompting
-for a code — a phone-only account will still be prompted for a code that
-never arrives, and will only see the "unsupported, please file an issue"
-error once whatever's typed gets rejected as unexpected, not before.
+- `npm run cli -- login --srp` — a direct SRP-6a login against
+  `idmsa.apple.com`, no browser required. Only works for accounts that
+  don't need interactive 2FA (or that hold a still-valid trust token from
+  an earlier SRP login): the trusted-device 2FA flow Apple's current web
+  client uses is device-attested and can't be replicated over plain HTTP.
+  Useful for headless environments — though copying
+  `session.local.json` from a machine with a display also works, since
+  the session file is host-independent.
+- `npm run import-har -- <path-to-file.har>` — extract cookies from a
+  Chrome DevTools export; mainly for debugging against a known-good
+  browser session.
 
 `npm run cli -- clone <directory>` is implemented: it walks the whole Notes
 zone, decodes plain-text note bodies, and writes one file per note into the
@@ -135,8 +142,8 @@ browser tab, so it isn't racing against that heartbeat. Whether it can still
 go stale from long idle periods independent of that heartbeat is still an
 open question (see the project's dev notes) — this tool doesn't yet drive
 its own periodic `/validate` refresh, so if `verify-auth` ever reports a
-stale session, re-running `login` (fast, since the trust token usually skips
-2FA) is the fallback.
+stale session, re-running `login` (fast, since the persistent browser
+profile usually skips 2FA) is the fallback.
 
 ## Commands
 
@@ -144,10 +151,12 @@ Deliberately reusing git's own vocabulary rather than inventing new terms,
 since the tool is explicitly modeled on git's fetch/push workflow and these
 words are already the most discoverable choice for what each one does:
 
-- **`login`** *(implemented, trusted-device 2FA only)* — sign in with your
-  Apple ID and write `~/.config/icloud-notes-sync/session.local.json`,
-  shared by every vault. Not git vocabulary, but there's no `git`
-  equivalent to steal a name from here.
+- **`login`** *(implemented)* — sign in via a browser window (Apple's own
+  pages handle password/2FA) and write
+  `~/.config/icloud-notes-sync/session.local.json`, shared by every vault.
+  `--srp` does a direct no-browser SRP login instead (non-interactive-2FA
+  accounts only). Not git vocabulary, but there's no `git` equivalent to
+  steal a name from here.
 - **`clone <directory>`** *(implemented)* — full initial export: fetch every
   note and write it into a fresh directory, alongside sync state.
 - **`pull [directory]`** *(implemented)* — run inside (or pointed at) a
@@ -170,12 +179,12 @@ itself.
 
 ## Phased roadmap
 
-**Phase 0 — Foundation.** *(mostly done)* Authentication (SRP + 2FA,
-trusted-device push implemented, SMS/phone not yet), session/cookie
+**Phase 0 — Foundation.** *(mostly done)* Authentication (browser-driven
+login as the primary path, direct SRP as a no-2FA fallback), session/cookie
 handling, and a thin typed client for the CloudKit private database web
 service. No note logic yet, just "can we reliably make authenticated
-requests." Remaining: SMS/phone-based 2FA, and a self-driven `/validate`
-refresh heartbeat for long-running sessions.
+requests." Remaining: a self-driven `/validate` refresh heartbeat for
+long-running sessions.
 
 **Phase 1 — Read-only fetch.** Walk the Notes zone via `changes/zone`,
 decode the note protobuf format for title/body text, and write notes out as

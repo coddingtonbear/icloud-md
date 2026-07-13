@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@foxt/js-srp": "0.0.3-patch2",
-    "node-diff3": "^3.2.1"
+    "node-diff3": "^3.2.1",
+    "playwright": "^1.61.1"
   }
 }

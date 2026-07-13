@@ -1,6 +1,6 @@
 import { checkAuthentication } from "./cloudkit/setupClient.js";
 import { runClone } from "./commands/clone.js";
-import { runLogin } from "./commands/login.js";
+import { runBrowserLogin, runSrpLogin } from "./commands/login.js";
 import { runPull } from "./commands/pull.js";
 import { loadSession } from "./session.js";
 
@@ -10,7 +10,7 @@ async function verifyAuth(): Promise<void> {
 
   if (!result.ok) {
     console.error(`Not authenticated (HTTP ${result.status}): ${result.error}`);
-    console.error("The imported session has likely expired - re-export a fresh HAR and re-run import-har.");
+    console.error('The stored session has likely expired - re-run "npm run cli -- login" to sign in again.');
     process.exitCode = 1;
     return;
   }
@@ -36,8 +36,12 @@ async function pull(targetDirArg: string | undefined): Promise<void> {
   await runPull(session, targetDir);
 }
 
-async function login(): Promise<void> {
-  await runLogin();
+async function login(rest: string[]): Promise<void> {
+  if (rest.includes("--srp")) {
+    await runSrpLogin();
+    return;
+  }
+  await runBrowserLogin();
 }
 
 async function main(): Promise<void> {
@@ -45,7 +49,7 @@ async function main(): Promise<void> {
 
   switch (command) {
     case "login":
-      await login();
+      await login(rest);
       return;
     case "verify-auth":
       await verifyAuth();
@@ -60,7 +64,8 @@ async function main(): Promise<void> {
       console.error(
         "Usage: icloud-notes-sync <command>\n\n" +
           "Commands:\n" +
-          "  login                 Sign in with your Apple ID (SRP + trusted-device 2FA); shared across all vaults\n" +
+          "  login                 Sign in via a browser window (Apple's own pages handle 2FA); shared across all vaults\n" +
+          "  login --srp           Direct SRP sign-in, no browser; only for accounts not requiring interactive 2FA\n" +
           "  verify-auth           Check whether the stored session is authenticated\n" +
           "  clone <directory>     Fetch all Notes into a fresh local directory\n" +
           "  pull [directory]      Fetch changes since the last clone/pull (defaults to the current directory)",
