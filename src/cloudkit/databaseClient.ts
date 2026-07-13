@@ -69,19 +69,21 @@ const NOTE_DESIRED_RECORD_TYPES = [
 ];
 
 /**
- * Fetches every record in the private Notes zone by paging through
- * `changes/zone` until `moreComing` is false, following the same
- * `syncToken`-based incremental-sync model the web client uses. Returns the
- * final syncToken so a future call can resume from here instead of
- * re-fetching everything.
+ * Fetches records in the private Notes zone by paging through `changes/zone`
+ * until `moreComing` is false, following the same `syncToken`-based
+ * incremental-sync model the web client uses. Pass `sinceSyncToken` (from a
+ * prior call's result) to fetch only what changed since then; omit it for a
+ * full initial fetch. Returns the new syncToken so a future call can resume
+ * from here.
  */
 export async function fetchAllNoteRecords(
   session: IcloudSession,
   ckDatabaseHost: string,
   dsid: string,
+  sinceSyncToken?: string,
 ): Promise<ZoneChangesResult> {
   const records: CloudKitRecord[] = [];
-  let syncToken: string | undefined;
+  let syncToken: string | undefined = sinceSyncToken;
   let moreComing = true;
 
   while (moreComing) {

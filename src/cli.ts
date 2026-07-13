@@ -1,5 +1,6 @@
 import { checkAuthentication } from "./cloudkit/setupClient.js";
 import { runClone } from "./commands/clone.js";
+import { runPull } from "./commands/pull.js";
 import { loadSession } from "./session.js";
 
 async function verifyAuth(): Promise<void> {
@@ -28,6 +29,12 @@ async function clone(targetDirArg: string | undefined): Promise<void> {
   await runClone(session, targetDirArg);
 }
 
+async function pull(targetDirArg: string | undefined): Promise<void> {
+  const targetDir = targetDirArg ?? ".";
+  const session = await loadSession();
+  await runPull(session, targetDir);
+}
+
 async function main(): Promise<void> {
   const [, , command, ...rest] = process.argv;
 
@@ -38,12 +45,16 @@ async function main(): Promise<void> {
     case "clone":
       await clone(rest[0]);
       return;
+    case "pull":
+      await pull(rest[0]);
+      return;
     default:
       console.error(
         "Usage: icloud-notes-sync <command>\n\n" +
           "Commands:\n" +
-          "  verify-auth        Check whether the stored session is authenticated\n" +
-          "  clone <directory>  Fetch all Notes into a fresh local directory",
+          "  verify-auth          Check whether the stored session is authenticated\n" +
+          "  clone <directory>    Fetch all Notes into a fresh local directory\n" +
+          "  pull [directory]     Fetch changes since the last clone/pull (defaults to the current directory)",
       );
       process.exitCode = 1;
   }

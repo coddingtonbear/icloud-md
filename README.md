@@ -89,8 +89,24 @@ zone, decodes plain-text note bodies, and writes one file per note into the
 target directory, skipping notes with attachments, notes in Trash, and
 anything that fails to decode. It also writes `.icloud-notes-sync/state.json`
 in the target directory (per-note record name → file/changeTag/modification
-date, plus the zone's syncToken) as the foundation for `pull`'s incremental
-fetch and change detection.
+date/content hash, plus the zone's syncToken) as the foundation for `pull`'s
+incremental fetch and change detection.
+
+`npm run cli -- pull [directory]` (defaults to the current directory) is also
+implemented: it fetches only what changed since the stored syncToken, and
+before touching any tracked file, compares its current content hash against
+what was last written. A note that changed both remotely and locally is
+reported as a conflict and left untouched rather than overwritten either
+direction - same for a note deleted remotely while locally edited.
+
+**A note on session lifetime:** an imported session doesn't just expire on
+some fixed timer - if the browser tab used for the HAR export is still open,
+its background keep-alive heartbeat calls `/setup/ws/1/validate` every 14
+minutes and rotates the session's bearer token (`X-APPLE-WEBAUTH-TOKEN`) each
+time, invalidating whatever value was imported. In practice this means:
+export → import → use, promptly, each time. Real SRP + 2FA login will fix
+this properly by letting the tool drive its own refresh heartbeat instead of
+inheriting a browser tab's.
 
 ## Commands
 
@@ -100,12 +116,13 @@ words are already the most discoverable choice for what each one does:
 
 - **`clone <directory>`** *(implemented)* — full initial export: fetch every
   note and write it into a fresh directory, alongside sync state.
-- **`pull`** *(not yet implemented)* — run inside a cloned directory;
-  fetches whatever changed remotely since the last sync (using the stored
-  `syncToken`) and updates local files accordingly. Named `pull`, not
-  `fetch`, because there's no separate remote-tracking ref to update
-  first — it goes straight to the working directory, same as `git pull`
-  without a merge step.
+- **`pull [directory]`** *(implemented)* — run inside (or pointed at) a
+  cloned directory; fetches whatever changed remotely since the last sync
+  (using the stored `syncToken`) and updates local files accordingly, or
+  reports a conflict instead of overwriting a note that also changed
+  locally. Named `pull`, not `fetch`, because there's no separate
+  remote-tracking ref to update first — it goes straight to the working
+  directory, same as `git pull` without a merge step.
 - **`push`** *(not yet implemented)* — send local edits back up. Refuses to
   push a note whose remote `recordChangeTag` has moved since the last
   `clone`/`pull` baseline, surfacing that as a conflict instead of
