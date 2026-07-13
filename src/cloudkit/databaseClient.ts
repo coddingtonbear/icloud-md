@@ -1,4 +1,5 @@
 import type { IcloudSession } from "../session.js";
+import { loggedFetch } from "../debugLog.js";
 
 export interface CloudKitFieldValue {
   value: unknown;
@@ -106,7 +107,8 @@ export async function fetchAllNoteRecords(
       dsid,
     });
 
-    const response = await fetch(
+    const response = await loggedFetch(
+      "fetchAllNoteRecords:changes/zone",
       `${ckDatabaseHost}/database/1/com.apple.notes/production/private/changes/zone?${params.toString()}`,
       {
         method: "POST",

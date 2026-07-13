@@ -43,8 +43,13 @@ https://p<N>-ckdatabasews.icloud.com/database/1/com.apple.notes/production/priva
 using the same request shapes as CloudKit JS (`records/query`,
 `records/lookup`, `records/modify`, `changes/zone`, with a `syncToken` /
 `moreComing` model for incremental sync). Authentication is the standard
-Apple ID web login flow (SRP + 2FA against `idmsa.apple.com`), the same one
-projects like `pyicloud` have already documented.
+Apple ID web login flow: SRP-6a (a nonstandard "GSA" variant, via the
+[`@foxt/js-srp`](https://github.com/foxt/js-srp-gsa) package) plus 2FA
+against `idmsa.apple.com`. `pyicloud`, despite being the usual reference for
+this kind of project, turns out not to implement SRP at all (it uses a
+legacy plaintext `/signin` call); the SRP flow implemented here instead
+follows [`icloud-photos-sync`](https://github.com/steilerDev/icloud-photos-sync),
+which does.
 
 Note title and body are stored in fields named things like `TitleEncrypted`
 and `TextDataEncrypted`. Despite the name, in accounts *without* Advanced
@@ -60,29 +65,43 @@ read — decoding has to try both.
 
 ## Current status
 
-Phase 0 is underway. The full SRP + 2FA login flow isn't implemented yet, but
-there's a working feedback loop for everything downstream of login:
+Phase 0 is mostly done. `npm run cli -- login` performs a real Apple ID
+login against `idmsa.apple.com` (SRP-6a + trusted-device push 2FA) and
+writes `~/.config/icloud-notes-sync/session.local.json` directly — no
+browser/HAR step required for the common case. The session (and a
+request/response debug log - see below) is shared across every vault, not
+scoped to whichever directory the CLI happens to be invoked from: `login`
+once, then any number of `clone`/`pull` targets reuse the same session.
+This only supports one Apple ID at a time:
 
-1. Export a HAR of an authenticated `www.icloud.com` session from Chrome
-   DevTools' Network panel, with **"Allow to generate HAR with sensitive
-   data"** enabled (gear icon) — cookies are stripped from HAR exports by
-   default, and we need them here.
-2. `npm run import-har -- <path-to-file.har>` extracts a session (cookies +
-   client identifiers) into `.auth/session.local.json` (gitignored, mode
-   `600`). It deliberately takes the Cookie header from a single request —
-   the last one in the file with one — rather than merging cookies across
-   the whole capture, since a capture can span more than one login session
-   and blending tokens across sessions produces an invalid combination.
-3. `npm run cli -- verify-auth` calls the same `/setup/ws/1/validate`
+1. `npm run cli -- login` prompts for your Apple ID and password (password
+   entry is silent — no echo, no asterisks, same as `sudo`).
+2. If your account needs 2FA, a code is pushed to your trusted devices
+   automatically and the command blocks on stdin for it. Trusted-device push
+   is the **only** 2FA method implemented — if your account uses SMS/phone
+   verification instead (or the server does something else unrecognized),
+   `login` fails with a clear error rather than hanging or crashing, and
+   asks you to file a GitHub issue so that path can be added.
+3. On success, a trust token is saved alongside the session. Re-running
+   `login` while that trust token is still valid skips the 2FA prompt
+   entirely (the server recognizes the previously-trusted login).
+4. `npm run cli -- verify-auth` calls the same `/setup/ws/1/validate`
    endpoint the web client calls on page load, using that session. Success
-   confirms the cookies are valid and prints the account's `dsid` and the
+   confirms the session is valid and prints the account's `dsid` and the
    partition-specific CloudKit host (e.g. `p43-ckdatabasews.icloud.com`)
    that all Notes calls need.
 
-This is enough to build and test the read/write CloudKit client work in
-Phases 1–3 against a real account without having to fight the login flow on
-every iteration. Real SRP + 2FA login will replace the HAR-import step once
-the rest of the pipeline is proven out.
+The old HAR-import bootstrap (`npm run import-har -- <path-to-file.har>`,
+extracting cookies from a Chrome DevTools export) still exists as a fallback
+— useful mainly for accounts hitting the SMS/phone-2FA gap above, or for
+debugging against a known-good browser session — but `login` is now the
+primary path.
+
+**Known limitation:** there's no reliable signal from the server that
+distinguishes "trusted-device 2FA" from "phone-only 2FA" *before* prompting
+for a code — a phone-only account will still be prompted for a code that
+never arrives, and will only see the "unsupported, please file an issue"
+error once whatever's typed gets rejected as unexpected, not before.
 
 `npm run cli -- clone <directory>` is implemented: it walks the whole Notes
 zone, decodes plain-text note bodies, and writes one file per note into the
@@ -107,14 +126,17 @@ note deleted remotely while locally edited gets the same treatment, merged
 against an empty remote so the markers show exactly what your local edits
 were protecting.
 
-**A note on session lifetime:** an imported session doesn't just expire on
-some fixed timer - if the browser tab used for the HAR export is still open,
-its background keep-alive heartbeat calls `/setup/ws/1/validate` every 14
-minutes and rotates the session's bearer token (`X-APPLE-WEBAUTH-TOKEN`) each
-time, invalidating whatever value was imported. In practice this means:
-export → import → use, promptly, each time. Real SRP + 2FA login will fix
-this properly by letting the tool drive its own refresh heartbeat instead of
-inheriting a browser tab's.
+**A note on session lifetime:** a HAR-imported session's short lifespan was
+caused by racing a *browser tab's* own background heartbeat — the tab calls
+`/setup/ws/1/validate` every 14 minutes and rotates the session's bearer
+token (`X-APPLE-WEBAUTH-TOKEN`) each time, invalidating whatever value was
+snapshotted into the HAR. A session minted by `login` isn't shared with any
+browser tab, so it isn't racing against that heartbeat. Whether it can still
+go stale from long idle periods independent of that heartbeat is still an
+open question (see the project's dev notes) — this tool doesn't yet drive
+its own periodic `/validate` refresh, so if `verify-auth` ever reports a
+stale session, re-running `login` (fast, since the trust token usually skips
+2FA) is the fallback.
 
 ## Commands
 
@@ -122,6 +144,10 @@ Deliberately reusing git's own vocabulary rather than inventing new terms,
 since the tool is explicitly modeled on git's fetch/push workflow and these
 words are already the most discoverable choice for what each one does:
 
+- **`login`** *(implemented, trusted-device 2FA only)* — sign in with your
+  Apple ID and write `~/.config/icloud-notes-sync/session.local.json`,
+  shared by every vault. Not git vocabulary, but there's no `git`
+  equivalent to steal a name from here.
 - **`clone <directory>`** *(implemented)* — full initial export: fetch every
   note and write it into a fresh directory, alongside sync state.
 - **`pull [directory]`** *(implemented)* — run inside (or pointed at) a
@@ -144,10 +170,12 @@ itself.
 
 ## Phased roadmap
 
-**Phase 0 — Foundation.** Authentication (SRP + 2FA), session/cookie
+**Phase 0 — Foundation.** *(mostly done)* Authentication (SRP + 2FA,
+trusted-device push implemented, SMS/phone not yet), session/cookie
 handling, and a thin typed client for the CloudKit private database web
 service. No note logic yet, just "can we reliably make authenticated
-requests."
+requests." Remaining: SMS/phone-based 2FA, and a self-driven `/validate`
+refresh heartbeat for long-running sessions.
 
 **Phase 1 — Read-only fetch.** Walk the Notes zone via `changes/zone`,
 decode the note protobuf format for title/body text, and write notes out as

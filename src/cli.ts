@@ -1,5 +1,6 @@
 import { checkAuthentication } from "./cloudkit/setupClient.js";
 import { runClone } from "./commands/clone.js";
+import { runLogin } from "./commands/login.js";
 import { runPull } from "./commands/pull.js";
 import { loadSession } from "./session.js";
 
@@ -35,10 +36,17 @@ async function pull(targetDirArg: string | undefined): Promise<void> {
   await runPull(session, targetDir);
 }
 
+async function login(): Promise<void> {
+  await runLogin();
+}
+
 async function main(): Promise<void> {
   const [, , command, ...rest] = process.argv;
 
   switch (command) {
+    case "login":
+      await login();
+      return;
     case "verify-auth":
       await verifyAuth();
       return;
@@ -52,9 +60,10 @@ async function main(): Promise<void> {
       console.error(
         "Usage: icloud-notes-sync <command>\n\n" +
           "Commands:\n" +
-          "  verify-auth          Check whether the stored session is authenticated\n" +
-          "  clone <directory>    Fetch all Notes into a fresh local directory\n" +
-          "  pull [directory]     Fetch changes since the last clone/pull (defaults to the current directory)",
+          "  login                 Sign in with your Apple ID (SRP + trusted-device 2FA); shared across all vaults\n" +
+          "  verify-auth           Check whether the stored session is authenticated\n" +
+          "  clone <directory>     Fetch all Notes into a fresh local directory\n" +
+          "  pull [directory]      Fetch changes since the last clone/pull (defaults to the current directory)",
       );
       process.exitCode = 1;
   }

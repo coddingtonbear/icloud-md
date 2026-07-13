@@ -1,5 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { DEFAULT_SESSION_PATH, writeSessionFile } from "../session.js";
 
 interface HarHeader {
   name: string;
@@ -94,26 +95,15 @@ async function main(): Promise<void> {
 
   const cookieCount = cookie.split(";").filter((pair) => pair.trim().length > 0).length;
 
-  const outDir = path.join(process.cwd(), ".auth");
-  await mkdir(outDir, { recursive: true, mode: 0o700 });
-  const outPath = path.join(outDir, "session.local.json");
-  await writeFile(
-    outPath,
-    JSON.stringify(
-      {
-        cookie,
-        clientId,
-        clientBuildNumber,
-        clientMasteringNumber,
-        capturedAt: new Date().toISOString(),
-      },
-      null,
-      2,
-    ) + "\n",
-    { mode: 0o600 },
-  );
+  await writeSessionFile({
+    cookie,
+    clientId,
+    clientBuildNumber,
+    clientMasteringNumber,
+    capturedAt: new Date().toISOString(),
+  });
 
-  console.log(`Wrote ${cookieCount} cookies to ${outPath}`);
+  console.log(`Wrote ${cookieCount} cookies to ${DEFAULT_SESSION_PATH}`);
 }
 
 function asHarFile(value: unknown, harPath: string): HarFile {

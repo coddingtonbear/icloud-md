@@ -1,4 +1,5 @@
 import type { IcloudSession } from "../session.js";
+import { loggedFetch } from "../debugLog.js";
 
 const SETUP_HOST = "https://setup.icloud.com";
 
@@ -34,7 +35,7 @@ export async function checkAuthentication(session: IcloudSession, dsid?: string)
     params.set("dsid", dsid);
   }
 
-  const response = await fetch(`${SETUP_HOST}/setup/ws/1/validate?${params.toString()}`, {
+  const response = await loggedFetch("checkAuthentication", `${SETUP_HOST}/setup/ws/1/validate?${params.toString()}`, {
     method: "POST",
     headers: {
       Cookie: session.cookie,
