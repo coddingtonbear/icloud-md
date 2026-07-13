@@ -4,7 +4,7 @@ import { checkAuthentication } from "../cloudkit/setupClient.js";
 import { fetchAllNoteRecords } from "../cloudkit/databaseClient.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { noteFileName } from "../notes/filename.js";
-import { hashNoteContent } from "../notes/contentHash.js";
+import { writeBaseCopy } from "../notes/baseCopy.js";
 import { writeCloneState, type CloneState } from "../notes/cloneState.js";
 import type { IcloudSession } from "../session.js";
 
@@ -58,6 +58,7 @@ export async function runClone(session: IcloudSession, targetDir: string): Promi
     usedFileNames.add(fileName);
 
     await writeFile(path.join(targetDir, fileName), decoded.bodyText, "utf-8");
+    await writeBaseCopy(targetDir, record.recordName, decoded.bodyText);
     summary.written += 1;
 
     const modificationField = record.fields.ModificationDate;
@@ -67,7 +68,6 @@ export async function runClone(session: IcloudSession, targetDir: string): Promi
       file: fileName,
       recordChangeTag: record.recordChangeTag ?? "",
       modificationDate,
-      contentHash: hashNoteContent(decoded.bodyText),
     };
   }
 

@@ -5,8 +5,6 @@ export interface CloneStateNoteEntry {
   file: string;
   recordChangeTag: string;
   modificationDate: number;
-  /** sha256 of the file's content as of the last write, used to detect local hand-edits before overwriting or deleting. */
-  contentHash: string;
 }
 
 export interface CloneState {
@@ -53,8 +51,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
       !isRecord(entry) ||
       typeof entry.file !== "string" ||
       typeof entry.recordChangeTag !== "string" ||
-      typeof entry.modificationDate !== "number" ||
-      typeof entry.contentHash !== "string"
+      typeof entry.modificationDate !== "number"
     ) {
       throw new Error(`${filePath} has a malformed entry for note "${recordName}".`);
     }
@@ -62,7 +59,6 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
       file: entry.file,
       recordChangeTag: entry.recordChangeTag,
       modificationDate: entry.modificationDate,
-      contentHash: entry.contentHash,
     };
   }
 

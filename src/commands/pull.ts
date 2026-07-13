@@ -1,16 +1,18 @@
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { checkAuthentication } from "../cloudkit/setupClient.js";
-import { fetchAllNoteRecords } from "../cloudkit/databaseClient.js";
+import { fetchAllNoteRecords, type CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { noteFileName } from "../notes/filename.js";
-import { hashNoteContent } from "../notes/contentHash.js";
+import { mergeNoteVersions } from "../notes/mergeConflict.js";
+import { readBaseCopy, removeBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
 import type { IcloudSession } from "../session.js";
 
 interface PullSummary {
   added: number;
   updated: number;
+  merged: number;
   removed: number;
   skippedNewUnsyncable: number;
   droppedUnsyncable: number;
@@ -18,10 +20,10 @@ interface PullSummary {
 }
 
 /**
- * Whether a tracked note's local file still matches what we last wrote.
- * "missing" is distinguished from "modified" so callers can treat a
- * vanished file (nothing to lose) differently from a hand-edited one
- * (something to protect).
+ * Whether a tracked note's local file still matches its base copy (the last
+ * known synced/merged content). "missing" is distinguished from "modified"
+ * so callers can treat a vanished file (nothing to lose) differently from a
+ * hand-edited one (something to protect via a real 3-way merge).
  */
 type LocalFileState = "clean" | "modified" | "missing";
 
@@ -48,6 +50,7 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
   const summary: PullSummary = {
     added: 0,
     updated: 0,
+    merged: 0,
     removed: 0,
     skippedNewUnsyncable: 0,
     droppedUnsyncable: 0,
@@ -66,17 +69,7 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
       if (!existing) {
         continue;
       }
-      const local = await localFileState(targetDir, existing);
-      if (local === "modified") {
-        summary.conflicts.push(`${existing.file}: deleted remotely, but has local edits - left in place, untracked`);
-        delete notes[record.recordName];
-        continue;
-      }
-      if (local === "clean") {
-        await safeUnlink(path.join(targetDir, existing.file));
-      }
-      delete notes[record.recordName];
-      summary.removed += 1;
+      await handleRemoteDeletion(targetDir, record, existing, notes, summary);
       continue;
     }
 
@@ -85,7 +78,7 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
         summary.skippedNewUnsyncable += 1;
         continue;
       }
-      const local = await localFileState(targetDir, existing);
+      const local = await localFileState(targetDir, existing, record.recordName);
       if (local === "modified") {
         summary.conflicts.push(
           `${existing.file}: became unsyncable remotely (${decoded.reason}), and has local edits - left in place, untracked`,
@@ -99,6 +92,7 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
         }
       }
       delete notes[record.recordName];
+      await removeBaseCopy(targetDir, record.recordName);
       continue;
     }
 
@@ -111,52 +105,113 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
       usedFileNames.add(fileName);
 
       await writeFile(path.join(targetDir, fileName), decoded.bodyText, "utf-8");
+      await writeBaseCopy(targetDir, record.recordName, decoded.bodyText);
       notes[record.recordName] = {
         file: fileName,
         recordChangeTag: record.recordChangeTag ?? "",
         modificationDate: modificationDateOf(record),
-        contentHash: hashNoteContent(decoded.bodyText),
       };
       summary.added += 1;
       continue;
     }
 
-    const local = await localFileState(targetDir, existing);
-    if (local === "modified") {
-      summary.conflicts.push(`${existing.file}: changed both locally and remotely - left local copy untouched`);
+    const local = await localFileState(targetDir, existing, record.recordName);
+    if (local === "clean" || local === "missing") {
+      await writeFile(path.join(targetDir, existing.file), decoded.bodyText, "utf-8");
+      await writeBaseCopy(targetDir, record.recordName, decoded.bodyText);
+      if (local === "missing") {
+        console.log(`Recreated ${existing.file} (was missing locally)`);
+      }
+      notes[record.recordName] = {
+        ...existing,
+        recordChangeTag: record.recordChangeTag ?? existing.recordChangeTag,
+        modificationDate: modificationDateOf(record),
+      };
+      summary.updated += 1;
       continue;
     }
 
-    await writeFile(path.join(targetDir, existing.file), decoded.bodyText, "utf-8");
-    if (local === "missing") {
-      console.log(`Recreated ${existing.file} (was missing locally)`);
-    }
+    // local === "modified": real 3-way merge against the base copy.
+    const base = (await readBaseCopy(targetDir, record.recordName)) ?? "";
+    const localContent = await readFile(path.join(targetDir, existing.file), "utf-8");
+    const outcome = mergeNoteVersions(base, localContent, decoded.bodyText);
+
+    await writeFile(path.join(targetDir, existing.file), outcome.text, "utf-8");
     notes[record.recordName] = {
       ...existing,
       recordChangeTag: record.recordChangeTag ?? existing.recordChangeTag,
       modificationDate: modificationDateOf(record),
-      contentHash: hashNoteContent(decoded.bodyText),
     };
-    summary.updated += 1;
+
+    if (outcome.hasConflict) {
+      summary.conflicts.push(`${existing.file}: merged with conflict markers - resolve manually`);
+      // Base copy deliberately NOT advanced: it stays the merge ancestor
+      // until the conflict markers are actually resolved, so the next pull
+      // (if this note changes again) merges against the right common point.
+    } else {
+      await writeBaseCopy(targetDir, record.recordName, outcome.text);
+      summary.merged += 1;
+    }
   }
 
   await writeCloneState(targetDir, { syncToken, notes });
 
-  console.log(`Pulled into ${targetDir}: ${summary.added} added, ${summary.updated} updated, ${summary.removed} removed`);
+  console.log(
+    `Pulled into ${targetDir}: ${summary.added} added, ${summary.updated} updated, ${summary.merged} auto-merged, ` +
+      `${summary.removed} removed`,
+  );
   if (summary.skippedNewUnsyncable > 0 || summary.droppedUnsyncable > 0) {
     console.log(
-      `${summary.skippedNewUnsyncable} new unsyncable note(s) skipped, ${summary.droppedUnsyncable} note(s) dropped from tracking (no longer syncable)`,
+      `${summary.skippedNewUnsyncable} new unsyncable note(s) skipped, ${summary.droppedUnsyncable} note(s) ` +
+        "dropped from tracking (no longer syncable)",
     );
   }
   if (summary.conflicts.length > 0) {
-    console.log(`${summary.conflicts.length} conflict(s) - left untouched, resolve manually:`);
+    console.log(`${summary.conflicts.length} conflict(s) - resolve manually:`);
     for (const conflict of summary.conflicts) {
       console.log(`  - ${conflict}`);
     }
   }
 }
 
-async function localFileState(targetDir: string, entry: CloneStateNoteEntry): Promise<LocalFileState> {
+async function handleRemoteDeletion(
+  targetDir: string,
+  record: CloudKitRecord,
+  existing: CloneStateNoteEntry,
+  notes: CloneState["notes"],
+  summary: PullSummary,
+): Promise<void> {
+  const local = await localFileState(targetDir, existing, record.recordName);
+
+  if (local !== "modified") {
+    // "clean" or "missing": nothing local worth protecting.
+    if (local === "clean") {
+      await safeUnlink(path.join(targetDir, existing.file));
+    }
+    delete notes[record.recordName];
+    await removeBaseCopy(targetDir, record.recordName);
+    summary.removed += 1;
+    return;
+  }
+
+  // A delete/modify conflict is never auto-resolved either direction - merge
+  // against an empty remote so the markers show exactly what local kept.
+  const base = (await readBaseCopy(targetDir, record.recordName)) ?? "";
+  const localContent = await readFile(path.join(targetDir, existing.file), "utf-8");
+  const outcome = mergeNoteVersions(base, localContent, "");
+
+  await writeFile(path.join(targetDir, existing.file), outcome.text, "utf-8");
+  summary.conflicts.push(`${existing.file}: deleted remotely, but has local edits - merged with conflict markers, resolve manually`);
+  // Keep tracking (state entry + base copy) so this doesn't silently drop
+  // out of state.json; there's no new recordChangeTag to advance to since
+  // the record no longer exists remotely.
+}
+
+async function localFileState(
+  targetDir: string,
+  entry: CloneStateNoteEntry,
+  recordName: string,
+): Promise<LocalFileState> {
   let content: string;
   try {
     content = await readFile(path.join(targetDir, entry.file), "utf-8");
@@ -166,7 +221,14 @@ async function localFileState(targetDir: string, entry: CloneStateNoteEntry): Pr
     }
     throw cause;
   }
-  return hashNoteContent(content) === entry.contentHash ? "clean" : "modified";
+
+  const base = await readBaseCopy(targetDir, recordName);
+  if (base === undefined) {
+    // No base copy on disk for a tracked note shouldn't normally happen, but
+    // if it does, we can't verify cleanliness - treat conservatively.
+    return "modified";
+  }
+  return content === base ? "clean" : "modified";
 }
 
 async function safeUnlink(filePath: string): Promise<void> {
@@ -179,7 +241,7 @@ async function safeUnlink(filePath: string): Promise<void> {
   }
 }
 
-function modificationDateOf(record: { fields: Record<string, { value: unknown } | undefined> }): number {
+function modificationDateOf(record: CloudKitRecord): number {
   const field = record.fields.ModificationDate;
   return typeof field?.value === "number" ? field.value : 0;
 }

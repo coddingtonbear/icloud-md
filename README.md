@@ -88,16 +88,24 @@ the rest of the pipeline is proven out.
 zone, decodes plain-text note bodies, and writes one file per note into the
 target directory, skipping notes with attachments, notes in Trash, and
 anything that fails to decode. It also writes `.icloud-notes-sync/state.json`
-in the target directory (per-note record name → file/changeTag/modification
-date/content hash, plus the zone's syncToken) as the foundation for `pull`'s
-incremental fetch and change detection.
+(per-note record name → file/changeTag/modification date, plus the zone's
+syncToken) and a pristine "base copy" of each note's text under
+`.icloud-notes-sync/base/` - the merge ancestor `pull` needs for real 3-way
+merging.
 
 `npm run cli -- pull [directory]` (defaults to the current directory) is also
 implemented: it fetches only what changed since the stored syncToken, and
-before touching any tracked file, compares its current content hash against
-what was last written. A note that changed both remotely and locally is
-reported as a conflict and left untouched rather than overwritten either
-direction - same for a note deleted remotely while locally edited.
+for any tracked note whose local file no longer matches its base copy, runs
+a real 3-way (diff3) merge - base vs. local vs. new remote - via
+[node-diff3](https://github.com/bhousel/node-diff3). If local and remote
+touched different parts of the note, it merges automatically with no
+markers at all. If they touched the same region, it writes standard
+git-style diff3 conflict markers (`<<<<<<< local` / `||||||| base` /
+`=======` / `>>>>>>> remote`) directly into the file for you to resolve by
+hand - most editors (VS Code included) already understand this format. A
+note deleted remotely while locally edited gets the same treatment, merged
+against an empty remote so the markers show exactly what your local edits
+were protecting.
 
 **A note on session lifetime:** an imported session doesn't just expire on
 some fixed timer - if the browser tab used for the HAR export is still open,
@@ -174,8 +182,11 @@ a standalone CLI.
 
 - Real-time/continuous sync — this is a deliberate fetch/push tool, not a
   background daemon.
-- Full CRDT-level merge of concurrent edits — conflicts are surfaced, not
-  automatically resolved, at least through the phases above.
+- Full CRDT-level merge of concurrent edits — `pull` does a real line-level
+  diff3 merge (auto-merging non-overlapping changes, writing conflict
+  markers for overlapping ones), but that's a text-diffing tool, not an
+  understanding of Notes' own CRDT structure. Overlapping conflicts are
+  surfaced for you to resolve, never auto-resolved.
 - Perfect fidelity for rich formatting (tables, scanned documents, drawings)
   — see "safety over completeness" above.
 - Shared notes / collaboration features — private notes only until the core
