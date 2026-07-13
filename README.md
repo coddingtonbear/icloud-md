@@ -51,10 +51,9 @@ cookies are harvested from the browser and the window closes. This keeps
 the reverse-engineered surface down to the *result* of login (a cookie jar
 plus client identifiers) rather than Apple's login protocol itself, which
 they actively churn (their current web client uses a device-attested
-`bridge/*` 2FA flow that plain HTTP can't replicate). A direct SRP-6a
-login (`login --srp`, via [`@foxt/js-srp`](https://github.com/foxt/js-srp-gsa),
-following [`icloud-photos-sync`](https://github.com/steilerDev/icloud-photos-sync))
-remains as an opt-in fallback for accounts that don't need interactive 2FA.
+`bridge/*` 2FA flow that plain HTTP can't replicate — a direct SRP-6a
+login was implemented here and later removed for exactly that reason; see
+git history if it's ever worth resurrecting).
 
 Note title and body are stored in fields named things like `TitleEncrypted`
 and `TextDataEncrypted`. Despite the name, in accounts *without* Advanced
@@ -96,19 +95,11 @@ the same session. This only supports one Apple ID at a time:
    partition-specific CloudKit host (e.g. `p43-ckdatabasews.icloud.com`)
    that all Notes calls need.
 
-Two fallback bootstrap paths also exist:
-
-- `npm run cli -- login --srp` — a direct SRP-6a login against
-  `idmsa.apple.com`, no browser required. Only works for accounts that
-  don't need interactive 2FA (or that hold a still-valid trust token from
-  an earlier SRP login): the trusted-device 2FA flow Apple's current web
-  client uses is device-attested and can't be replicated over plain HTTP.
-  Useful for headless environments — though copying
-  `session.local.json` from a machine with a display also works, since
-  the session file is host-independent.
-- `npm run import-har -- <path-to-file.har>` — extract cookies from a
-  Chrome DevTools export; mainly for debugging against a known-good
-  browser session.
+One fallback bootstrap path also exists: `npm run import-har --
+<path-to-file.har>` extracts cookies from a Chrome DevTools export, mainly
+for debugging against a known-good browser session. (For headless
+environments, run `login` on a machine with a display and copy
+`session.local.json` over — the session file is host-independent.)
 
 `npm run cli -- clone <directory>` is implemented: it walks the whole Notes
 zone, decodes plain-text note bodies, and writes one file per note into the
@@ -154,9 +145,8 @@ words are already the most discoverable choice for what each one does:
 - **`login`** *(implemented)* — sign in via a browser window (Apple's own
   pages handle password/2FA) and write
   `~/.config/icloud-notes-sync/session.local.json`, shared by every vault.
-  `--srp` does a direct no-browser SRP login instead (non-interactive-2FA
-  accounts only). Not git vocabulary, but there's no `git` equivalent to
-  steal a name from here.
+  Not git vocabulary, but there's no `git` equivalent to steal a name from
+  here.
 - **`clone <directory>`** *(implemented)* — full initial export: fetch every
   note and write it into a fresh directory, alongside sync state.
 - **`pull [directory]`** *(implemented)* — run inside (or pointed at) a
@@ -180,11 +170,10 @@ itself.
 ## Phased roadmap
 
 **Phase 0 — Foundation.** *(mostly done)* Authentication (browser-driven
-login as the primary path, direct SRP as a no-2FA fallback), session/cookie
-handling, and a thin typed client for the CloudKit private database web
-service. No note logic yet, just "can we reliably make authenticated
-requests." Remaining: a self-driven `/validate` refresh heartbeat for
-long-running sessions.
+login), session/cookie handling, and a thin typed client for the CloudKit
+private database web service. No note logic yet, just "can we reliably
+make authenticated requests." Remaining: a self-driven `/validate` refresh
+heartbeat for long-running sessions.
 
 **Phase 1 — Read-only fetch.** Walk the Notes zone via `changes/zone`,
 decode the note protobuf format for title/body text, and write notes out as

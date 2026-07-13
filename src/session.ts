@@ -9,8 +9,6 @@ export interface IcloudSession {
   clientBuildNumber: string;
   clientMasteringNumber: string;
   capturedAt: string;
-  /** Present after a real `login`; absent for HAR-imported sessions. Lets future logins skip 2FA. */
-  trustToken?: string;
 }
 
 /**
@@ -57,14 +55,11 @@ function assertIcloudSession(value: unknown, sessionPath: string): IcloudSession
     }
   }
 
-  const trustToken = typeof record.trustToken === "string" && record.trustToken !== "" ? record.trustToken : undefined;
-
   return {
     cookie: record.cookie as string,
     clientId: record.clientId as string,
     clientBuildNumber: record.clientBuildNumber as string,
     clientMasteringNumber: record.clientMasteringNumber as string,
     capturedAt: record.capturedAt as string,
-    ...(trustToken !== undefined ? { trustToken } : {}),
   };
 }

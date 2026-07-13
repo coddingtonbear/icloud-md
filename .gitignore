@@ -7,3 +7,6 @@ dist/
 *.har
 *.local.json
 *.local.*
+
+# Cloned test vaults (real note content) - never commit these.
+notes/

@@ -16,15 +16,13 @@ import type { IcloudSession } from "../session.js";
  * pages execute whatever this month's login flow is, and all we depend on is
  * the shape of the *result* (a cookie jar for .icloud.com plus the client
  * query params), which is the same thing the HAR-import path already proved
- * sufficient. The direct SRP flow in login.ts remains as an opt-in fallback
- * for non-2FA/already-trusted accounts.
+ * sufficient.
  */
 
 /**
  * The login browser's own persistent state (cookies, local storage, and the
  * device trust Apple grants after a completed 2FA). Reusing one profile means
- * repeat logins look like a returning browser and typically skip 2FA entirely -
- * the browser profile plays the role the SRP flow's trustToken plays.
+ * repeat logins look like a returning browser and typically skip 2FA entirely.
  */
 export const DEFAULT_BROWSER_PROFILE_DIR = path.join(os.homedir(), ".config", "icloud-notes-sync", "browser-profile");
 
@@ -84,8 +82,8 @@ export function extractClientParams(url: string): ClientParams {
  * Assembles an IcloudSession from a captured cookie jar and the setup call's
  * URL. Client params come from the observed request itself (so they track
  * whatever web-client build actually just logged in) with the static defaults
- * as fallback. No trustToken: for browser logins, the persistent profile
- * carries the trust instead.
+ * as fallback. Device trust lives in the persistent browser profile, not the
+ * session file.
  */
 export function sessionFromBrowserCapture(
   cookies: readonly CapturedCookie[],
