@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { chromium, type BrowserContext } from "playwright";
+import { chromium, type BrowserContext, type Page } from "playwright";
 import { DEFAULT_CLIENT_BUILD_NUMBER, DEFAULT_CLIENT_MASTERING_NUMBER } from "./clientConstants.js";
 import type { IcloudSession } from "../session.js";
 
@@ -129,6 +129,46 @@ export interface BrowserLoginOptions {
 }
 
 /**
+ * Best-effort: tick Apple's "Keep me signed in" checkbox whenever it appears
+ * in the sign-in iframe, so the completed login is an extended session
+ * (`extended_login: true`). Without it, the browser profile's own session
+ * expires on the same short clock as our captured cookies - and then a
+ * headless relaunch of the profile just lands on the logged-out landing
+ * page with a password prompt, which is exactly what makes silent 421
+ * recovery impossible (probed live, 2026-07-13 dev notes). Polling loop
+ * rather than a one-shot wait because the checkbox only exists after the
+ * user advances past the account-name step, and may be re-rendered.
+ */
+function keepMeSignedInWatcher(page: Page, isDone: () => boolean, status: (message: string) => void): Promise<void> {
+  const POLL_INTERVAL_MS = 1_000;
+  let announced = false;
+
+  return (async () => {
+    while (!isDone() && !page.isClosed()) {
+      for (const frame of page.frames()) {
+        if (!frame.url().includes("idmsa.apple.com")) {
+          continue;
+        }
+        try {
+          const checkbox = frame.getByLabel(/keep me signed in/i).first();
+          if ((await checkbox.count()) > 0 && !(await checkbox.isChecked())) {
+            await checkbox.check({ timeout: 2_000 });
+            if (!announced) {
+              announced = true;
+              status('Ticked "Keep me signed in" so the session survives long idle periods.');
+            }
+          }
+        } catch {
+          // The frame navigated away mid-poll, or the checkbox isn't
+          // interactable right now - never let this kill the login.
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    }
+  })();
+}
+
+/**
  * Opens the login window and resolves with a captured session once sign-in
  * completes. Rejects if the user closes the window first (interactive mode)
  * or if `timeoutMs` elapses (headless mode). The window is always closed
@@ -169,6 +209,15 @@ export async function performBrowserLogin(options: BrowserLoginOptions = {}): Pr
       status("Waiting for sign-in to finish... (close the window to abort)");
     }
 
+    // Runs alongside the wait below; stops on its own once sign-in completes
+    // (or the window closes). Interactive logins only - a headless recovery
+    // relaunch either auto-validates from the profile's session or fails, no
+    // sign-in form is ever completed there.
+    let signInDone = false;
+    const watcher = headless
+      ? Promise.resolve()
+      : keepMeSignedInWatcher(page, () => signInDone, status).catch(() => undefined);
+
     let response;
     try {
       response = await successPromise;
@@ -186,6 +235,8 @@ export async function performBrowserLogin(options: BrowserLoginOptions = {}): Pr
     // wait for the response to fully land, then give the browser a moment to
     // commit them to the jar before snapshotting it.
     await response.finished();
+    signInDone = true;
+    await watcher;
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
     const cookies = await context.cookies();
