@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(npm install *)",
-      "Bash(npm uninstall *)"
+      "Bash(npm uninstall *)",
+      "mcp__obsidian__vault_patch",
+      "Bash(git check-ignore *)"
     ]
   }
 }
