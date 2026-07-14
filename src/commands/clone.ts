@@ -4,9 +4,10 @@ import { checkAuthentication } from "../cloudkit/setupClient.js";
 import { fetchAllNoteRecords, fetchSharedNoteRecords } from "../cloudkit/databaseClient.js";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
-import { noteFileName } from "../notes/filename.js";
+import { noteFileName, uniqueFileName } from "../notes/filename.js";
 import { writeBaseCopy } from "../notes/baseCopy.js";
 import { writeCloneState, type CloneState } from "../notes/cloneState.js";
+import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import type { IcloudSession } from "../session.js";
 
 interface CloneSummary {
@@ -70,13 +71,12 @@ export async function runClone(session: IcloudSession, targetDir: string): Promi
         continue;
       }
 
-      const fileName = noteFileName(decoded.title, record.recordName);
-      if (usedFileNames.has(fileName)) {
-        throw new Error(`Filename collision on "${fileName}" - two different notes produced the same file name.`);
-      }
+      const fileName = uniqueFileName(noteFileName(decoded.title), usedFileNames);
       usedFileNames.add(fileName);
 
-      await writeFile(path.join(targetDir, fileName), decoded.bodyText, "utf-8");
+      const filePath = path.join(targetDir, fileName);
+      await writeFile(filePath, decoded.bodyText, "utf-8");
+      await applyNoteFileTimes(filePath, record);
       await writeBaseCopy(targetDir, record.recordName, decoded.bodyText);
       if (source.sharedZoneOwner) {
         summary.writtenShared += 1;
@@ -84,8 +84,7 @@ export async function runClone(session: IcloudSession, targetDir: string): Promi
         summary.written += 1;
       }
 
-      const modificationField = record.fields.ModificationDate;
-      const modificationDate = typeof modificationField?.value === "number" ? modificationField.value : 0;
+      const modificationDate = modificationDateOf(record);
 
       notes[record.recordName] = {
         file: fileName,

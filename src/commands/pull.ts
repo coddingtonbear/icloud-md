@@ -3,10 +3,11 @@ import path from "node:path";
 import { checkAuthentication } from "../cloudkit/setupClient.js";
 import { fetchAllNoteRecords, fetchSharedNoteRecords, type CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
-import { noteFileName } from "../notes/filename.js";
+import { noteFileName, uniqueFileName } from "../notes/filename.js";
 import { mergeNoteVersions } from "../notes/mergeConflict.js";
 import { readBaseCopy, removeBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
+import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import type { IcloudSession } from "../session.js";
 
 interface PullSummary {
@@ -116,13 +117,12 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
 
       // decoded.status === "ok"
       if (!existing) {
-        const fileName = noteFileName(decoded.title, record.recordName);
-        if (usedFileNames.has(fileName)) {
-          throw new Error(`Filename collision on "${fileName}" while pulling a new note.`);
-        }
+        const fileName = uniqueFileName(noteFileName(decoded.title), usedFileNames);
         usedFileNames.add(fileName);
 
-        await writeFile(path.join(targetDir, fileName), decoded.bodyText, "utf-8");
+        const filePath = path.join(targetDir, fileName);
+        await writeFile(filePath, decoded.bodyText, "utf-8");
+        await applyNoteFileTimes(filePath, record);
         await writeBaseCopy(targetDir, record.recordName, decoded.bodyText);
         notes[record.recordName] = {
           file: fileName,
@@ -136,7 +136,9 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
 
       const local = await localFileState(targetDir, existing, record.recordName);
       if (local === "clean" || local === "missing") {
-        await writeFile(path.join(targetDir, existing.file), decoded.bodyText, "utf-8");
+        const filePath = path.join(targetDir, existing.file);
+        await writeFile(filePath, decoded.bodyText, "utf-8");
+        await applyNoteFileTimes(filePath, record);
         await writeBaseCopy(targetDir, record.recordName, decoded.bodyText);
         if (local === "missing") {
           console.log(`Recreated ${existing.file} (was missing locally)`);
@@ -296,11 +298,6 @@ async function safeUnlink(filePath: string): Promise<void> {
       throw cause;
     }
   }
-}
-
-function modificationDateOf(record: CloudKitRecord): number {
-  const field = record.fields.ModificationDate;
-  return typeof field?.value === "number" ? field.value : 0;
 }
 
 function isEnoent(err: unknown): boolean {

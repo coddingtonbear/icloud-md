@@ -1,10 +1,13 @@
+import path from "node:path";
+
 /**
- * Derives a stable, human-readable file name for a note. Includes a short
- * suffix from the record's own recordName (a UUID for real "Note" records)
- * so two notes with the same title don't collide and so the file can be
- * traced back to its CloudKit record at a glance.
+ * Derives a human-readable file name for a note from its title alone. The
+ * CloudKit recordName that used to be suffixed onto every file for
+ * uniqueness now lives only in .icloud-notes-sync/state.json (keyed by
+ * recordName, with a `file` pointer back to disk) - see uniqueFileName for
+ * how title collisions are disambiguated instead.
  */
-export function noteFileName(title: string, recordName: string): string {
+export function noteFileName(title: string): string {
   const firstLine = title.split("\n")[0]?.trim() ?? "";
   const slug = firstLine
     .replace(/[\\/:*?"<>|]/g, "")
@@ -13,7 +16,28 @@ export function noteFileName(title: string, recordName: string): string {
     .slice(0, 80);
   const base = slug.length > 0 ? slug : "Untitled";
 
-  const shortId = recordName.replace(/[^A-Za-z0-9]/g, "").slice(0, 8).toUpperCase();
+  return `${base}.md`;
+}
 
-  return `${base} (${shortId}).md`;
+/**
+ * Resolves a candidate file name against names already claimed in this
+ * clone/pull run, appending " 2", " 3", etc. (Finder-style) until it's
+ * unique. Needed now that file names are derived from title alone, so two
+ * notes titled e.g. "New Note" no longer collide.
+ */
+export function uniqueFileName(fileName: string, usedFileNames: ReadonlySet<string>): string {
+  if (!usedFileNames.has(fileName)) {
+    return fileName;
+  }
+
+  const ext = path.extname(fileName);
+  const stem = fileName.slice(0, fileName.length - ext.length);
+
+  let n = 2;
+  let candidate = `${stem} ${n}${ext}`;
+  while (usedFileNames.has(candidate)) {
+    n += 1;
+    candidate = `${stem} ${n}${ext}`;
+  }
+  return candidate;
 }
