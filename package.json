@@ -5,13 +5,12 @@
   "type": "module",
   "description": "Sync Apple Notes to a git-backed local folder via CloudKit's private web services.",
   "bin": {
-    "icloud-notes-sync": "./dist/cli.js"
+    "icloud-notes": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "import-har": "tsx src/scripts/importHar.ts",
-    "cli": "tsx src/cli.ts",
     "test": "tsx --test src/**/*.test.ts"
   },
   "devDependencies": {

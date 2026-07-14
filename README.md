@@ -69,7 +69,7 @@ read — decoding has to try both.
 
 ## Current status
 
-Phase 0 is mostly done. `npm run cli -- login` opens a browser window on
+Phase 0 is mostly done. `icloud-notes login` opens a browser window on
 `www.icloud.com`, waits for you to complete sign-in there (any 2FA variant
 works — Apple's own pages are doing the work), then captures the session
 cookies, verifies them against `/validate`, writes
@@ -79,9 +79,11 @@ every vault, not scoped to whichever directory the CLI happens to be
 invoked from: `login` once, then any number of `clone`/`pull` targets reuse
 the same session. This only supports one Apple ID at a time:
 
-1. One-time setup: `npx playwright install chromium` (the login browser;
-   a one-off ~150 MB download).
-2. `npm run cli -- login` opens the browser window; sign in as you normally
+1. One-time setup: `npm run build && npm link` puts the `icloud-notes`
+   command on your `PATH` (re-run `npm run build` after source changes),
+   then `npx playwright install chromium` fetches the login browser (a
+   one-off ~150 MB download).
+2. `icloud-notes login` opens the browser window; sign in as you normally
    would. The command detects completion on its own, verifies the captured
    session, and closes the window. Closing the window yourself aborts.
 3. The login browser keeps a persistent profile under
@@ -89,7 +91,7 @@ the same session. This only supports one Apple ID at a time:
    sign-in Apple treats it as a trusted, returning browser — later `login`
    runs typically skip 2FA (and may need no interaction at all if the
    profile's own session is still alive).
-4. `npm run cli -- verify-auth` calls the same `/setup/ws/1/validate`
+4. `icloud-notes verify-auth` calls the same `/setup/ws/1/validate`
    endpoint the web client calls on page load, using that session. Success
    confirms the session is valid and prints the account's `dsid` and the
    partition-specific CloudKit host (e.g. `p43-ckdatabasews.icloud.com`)
@@ -101,7 +103,7 @@ for debugging against a known-good browser session. (For headless
 environments, run `login` on a machine with a display and copy
 `session.local.json` over — the session file is host-independent.)
 
-`npm run cli -- clone <directory>` is implemented: it walks the whole Notes
+`icloud-notes clone <directory>` is implemented: it walks the whole Notes
 zone, decodes plain-text note bodies, and writes one file per note into the
 target directory, skipping notes with attachments, notes in Trash, and
 anything that fails to decode. It also writes `.icloud-notes-sync/state.json`
@@ -121,7 +123,7 @@ web client makes when you open a shared note). Shared notes are written
 into the same directory as your own; `state.json` records which sharer's
 zone each one belongs to, plus a per-zone syncToken for incremental `pull`.
 
-`npm run cli -- pull [directory]` (defaults to the current directory) is also
+`icloud-notes pull [directory]` (defaults to the current directory) is also
 implemented: it fetches only what changed since the stored syncToken, and
 for any tracked note whose local file no longer matches its base copy, runs
 a real 3-way (diff3) merge - base vs. local vs. new remote - via

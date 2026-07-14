@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { checkAuthentication } from "./cloudkit/setupClient.js";
 import { runClone } from "./commands/clone.js";
 import { runLogin } from "./commands/login.js";
@@ -22,7 +23,7 @@ async function verifyAuth(): Promise<void> {
 
 async function clone(targetDirArg: string | undefined): Promise<void> {
   if (!targetDirArg) {
-    console.error("Usage: icloud-notes-sync clone <directory>");
+    console.error("Usage: icloud-notes clone <directory>");
     process.exitCode = 1;
     return;
   }
@@ -58,7 +59,7 @@ async function main(): Promise<void> {
       return;
     default:
       console.error(
-        "Usage: icloud-notes-sync <command>\n\n" +
+        "Usage: icloud-notes <command>\n\n" +
           "Commands:\n" +
           "  login                 Sign in via a browser window (Apple's own pages handle 2FA); shared across all vaults\n" +
           "  verify-auth           Check whether the stored session is authenticated\n" +
