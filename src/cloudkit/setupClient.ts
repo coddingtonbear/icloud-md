@@ -68,6 +68,13 @@ export async function checkAuthentication(session: IcloudSession, dsid?: string)
     return { ok: false, status: response.status, error: "Unexpected response shape from /validate (missing dsInfo)" };
   }
 
+  // A partially-authenticated session (password accepted, 2FA still pending)
+  // also answers 200 here - never treat it as signed in, or a login captured
+  // mid-2FA gets written out as if it were a working session.
+  if (body.hsaChallengeRequired === true || body.dsInfo.hsaChallengeRequired === true) {
+    return { ok: false, status: response.status, error: "Session is only partially authenticated (2FA challenge pending)" };
+  }
+
   const dsInfo = body.dsInfo;
   const appleId = typeof dsInfo.appleId === "string" ? dsInfo.appleId : undefined;
   const resolvedDsid = typeof dsInfo.dsid === "string" ? dsInfo.dsid : undefined;

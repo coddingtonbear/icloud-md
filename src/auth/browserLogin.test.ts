@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildIcloudCookieHeader,
   extractClientParams,
+  isFullySignedInBody,
   isIcloudDomain,
   sessionFromBrowserCapture,
   type CapturedCookie,
@@ -85,4 +86,41 @@ test("sessionFromBrowserCapture refuses a jar with no icloud.com cookies at all"
     () => sessionFromBrowserCapture([{ name: "aasp", value: "x", domain: "idmsa.apple.com" }], ACCOUNT_LOGIN_URL),
     /no icloud\.com cookies/,
   );
+});
+
+test("isFullySignedInBody accepts a completed sign-in response", () => {
+  // Shape of the HAR's second (post-2FA) accountLogin: no hsaChallengeRequired.
+  assert.equal(
+    isFullySignedInBody({
+      dsInfo: { appleId: "me@example.com", dsid: "1234", hsaVersion: 2 },
+      webservices: { ckdatabasews: { url: "https://p43-ckdatabasews.icloud.com:443" } },
+    }),
+    true,
+  );
+});
+
+test("isFullySignedInBody rejects the partial pre-2FA accountLogin response", () => {
+  // Shape of the HAR's first accountLogin: HTTP 200, but 2FA still pending.
+  // It even includes ckdatabasews, so the challenge flag is the only tell.
+  assert.equal(
+    isFullySignedInBody({
+      hsaChallengeRequired: true,
+      dsInfo: { appleId: "me@example.com", dsid: "1234", hsaVersion: 2 },
+      webservices: { ckdatabasews: { url: "https://p43-ckdatabasews.icloud.com:443" } },
+    }),
+    false,
+  );
+});
+
+test("isFullySignedInBody rejects a challenge flag nested under dsInfo", () => {
+  assert.equal(
+    isFullySignedInBody({ dsInfo: { appleId: "x", dsid: "1", hsaChallengeRequired: true } }),
+    false,
+  );
+});
+
+test("isFullySignedInBody rejects bodies without account info", () => {
+  assert.equal(isFullySignedInBody(null), false);
+  assert.equal(isFullySignedInBody({}), false);
+  assert.equal(isFullySignedInBody({ success: true }), false);
 });

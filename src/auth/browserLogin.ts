@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { chromium, type BrowserContext, type Page } from "playwright";
+import { chromium, type BrowserContext, type Page, type Response as PlaywrightResponse } from "playwright";
 import { DEFAULT_CLIENT_BUILD_NUMBER, DEFAULT_CLIENT_MASTERING_NUMBER } from "./clientConstants.js";
 import type { IcloudSession } from "../session.js";
 
@@ -31,10 +31,88 @@ const ICLOUD_HOME = "https://www.icloud.com/";
 /**
  * The web client calls /validate on page load (200 only with a live session)
  * and /accountLogin as the final step of an interactive sign-in. A 2xx on
- * either means the session cookies in the browser's jar are now valid, whether
- * the user just signed in or the persistent profile was still logged in.
+ * either is *necessary* but not *sufficient* for success: a password-based
+ * sign-in fires an accountLogin that returns 200 with
+ * `hsaChallengeRequired: true` *before* the 2FA step (observed in the HAR:
+ * two accountLogins 17s apart, the first partial, the second - post-2FA -
+ * full). The response body must be checked too, or the window slams shut in
+ * the user's face right as the 2FA screen appears.
  */
 const SETUP_SUCCESS_PATTERN = /^https:\/\/setup\.icloud\.com\/setup\/ws\/1\/(accountLogin|validate)(\?|$)/;
+
+/**
+ * True only for a *fully* signed-in accountLogin/validate response body: the
+ * account info is present and no 2FA challenge is still pending. The partial
+ * (pre-2FA) response otherwise looks deceptively complete - it even includes
+ * the `webservices.ckdatabasews` entry - so `hsaChallengeRequired` is the
+ * discriminator, not any of the fields we actually consume.
+ */
+export function isFullySignedInBody(body: unknown): boolean {
+  if (!isPlainRecord(body) || !isPlainRecord(body.dsInfo)) {
+    return false;
+  }
+  return body.hsaChallengeRequired !== true && body.dsInfo.hsaChallengeRequired !== true;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/**
+ * Resolves with the first setup accountLogin/validate response whose body
+ * shows a *completed* sign-in (see isFullySignedInBody). Replaces a plain
+ * `context.waitForEvent("response", ...)` because the predicate there can't
+ * asynchronously read response bodies. Rejects on context close (user closed
+ * the window) or after `timeoutMs` (0 = wait forever); the rejection carries
+ * a `name` of "TimeoutError" in the latter case so callers can tell the two
+ * apart.
+ */
+function waitForFullSignIn(context: BrowserContext, timeoutMs: number): Promise<PlaywrightResponse> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (action: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      context.off("response", onResponse);
+      context.off("close", onClose);
+      action();
+    };
+
+    const onResponse = (response: PlaywrightResponse): void => {
+      if (!SETUP_SUCCESS_PATTERN.test(response.url()) || !response.ok()) {
+        return;
+      }
+      void response
+        .json()
+        .catch(() => null)
+        .then((body: unknown) => {
+          if (isFullySignedInBody(body)) {
+            finish(() => resolve(response));
+          }
+        });
+    };
+    const onClose = (): void => {
+      finish(() => reject(new Error("Browser context closed before sign-in completed.")));
+    };
+
+    const timer =
+      timeoutMs > 0
+        ? setTimeout(() => {
+            const error = new Error(`No completed sign-in within ${timeoutMs}ms.`);
+            error.name = "TimeoutError";
+            finish(() => reject(error));
+          }, timeoutMs)
+        : undefined;
+
+    context.on("response", onResponse);
+    context.on("close", onClose);
+  });
+}
 
 /** The subset of Playwright's cookie shape the capture logic needs. */
 export interface CapturedCookie {
@@ -198,10 +276,7 @@ export async function performBrowserLogin(options: BrowserLoginOptions = {}): Pr
 
     // Start listening before navigating: if the persistent profile is still
     // logged in, the success signal is the page-load /validate itself.
-    const successPromise = context.waitForEvent("response", {
-      predicate: (response) => SETUP_SUCCESS_PATTERN.test(response.url()) && response.ok(),
-      timeout: timeoutMs,
-    });
+    const successPromise = waitForFullSignIn(context, timeoutMs);
 
     await page.goto(ICLOUD_HOME);
     if (!headless) {
