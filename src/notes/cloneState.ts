@@ -5,11 +5,22 @@ export interface CloneStateNoteEntry {
   file: string;
   recordChangeTag: string;
   modificationDate: number;
+  /**
+   * For a note shared *with* this account: the sharer's ownerRecordName,
+   * i.e. which shared-database zone the note lives in. Absent for the
+   * account's own (private-database) notes.
+   */
+  sharedZoneOwner?: string | undefined;
 }
 
 export interface CloneState {
   /** CloudKit syncToken as of this snapshot; a future `pull` resumes incremental sync from here. */
   syncToken: string | undefined;
+  /**
+   * Per-shared-zone syncTokens, keyed by the zone owner's recordName.
+   * Absent entirely in state files written before shared-note support.
+   */
+  sharedZoneSyncTokens?: Record<string, string> | undefined;
   notes: Record<string, CloneStateNoteEntry>;
 }
 
@@ -59,10 +70,22 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
       file: entry.file,
       recordChangeTag: entry.recordChangeTag,
       modificationDate: entry.modificationDate,
+      sharedZoneOwner: typeof entry.sharedZoneOwner === "string" ? entry.sharedZoneOwner : undefined,
     };
   }
 
-  return { syncToken, notes };
+  let sharedZoneSyncTokens: Record<string, string> | undefined;
+  if (isRecord(value.sharedZoneSyncTokens)) {
+    sharedZoneSyncTokens = {};
+    for (const [owner, token] of Object.entries(value.sharedZoneSyncTokens)) {
+      if (typeof token !== "string") {
+        throw new Error(`${filePath} has a malformed shared-zone syncToken for owner "${owner}".`);
+      }
+      sharedZoneSyncTokens[owner] = token;
+    }
+  }
+
+  return { syncToken, sharedZoneSyncTokens, notes };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

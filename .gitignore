@@ -8,5 +8,6 @@ dist/
 *.local.json
 *.local.*
 
-# Cloned test vaults (real note content) - never commit these.
-notes/
+# Cloned test vaults (real note content) - never commit these. Anchored to
+# the repo root so it doesn't also swallow src/notes/.
+/notes/

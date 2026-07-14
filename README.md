@@ -110,6 +110,17 @@ syncToken) and a pristine "base copy" of each note's text under
 `.icloud-notes-sync/base/` - the merge ancestor `pull` needs for real 3-way
 merging.
 
+Notes **shared with you** are cloned too. They live in a different place
+than your own notes: CloudKit's *shared* database
+(`.../production/shared/...`), in one zone per sharer (`changes/database`
+enumerates the zones; each is a "Notes" zone tagged with the sharer's
+`ownerRecordName`). One wrinkle: the shared database's `changes/zone`
+listing doesn't return note bodies, so any live note that arrives without
+`TextDataEncrypted` gets a follow-up `records/lookup` (the same call the
+web client makes when you open a shared note). Shared notes are written
+into the same directory as your own; `state.json` records which sharer's
+zone each one belongs to, plus a per-zone syncToken for incremental `pull`.
+
 `npm run cli -- pull [directory]` (defaults to the current directory) is also
 implemented: it fetches only what changed since the stored syncToken, and
 for any tracked note whose local file no longer matches its base copy, runs
@@ -123,6 +134,13 @@ hand - most editors (VS Code included) already understand this format. A
 note deleted remotely while locally edited gets the same treatment, merged
 against an empty remote so the markers show exactly what your local edits
 were protecting.
+
+`pull` covers shared notes as well, using the per-zone syncTokens stored in
+`state.json`. A shared zone that disappears from the enumeration (its owner
+stopped sharing with you, or deleted the notes) is deliberately *not*
+treated as a deletion: losing access isn't proof the notes are gone, so the
+local files stay in place and are merely untracked (with a warning), unlike
+a per-note remote deletion, which does remove a clean local copy.
 
 **A note on session lifetime:** a HAR-imported session's short lifespan was
 caused by racing a *browser tab's* own background heartbeat — the tab calls
@@ -215,8 +233,11 @@ a standalone CLI.
   surfaced for you to resolve, never auto-resolved.
 - Perfect fidelity for rich formatting (tables, scanned documents, drawings)
   — see "safety over completeness" above.
-- Shared notes / collaboration features — private notes only until the core
-  sync loop is solid.
+- Collaboration features beyond reading — notes shared with you are cloned
+  and pulled (read side), but share management (participants, permissions,
+  creating/accepting shares) and writing back to shared notes are out of
+  scope; write-back generally is Phase 3, and shared notes will be its last,
+  most cautious step if at all.
 
 ## Caveats
 
