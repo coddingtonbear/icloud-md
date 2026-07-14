@@ -1,6 +1,6 @@
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { checkAuthentication } from "../cloudkit/setupClient.js";
+import { ensureAuthenticated } from "../auth/ensureAuthenticated.js";
 import { fetchAllNoteRecords, fetchSharedNoteRecords, type CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { noteFileName, uniqueFileName } from "../notes/filename.js";
@@ -37,17 +37,14 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
     );
   }
 
-  const auth = await checkAuthentication(session);
-  if (!auth.ok) {
-    throw new Error(`Not authenticated (HTTP ${auth.status}): ${auth.error}`);
-  }
+  const auth = await ensureAuthenticated(session);
   if (!auth.ckdatabasewsUrl) {
     throw new Error("Authenticated, but the account reported no ckdatabasews host - can't reach Notes.");
   }
 
-  const { records, syncToken } = await fetchAllNoteRecords(session, auth.ckdatabasewsUrl, auth.dsid, state.syncToken);
+  const { records, syncToken } = await fetchAllNoteRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, state.syncToken);
   const sharedZones = await fetchSharedNoteRecords(
-    session,
+    auth.session,
     auth.ckdatabasewsUrl,
     auth.dsid,
     state.sharedZoneSyncTokens ?? {},

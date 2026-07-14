@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { checkAuthentication } from "../cloudkit/setupClient.js";
+import { ensureAuthenticated } from "../auth/ensureAuthenticated.js";
 import { fetchAllNoteRecords, fetchSharedNoteRecords } from "../cloudkit/databaseClient.js";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
@@ -19,18 +19,15 @@ interface CloneSummary {
 }
 
 export async function runClone(session: IcloudSession, targetDir: string): Promise<void> {
-  const auth = await checkAuthentication(session);
-  if (!auth.ok) {
-    throw new Error(`Not authenticated (HTTP ${auth.status}): ${auth.error}`);
-  }
+  const auth = await ensureAuthenticated(session);
   if (!auth.ckdatabasewsUrl) {
     throw new Error("Authenticated, but the account reported no ckdatabasews host - can't reach Notes.");
   }
 
   await mkdir(targetDir, { recursive: true });
 
-  const { records, syncToken } = await fetchAllNoteRecords(session, auth.ckdatabasewsUrl, auth.dsid);
-  const sharedZones = await fetchSharedNoteRecords(session, auth.ckdatabasewsUrl, auth.dsid);
+  const { records, syncToken } = await fetchAllNoteRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid);
+  const sharedZones = await fetchSharedNoteRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid);
 
   const summary: CloneSummary = {
     written: 0,

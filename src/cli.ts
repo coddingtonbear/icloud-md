@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { checkAuthentication } from "./cloudkit/setupClient.js";
+import { ensureAuthenticated } from "./auth/ensureAuthenticated.js";
 import { runClone } from "./commands/clone.js";
 import { runLogin } from "./commands/login.js";
 import { runPull } from "./commands/pull.js";
@@ -7,11 +7,12 @@ import { loadSession } from "./session.js";
 
 async function verifyAuth(): Promise<void> {
   const session = await loadSession();
-  const result = await checkAuthentication(session);
 
-  if (!result.ok) {
-    console.error(`Not authenticated (HTTP ${result.status}): ${result.error}`);
-    console.error('The stored session has likely expired - re-run "npm run cli -- login" to sign in again.');
+  let result;
+  try {
+    result = await ensureAuthenticated(session);
+  } catch (cause) {
+    console.error(cause instanceof Error ? cause.message : String(cause));
     process.exitCode = 1;
     return;
   }

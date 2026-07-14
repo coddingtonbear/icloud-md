@@ -11,7 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "import-har": "tsx src/scripts/importHar.ts",
-    "test": "tsx --test src/**/*.test.ts"
+    "test": "tsx --test $(find src -name '*.test.ts')"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

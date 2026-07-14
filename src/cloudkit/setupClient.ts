@@ -1,4 +1,5 @@
 import type { IcloudSession } from "../session.js";
+import { mergeSetCookiesIntoSession } from "../session.js";
 import { loggedFetch } from "../debugLog.js";
 
 const SETUP_HOST = "https://setup.icloud.com";
@@ -11,6 +12,15 @@ export type AuthCheckResult =
       fullName: string | undefined;
       /** Base URL of the CloudKit database web service for this account's partition, e.g. https://p43-ckdatabasews.icloud.com:443 */
       ckdatabasewsUrl: string | undefined;
+      /**
+       * The passed-in session with any `Set-Cookie` rotation from this call merged
+       * in (same object, unchanged, if nothing rotated). `/validate` rotates
+       * `X-APPLE-WEBAUTH-TOKEN` on every call, same as the browser's own
+       * heartbeat - callers should use this session for subsequent requests and
+       * persist it if it differs from what they passed in, or the rotated token
+       * supersedes the one they keep re-presenting.
+       */
+      session: IcloudSession;
     }
   | {
       ok: false;
@@ -52,6 +62,8 @@ export async function checkAuthentication(session: IcloudSession, dsid?: string)
     return { ok: false, status: response.status, error };
   }
 
+  const rotatedSession = mergeSetCookiesIntoSession(session, response.headers.getSetCookie());
+
   if (!isRecord(body) || !isRecord(body.dsInfo)) {
     return { ok: false, status: response.status, error: "Unexpected response shape from /validate (missing dsInfo)" };
   }
@@ -69,7 +81,7 @@ export async function checkAuthentication(session: IcloudSession, dsid?: string)
   const notesService = webservices && isRecord(webservices.ckdatabasews) ? webservices.ckdatabasews : undefined;
   const ckdatabasewsUrl = notesService && typeof notesService.url === "string" ? notesService.url : undefined;
 
-  return { ok: true, dsid: resolvedDsid, appleId, fullName, ckdatabasewsUrl };
+  return { ok: true, dsid: resolvedDsid, appleId, fullName, ckdatabasewsUrl, session: rotatedSession };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

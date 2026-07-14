@@ -108,23 +108,44 @@ export function sessionFromBrowserCapture(
 export interface BrowserLoginOptions {
   profileDir?: string;
   onStatus?: (message: string) => void;
+  /**
+   * Run without a visible window. Only meaningful for the persistent profile:
+   * a profile Apple already trusts can sometimes complete sign-in with no
+   * interaction at all (the same silent recovery a live browser tab performs
+   * after its own session lapses - see the 2026-07-13 dev notes). A profile
+   * that actually needs a human (fresh 2FA, CAPTCHA) will just sit waiting
+   * with nothing able to click through it, so headless callers should also
+   * pass `timeoutMs`. Defaults to `false` (the interactive `login` command).
+   */
+  headless?: boolean;
+  /**
+   * Give up waiting for sign-in to complete after this many milliseconds.
+   * `0` (the default) waits forever, appropriate for the interactive command
+   * where a human is at the window. Headless/automated recovery should pass
+   * a real value so a profile that can't recover silently fails fast instead
+   * of hanging the calling command indefinitely.
+   */
+  timeoutMs?: number;
 }
 
 /**
- * Opens the headed login window and resolves with a captured session once
- * sign-in completes. Rejects if the user closes the window first. The window
- * is always closed afterwards - the browser never lingers, so its own
- * 14-minute /validate heartbeat can't race the captured token the way a live
- * tab raced HAR-imported sessions.
+ * Opens the login window and resolves with a captured session once sign-in
+ * completes. Rejects if the user closes the window first (interactive mode)
+ * or if `timeoutMs` elapses (headless mode). The window is always closed
+ * afterwards - the browser never lingers, so its own 14-minute /validate
+ * heartbeat can't race the captured token the way a live tab raced
+ * HAR-imported sessions.
  */
 export async function performBrowserLogin(options: BrowserLoginOptions = {}): Promise<IcloudSession> {
   const profileDir = options.profileDir ?? DEFAULT_BROWSER_PROFILE_DIR;
   const status = options.onStatus ?? ((message: string) => console.log(message));
+  const headless = options.headless ?? false;
+  const timeoutMs = options.timeoutMs ?? 0;
   await mkdir(profileDir, { recursive: true, mode: 0o700 });
 
   let context: BrowserContext;
   try {
-    context = await chromium.launchPersistentContext(profileDir, { headless: false, viewport: null });
+    context = await chromium.launchPersistentContext(profileDir, { headless, viewport: null });
   } catch (cause) {
     throw new Error(
       'Could not launch the login browser. If Playwright\'s Chromium is not installed yet, run "npx playwright install chromium" and retry.',
@@ -139,19 +160,26 @@ export async function performBrowserLogin(options: BrowserLoginOptions = {}): Pr
     // logged in, the success signal is the page-load /validate itself.
     const successPromise = context.waitForEvent("response", {
       predicate: (response) => SETUP_SUCCESS_PATTERN.test(response.url()) && response.ok(),
-      timeout: 0,
+      timeout: timeoutMs,
     });
 
     await page.goto(ICLOUD_HOME);
-    status("Complete the sign-in in the browser window (password + any 2FA prompt).");
-    status("Waiting for sign-in to finish... (close the window to abort)");
+    if (!headless) {
+      status("Complete the sign-in in the browser window (password + any 2FA prompt).");
+      status("Waiting for sign-in to finish... (close the window to abort)");
+    }
 
     let response;
     try {
       response = await successPromise;
     } catch (cause) {
-      // waitForEvent only rejects here when the context/window went away.
-      throw new Error("The browser window was closed before sign-in completed.", { cause });
+      const timedOut = cause instanceof Error && cause.name === "TimeoutError";
+      throw new Error(
+        timedOut
+          ? `Timed out after ${timeoutMs}ms waiting for sign-in to complete.`
+          : "The browser window was closed before sign-in completed.",
+        { cause },
+      );
     }
 
     // The success response's own Set-Cookie headers mint the freshest tokens;

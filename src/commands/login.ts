@@ -20,7 +20,7 @@ export async function runLogin(sessionPath?: string): Promise<void> {
     return;
   }
 
-  await writeSessionFile(session, sessionPath);
+  await writeSessionFile(result.session, sessionPath);
   console.log(`Login successful. Authenticated as ${result.appleId} (dsid ${result.dsid}).`);
   console.log(`Session written${sessionPath ? ` to ${sessionPath}` : ""}.`);
 }
