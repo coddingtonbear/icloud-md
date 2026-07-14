@@ -12,6 +12,9 @@ export interface CloudKitRecord {
   fields: Record<string, CloudKitFieldValue>;
   recordChangeTag?: string | undefined;
   deleted?: boolean | undefined;
+  /** The record's parent reference (for notes: the containing folder).
+   * Echoed back on updates the way the web client does. */
+  parentRecordName?: string | undefined;
 }
 
 export interface ZoneChangesResult {
@@ -345,6 +348,75 @@ export function mergeLookedUpRecords(records: CloudKitRecord[], lookedUp: CloudK
   }
 }
 
+export interface NoteUpdate {
+  recordName: string;
+  /** Optimistic-concurrency token: the server rejects the update if the
+   * record has moved past this tag - exactly the "don't clobber a change
+   * you haven't seen" primitive push is built on. */
+  recordChangeTag: string;
+  fields: Record<string, { value: unknown }>;
+  parentRecordName?: string | undefined;
+}
+
+export type NoteUpdateResult =
+  | { ok: true; record: CloudKitRecord }
+  | { ok: false; serverErrorCode: string; reason: string | undefined };
+
+/**
+ * Updates one note via `records/modify`, using the same single-operation
+ * `update` shape the web client sends. Per-record failures (notably a
+ * changeTag conflict) come back inside an HTTP 200 as `serverErrorCode` on
+ * the record entry; those are returned as a typed refusal rather than
+ * thrown, since "someone else edited this note" is an expected outcome the
+ * caller wants to report per-note.
+ */
+export async function updateNoteRecord(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  zoneID: CloudKitZoneID,
+  update: NoteUpdate,
+): Promise<NoteUpdateResult> {
+  const record: Record<string, unknown> = {
+    recordName: update.recordName,
+    recordType: "Note",
+    recordChangeTag: update.recordChangeTag,
+    fields: update.fields,
+  };
+  if (update.parentRecordName !== undefined) {
+    record.parent = { recordName: update.parentRecordName };
+  }
+
+  const body = await postDatabase(
+    "updateNoteRecord:records/modify",
+    session,
+    ckDatabaseHost,
+    dsid,
+    "private",
+    "records/modify",
+    { operations: [{ operationType: "update", record }], zoneID },
+  );
+  return parseNoteUpdateResponse(body);
+}
+
+export function parseNoteUpdateResponse(body: unknown): NoteUpdateResult {
+  if (!isRecord(body) || !Array.isArray(body.records) || body.records.length === 0) {
+    throw new Error("Unexpected response shape from records/modify (missing records array)");
+  }
+  const entry: unknown = body.records[0];
+  if (!isRecord(entry)) {
+    throw new Error("Unexpected response shape from records/modify (record entry is not an object)");
+  }
+  if (typeof entry.serverErrorCode === "string") {
+    return {
+      ok: false,
+      serverErrorCode: entry.serverErrorCode,
+      reason: typeof entry.reason === "string" ? entry.reason : undefined,
+    };
+  }
+  return { ok: true, record: parseRecord(entry) };
+}
+
 interface ParsedZone {
   moreComing?: boolean | undefined;
   syncToken?: string | undefined;
@@ -392,12 +464,14 @@ function parseRecord(value: unknown): CloudKitRecord {
     }
   }
 
+  const parent = isRecord(value.parent) && typeof value.parent.recordName === "string" ? value.parent.recordName : undefined;
   return {
     recordName: value.recordName,
     recordType: value.recordType,
     fields,
     recordChangeTag: typeof value.recordChangeTag === "string" ? value.recordChangeTag : undefined,
     deleted: typeof value.deleted === "boolean" ? value.deleted : undefined,
+    parentRecordName: parent,
   };
 }
 

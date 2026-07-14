@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { firstZone, mergeLookedUpRecords, parseSharedZoneList, type CloudKitRecord } from "./databaseClient.js";
+import { firstZone, mergeLookedUpRecords, parseNoteUpdateResponse, parseSharedZoneList, type CloudKitRecord } from "./databaseClient.js";
 
 test("parseSharedZoneList extracts zoneName and ownerRecordName per zone", () => {
   // Shape observed from a real `shared/changes/database` response.
@@ -91,4 +91,53 @@ test("mergeLookedUpRecords keeps the listing changeTag when the lookup lacks one
   mergeLookedUpRecords(records, lookedUp);
 
   assert.equal(records[0]?.recordChangeTag, "tag-list-a");
+});
+
+test("parseNoteUpdateResponse returns the updated record on success", () => {
+  // Shape observed from a real records/modify response.
+  const body = {
+    records: [
+      {
+        recordName: "F90C80BA-2D47-4CB1-B000-000000000000",
+        recordType: "Note",
+        recordChangeTag: "25d",
+        fields: {
+          ModificationDate: { value: 1783880004527, type: "TIMESTAMP" },
+          TextDataEncrypted: { value: "eJw=", type: "ENCRYPTED_BYTES" },
+        },
+        parent: { recordName: "DefaultFolder-CloudKit" },
+      },
+    ],
+  };
+
+  const result = parseNoteUpdateResponse(body);
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.record.recordChangeTag, "25d");
+    assert.equal(result.record.parentRecordName, "DefaultFolder-CloudKit");
+    assert.equal(result.record.fields.ModificationDate?.value, 1783880004527);
+  }
+});
+
+test("parseNoteUpdateResponse surfaces per-record server errors as typed refusals", () => {
+  const body = {
+    records: [
+      {
+        recordName: "F90C80BA-2D47-4CB1-B000-000000000000",
+        reason: "record to update already exists with a different change tag",
+        serverErrorCode: "CONFLICT",
+      },
+    ],
+  };
+
+  const result = parseNoteUpdateResponse(body);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.serverErrorCode, "CONFLICT");
+    assert.match(result.reason ?? "", /change tag/);
+  }
+});
+
+test("parseNoteUpdateResponse rejects bodies without a records array", () => {
+  assert.throws(() => parseNoteUpdateResponse({}), /missing records array/);
 });

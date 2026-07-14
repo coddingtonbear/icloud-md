@@ -6,6 +6,7 @@ import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { noteFileName, uniqueFileName } from "../notes/filename.js";
 import { mergeNoteVersions } from "../notes/mergeConflict.js";
 import { readBaseCopy, removeBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
+import { localFileState } from "../notes/localFileState.js";
 import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import type { IcloudSession } from "../session.js";
@@ -20,14 +21,6 @@ interface PullSummary {
   unsharedUntracked: number;
   conflicts: string[];
 }
-
-/**
- * Whether a tracked note's local file still matches its base copy (the last
- * known synced/merged content). "missing" is distinguished from "modified"
- * so callers can treat a vanished file (nothing to lose) differently from a
- * hand-edited one (something to protect via a real 3-way merge).
- */
-type LocalFileState = "clean" | "modified" | "missing";
 
 export async function runPull(session: IcloudSession, targetDir: string): Promise<void> {
   const state = await readCloneState(targetDir);
@@ -261,30 +254,6 @@ async function handleRemoteDeletion(
   // Keep tracking (state entry + base copy) so this doesn't silently drop
   // out of state.json; there's no new recordChangeTag to advance to since
   // the record no longer exists remotely.
-}
-
-async function localFileState(
-  targetDir: string,
-  entry: CloneStateNoteEntry,
-  recordName: string,
-): Promise<LocalFileState> {
-  let content: string;
-  try {
-    content = await readFile(path.join(targetDir, entry.file), "utf-8");
-  } catch (cause) {
-    if (isEnoent(cause)) {
-      return "missing";
-    }
-    throw cause;
-  }
-
-  const base = await readBaseCopy(targetDir, recordName);
-  if (base === undefined) {
-    // No base copy on disk for a tracked note shouldn't normally happen, but
-    // if it does, we can't verify cleanliness - treat conservatively.
-    return "modified";
-  }
-  return content === base ? "clean" : "modified";
 }
 
 async function safeUnlink(filePath: string): Promise<void> {

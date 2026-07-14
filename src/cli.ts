@@ -3,6 +3,7 @@ import { ensureAuthenticated } from "./auth/ensureAuthenticated.js";
 import { runClone } from "./commands/clone.js";
 import { runLogin } from "./commands/login.js";
 import { runPull } from "./commands/pull.js";
+import { runPush } from "./commands/push.js";
 import { loadSession } from "./session.js";
 
 async function verifyAuth(): Promise<void> {
@@ -38,6 +39,19 @@ async function pull(targetDirArg: string | undefined): Promise<void> {
   await runPull(session, targetDir);
 }
 
+async function push(args: string[]): Promise<void> {
+  const flags = args.filter((arg) => arg.startsWith("--"));
+  const positional = args.filter((arg) => !arg.startsWith("--"));
+  const unknownFlag = flags.find((flag) => flag !== "--dry-run");
+  if (unknownFlag || positional.length > 1) {
+    console.error("Usage: icloud-notes push [directory] [--dry-run]");
+    process.exitCode = 1;
+    return;
+  }
+  const session = await loadSession();
+  await runPush(session, positional[0] ?? ".", { dryRun: flags.includes("--dry-run") });
+}
+
 async function login(): Promise<void> {
   await runLogin();
 }
@@ -58,6 +72,9 @@ async function main(): Promise<void> {
     case "pull":
       await pull(rest[0]);
       return;
+    case "push":
+      await push(rest);
+      return;
     default:
       console.error(
         "Usage: icloud-notes <command>\n\n" +
@@ -65,7 +82,8 @@ async function main(): Promise<void> {
           "  login                 Sign in via a browser window (Apple's own pages handle 2FA); shared across all vaults\n" +
           "  verify-auth           Check whether the stored session is authenticated\n" +
           "  clone <directory>     Fetch all Notes into a fresh local directory\n" +
-          "  pull [directory]      Fetch changes since the last clone/pull (defaults to the current directory)",
+          "  pull [directory]      Fetch changes since the last clone/pull (defaults to the current directory)\n" +
+          "  push [directory]      Upload locally edited notes (--dry-run to preview); conflicts are reported, never overwritten",
       );
       process.exitCode = 1;
   }

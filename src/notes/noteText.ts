@@ -1,4 +1,4 @@
-import { gunzipSync, inflateSync } from "node:zlib";
+import { deflateSync, gunzipSync, inflateSync } from "node:zlib";
 import { getLastBytesField, readProtoFields } from "./protobuf.js";
 
 /**
@@ -22,7 +22,7 @@ import { getLastBytesField, readProtoFields } from "./protobuf.js";
  * yet - out of scope until round-trip write support needs them.
  */
 export function decodeNoteBodyText(compressedProtobuf: Buffer): string {
-  const raw = decompress(compressedProtobuf);
+  const raw = decompressNoteDocument(compressedProtobuf);
   const root = readProtoFields(raw);
 
   const documentBytes = getLastBytesField(root, 2);
@@ -45,10 +45,19 @@ export function decodeNoteBodyText(compressedProtobuf: Buffer): string {
   return new TextDecoder("utf-8", { fatal: true }).decode(noteTextBytes);
 }
 
-function decompress(buf: Buffer): Buffer {
+export function decompressNoteDocument(buf: Buffer): Buffer {
   const isGzip = buf.length >= 2 && buf[0] === 0x1f && buf[1] === 0x8b;
   if (isGzip) {
     return gunzipSync(buf);
   }
   return inflateSync(buf);
+}
+
+/**
+ * Compresses a rebuilt document for upload. The write path uses a zlib
+ * container specifically: every `records/modify` body in the captured web
+ * client traffic is zlib (magic `78 9c`), never gzip, so we match that.
+ */
+export function compressNoteDocument(raw: Uint8Array): Buffer {
+  return deflateSync(raw);
 }

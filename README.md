@@ -144,6 +144,40 @@ treated as a deletion: losing access isn't proof the notes are gone, so the
 local files stay in place and are merely untracked (with a warning), unlike
 a per-note remote deletion, which does remove a clean local copy.
 
+`icloud-notes push [directory] [--dry-run]` sends local edits back up.
+It finds tracked notes whose file no longer matches its base copy, refuses
+anything ambiguous (unresolved conflict markers, notes shared by someone
+else, emptied files, attachment/asset-backed notes), and uploads the rest
+via `records/modify` with the note's `recordChangeTag` as an optimistic
+lock — a note that changed remotely since the last `pull` is reported as a
+conflict (pull first; it merges), never overwritten, and the server
+enforces the same tag check again at write time.
+
+**How push edits a note.** The note body isn't just text — it's a CRDT
+document (the same "mergeable data" protobuf Apple's own clients sync),
+carrying every insertion ever made, with deleted ranges kept as tombstones,
+each attributed to a replica (device) and clock. Overwriting it naively
+would corrupt other devices' ability to merge. So push:
+
+1. fetches the note's *current* document from the server,
+2. requires it to re-encode **byte-for-byte** from our parsed model (any
+   structure we don't fully understand → the note stays read-only),
+3. applies the local file's change as a minimal splice — tombstoning
+   removed text and inserting new text under this vault's own stable
+   replica id (persisted in `state.json`), the same way the web client's
+   own editor does (verified by replaying a captured web-client save and
+   reproducing its upload byte-for-byte),
+4. decodes the rebuilt document and requires it to yield exactly the local
+   file's text, re-checks the CRDT's internal invariants, and only then
+   uploads (zlib-compressed, as the write path requires).
+
+`--dry-run` runs every step except the upload. Display metadata
+(`TitleEncrypted`, `SnippetEncrypted`) is re-derived from the new text the
+way the web client derives it; all other record fields are echoed back
+unchanged, mirroring captured web-client update operations. Push covers
+*edits to existing notes* only: creating new notes remotely, pushing local
+deletions, and writing to shared notes are all still out of scope.
+
 **A note on session lifetime:** a HAR-imported session's short lifespan was
 caused by racing a *browser tab's* own background heartbeat — the tab calls
 `/setup/ws/1/validate` every 14 minutes and rotates the session's bearer
@@ -176,11 +210,13 @@ words are already the most discoverable choice for what each one does:
   locally. Named `pull`, not `fetch`, because there's no separate
   remote-tracking ref to update first — it goes straight to the working
   directory, same as `git pull` without a merge step.
-- **`push`** *(not yet implemented)* — send local edits back up. Refuses to
-  push a note whose remote `recordChangeTag` has moved since the last
-  `clone`/`pull` baseline, surfacing that as a conflict instead of
+- **`push [directory] [--dry-run]`** *(implemented)* — send local edits back
+  up. Refuses to push a note whose remote `recordChangeTag` has moved since
+  the last `clone`/`pull` baseline, surfacing that as a conflict instead of
   overwriting newer remote content — the safety mechanism this needs isn't a
-  full merge, just "don't clobber a change you haven't seen."
+  full merge, just "don't clobber a change you haven't seen." See "How push
+  edits a note" above for the CRDT handling and the byte-for-byte round-trip
+  gate.
 
 No `commit`/`branch`/`merge` equivalents are planned — the working directory
 *is* the local state, and conflicts are meant to be resolved by hand (or via
@@ -208,12 +244,15 @@ state and the local file's state, to answer "did this change locally,
 remotely, both, or neither?" This is groundwork for conflict handling, not
 full merge logic yet.
 
-**Phase 3 — Write-back for plain-text notes.** Build the note protobuf back
-up from an edited local file and push it via `records/modify` (`update`,
-with `recordChangeTag` for optimistic concurrency). Restricted to notes we
-can prove round-trip cleanly: decode → re-encode → byte-for-byte match
-against the original (modulo the intended edit) before we ever consider
-writing to a note. Anything we can't verify this way stays read-only.
+**Phase 3 — Write-back for plain-text notes.** *(core implemented)* Build
+the note protobuf back up from an edited local file and push it via
+`records/modify` (`update`, with `recordChangeTag` for optimistic
+concurrency). Restricted to notes we can prove round-trip cleanly: decode →
+re-encode → byte-for-byte match against the original (modulo the intended
+edit) before we ever consider writing to a note. Anything we can't verify
+this way stays read-only. Remaining Phase 3 work: creating notes remotely,
+pushing local deletions, and broader real-device merge validation
+(cross-device concurrent-edit behavior against pushed CRDT structures).
 
 **Phase 4 — Attachments.** Download attachments (served from a separate
 signed-URL asset host, `cvws.icloud-content.com`) and represent them
