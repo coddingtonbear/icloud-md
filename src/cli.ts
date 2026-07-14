@@ -4,6 +4,7 @@ import { runClone } from "./commands/clone.js";
 import { runLogin } from "./commands/login.js";
 import { runPull } from "./commands/pull.js";
 import { runPush } from "./commands/push.js";
+import { runRestore } from "./commands/restore.js";
 import { loadSession } from "./session.js";
 
 async function verifyAuth(): Promise<void> {
@@ -52,6 +53,16 @@ async function push(args: string[]): Promise<void> {
   await runPush(session, positional[0] ?? ".", { dryRun: flags.includes("--dry-run") });
 }
 
+async function restore(args: string[]): Promise<void> {
+  const [fileArg, dirArg] = args;
+  if (!fileArg) {
+    console.error("Usage: icloud-notes restore <file> [directory]");
+    process.exitCode = 1;
+    return;
+  }
+  await runRestore(dirArg ?? ".", fileArg);
+}
+
 async function login(): Promise<void> {
   await runLogin();
 }
@@ -75,6 +86,9 @@ async function main(): Promise<void> {
     case "push":
       await push(rest);
       return;
+    case "restore":
+      await restore(rest);
+      return;
     default:
       console.error(
         "Usage: icloud-notes <command>\n\n" +
@@ -83,7 +97,8 @@ async function main(): Promise<void> {
           "  verify-auth           Check whether the stored session is authenticated\n" +
           "  clone <directory>     Fetch all Notes into a fresh local directory\n" +
           "  pull [directory]      Fetch changes since the last clone/pull (defaults to the current directory)\n" +
-          "  push [directory]      Upload locally edited notes (--dry-run to preview); conflicts are reported, never overwritten",
+          "  push [directory]      Upload locally edited notes (--dry-run to preview); conflicts are reported, never overwritten\n" +
+          "  restore <file> [directory]  Discard a tracked note's local edits, reverting it to the last synced copy",
       );
       process.exitCode = 1;
   }

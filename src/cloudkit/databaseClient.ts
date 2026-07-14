@@ -348,6 +348,26 @@ export function mergeLookedUpRecords(records: CloudKitRecord[], lookedUp: CloudK
   }
 }
 
+/**
+ * Downloads an attachment's raw bytes from its signed `cvws.icloud-content.com`
+ * URL (the `downloadURL` on a Media record's `Asset` field). These URLs are
+ * plain, unauthenticated GETs - no cookie or session header, just the
+ * signature baked into the query string - confirmed against real captures of
+ * both an audio and an image attachment (dev notes, 2026-07-13/14). They do
+ * carry an expiry (`e=` query param), so a stored URL can go stale; re-`lookup`
+ * the owning record to get a fresh one rather than retrying the same URL.
+ */
+export async function fetchAssetBytes(downloadURL: string): Promise<Buffer> {
+  const response = await loggedFetch("fetchAssetBytes", downloadURL, {
+    method: "GET",
+    headers: { Origin: "https://www.icloud.com", Referer: "https://www.icloud.com/" },
+  });
+  if (!response.ok) {
+    throw new Error(`Attachment download failed: HTTP ${response.status}`);
+  }
+  return Buffer.from(await response.arrayBuffer());
+}
+
 export interface NoteUpdate {
   recordName: string;
   /** Optimistic-concurrency token: the server rejects the update if the

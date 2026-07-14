@@ -104,13 +104,14 @@ environments, run `login` on a machine with a display and copy
 `session.local.json` over — the session file is host-independent.)
 
 `icloud-notes clone <directory>` is implemented: it walks the whole Notes
-zone, decodes plain-text note bodies, and writes one file per note into the
-target directory, skipping notes with attachments, notes in Trash, and
-anything that fails to decode. It also writes `.icloud-notes-sync/state.json`
-(per-note record name → file/changeTag/modification date, plus the zone's
-syncToken) and a pristine "base copy" of each note's text under
-`.icloud-notes-sync/base/` - the merge ancestor `pull` needs for real 3-way
-merging.
+zone, decodes plain-text note bodies, downloads any attachments (see
+"Attachments" below), and writes one file per note into the target
+directory, skipping only notes in Trash and anything that fails to decode
+or whose attachments can't be resolved. It also writes
+`.icloud-notes-sync/state.json` (per-note record name → file/changeTag/
+modification date, plus the zone's syncToken) and a pristine "base copy" of
+each note's text under `.icloud-notes-sync/base/` - the merge ancestor
+`pull` needs for real 3-way merging.
 
 Notes **shared with you** are cloned too. They live in a different place
 than your own notes: CloudKit's *shared* database
@@ -152,6 +153,55 @@ via `records/modify` with the note's `recordChangeTag` as an optimistic
 lock — a note that changed remotely since the last `pull` is reported as a
 conflict (pull first; it merges), never overwritten, and the server
 enforces the same tag check again at write time.
+
+**Attachment notes are permanently read-only, not just "not yet".** They're
+tracked (readable, editable-looking files, per the "Attachments" section
+below) but `push` will always refuse to write them back — the note's
+underlying CRDT structure carries attribute runs this tool only reads
+(`note_text`), never fully parses or round-trips, so editing one back would
+risk corrupting it. If you edit an attachment-bearing note anyway, `push`
+reports which file and why, and names `icloud-notes restore <file>` as the
+way to discard that edit and get back to a clean, synced copy — see
+`restore` below. `push` also refuses a *plain* note whose text has grown a
+hand-typed `attachments/...` link or image embed matching the shape this
+tool renders: there's no real uploaded file behind it, so pushing it as
+literal text would silently "succeed" while doing something other than
+what it looks like.
+
+**Attachments.** `clone`/`pull` download attachments and represent them as
+files under an `attachments/` folder alongside your notes, with the note's
+text rewritten to reference them (`![name](attachments/name)` for images,
+`[name](attachments/name)` otherwise) in place of Apple's `U+FFFC`
+placeholder character. The fetch chain, confirmed against both an audio and
+an image attachment: a note's decoded body embeds an `attachmentIdentifier`
+that is itself the CloudKit `recordName` of a separate `Attachment` record,
+which references a `Media` record via a `Media` field, whose `Asset` field
+holds the actual signed download URL. `state.json` tracks each downloaded
+attachment (keyed by the `Attachment` record's recordName) with the
+`Media` record's `Asset.fileChecksum`, so `pull` only re-downloads a file
+whose checksum has actually changed. `Attachment` records can carry their
+own additional signed asset (`MergeableDataAsset`) - seen populated for an
+audio recording (transcript/waveform data) and `null` for a plain image -
+which isn't downloaded; only the real file (the `Media` record's `Asset`)
+is. Upload is a non-goal, not deferred: the web Notes editor has no
+affordance to attach a new file to a note at all, so there's no legitimate
+client operation to reverse-engineer the way plain-text push had one.
+
+**Known limitations of the current download support**, live-verified with
+`clone` against a real account but not yet exercised for the following:
+
+- **Shared-note attachments are unverified.** The fetch chain uses the
+  correct database/zoneID for a shared note's attachments (mirroring how
+  shared note text already works), but no shared note with an attachment
+  has actually been observed live yet - treat this path as unproven until
+  it is.
+- **`MergeableDataAsset` (the audio transcript/waveform data) is never
+  downloaded**, by design - only the real payload (`Media.Asset`). An
+  audio attachment's transcript, if it has one, isn't available locally.
+- **Multiple attachments in a single note are untested live.** The
+  placeholder-to-attachment-reference matching is positional and written
+  to handle any number of attachments, but every real note seen so far has
+  had exactly one.
 
 **How push edits a note.** The note body isn't just text — it's a CRDT
 document (the same "mergeable data" protobuf Apple's own clients sync),
@@ -202,7 +252,8 @@ words are already the most discoverable choice for what each one does:
   Not git vocabulary, but there's no `git` equivalent to steal a name from
   here.
 - **`clone <directory>`** *(implemented)* — full initial export: fetch every
-  note and write it into a fresh directory, alongside sync state.
+  note (downloading any attachments alongside them) and write it into a
+  fresh directory, alongside sync state.
 - **`pull [directory]`** *(implemented)* — run inside (or pointed at) a
   cloned directory; fetches whatever changed remotely since the last sync
   (using the stored `syncToken`) and updates local files accordingly, or
@@ -217,6 +268,13 @@ words are already the most discoverable choice for what each one does:
   full merge, just "don't clobber a change you haven't seen." See "How push
   edits a note" above for the CRDT handling and the byte-for-byte round-trip
   gate.
+- **`restore <file> [directory]`** *(implemented)* — discard a tracked
+  note's local edits, overwriting it with its base copy (the last-known-
+  synced text). Purely local, no network call. Not modeled on a specific
+  `git` command, but the same idea as `git restore <path>`. The general
+  escape hatch for any note stuck behind a `push` refusal you'd rather
+  abandon than resolve — most notably a note with an attachment, which
+  `push` will never accept edits to (see above).
 
 No `commit`/`branch`/`merge` equivalents are planned — the working directory
 *is* the local state, and conflicts are meant to be resolved by hand (or via
@@ -233,10 +291,10 @@ heartbeat for long-running sessions.
 
 **Phase 1 — Read-only fetch.** Walk the Notes zone via `changes/zone`,
 decode the note protobuf format for title/body text, and write notes out as
-files in a folder (git repo). Notes with attachments, or with any structure
-we can't confidently decode, are skipped/reported rather than partially
-synced. Store enough metadata per note (record name, change tag,
-modification date) to support later phases.
+files in a folder (git repo). Notes with any structure we can't confidently
+decode are skipped/reported rather than partially synced (attachments are
+handled, not skipped - see Phase 4). Store enough metadata per note (record
+name, change tag, modification date) to support later phases.
 
 **Phase 2 — Change detection.** On each fetch, compare each note's stored
 baseline (change tag / modification date) against both the current remote
@@ -254,10 +312,13 @@ this way stays read-only. Remaining Phase 3 work: creating notes remotely,
 pushing local deletions, and broader real-device merge validation
 (cross-device concurrent-edit behavior against pushed CRDT structures).
 
-**Phase 4 — Attachments.** Download attachments (served from a separate
-signed-URL asset host, `cvws.icloud-content.com`) and represent them
-locally. Upload/re-reference of new or changed attachments comes after
-download-only support is solid.
+**Phase 4 — Attachments.** *(download implemented)* Download attachments
+(served from a separate signed-URL asset host, `cvws.icloud-content.com`)
+and represent them locally under `attachments/` - see the "Attachments"
+section above for the fetch chain and the local representation. Upload is
+a non-goal, not a later step: the web Notes editor has no affordance to
+attach a new file to a note at all, so there's no legitimate client
+operation to reverse-engineer the way plain-text push had one.
 
 **Phase 5 — Obsidian plugin (future, not committed).** Revisit whether the
 sync core can be reused directly inside an Obsidian plugin rather than only
@@ -279,6 +340,8 @@ a standalone CLI.
   creating/accepting shares) and writing back to shared notes are out of
   scope; write-back generally is Phase 3, and shared notes will be its last,
   most cautious step if at all.
+- Attachment upload — the web Notes editor itself has no way to attach a
+  new file to a note, so Phase 4 is download/local-representation only.
 
 ## Caveats
 

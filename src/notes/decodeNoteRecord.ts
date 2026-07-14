@@ -1,20 +1,18 @@
 import type { CloudKitFieldValue, CloudKitRecord } from "../cloudkit/databaseClient.js";
+import { decodeNoteAttachmentRefs, OBJECT_REPLACEMENT_CHARACTER, type AttachmentReference } from "./noteAttachments.js";
 import { decodeNoteBodyText } from "./noteText.js";
 
 export type NoteDecodeResult =
   | { status: "deleted" }
-  | { status: "unsyncable"; reason: "attachment" | "undecodable" }
-  | { status: "ok"; title: string; bodyText: string };
+  | { status: "unsyncable"; reason: "undecodable" }
+  | { status: "ok"; title: string; bodyText: string; attachments: AttachmentReference[] };
 
 const TRASH_FOLDER_RECORD_NAME = "TrashFolder-CloudKit";
 
-/** Shared skip/decode rules used by both `clone` and `pull` so they can't drift apart. */
+/** Shared skip/decode rules used by `clone`, `pull`, and `push` so they can't drift apart. */
 export function classifyNoteRecord(record: CloudKitRecord): NoteDecodeResult {
   if (isDeleted(record)) {
     return { status: "deleted" };
-  }
-  if (hasAttachment(record)) {
-    return { status: "unsyncable", reason: "attachment" };
   }
 
   const textField = record.fields.TextDataEncrypted;
@@ -22,14 +20,29 @@ export function classifyNoteRecord(record: CloudKitRecord): NoteDecodeResult {
     return { status: "unsyncable", reason: "undecodable" };
   }
 
+  const compressed = Buffer.from(textField.value, "base64");
   let bodyText: string;
   try {
-    bodyText = decodeNoteBodyText(Buffer.from(textField.value, "base64"));
+    bodyText = decodeNoteBodyText(compressed);
   } catch {
     return { status: "unsyncable", reason: "undecodable" };
   }
 
-  return { status: "ok", title: decodeTitleField(record.fields.TitleEncrypted), bodyText };
+  const attachments = decodeNoteAttachmentRefs(compressed);
+  const placeholderCount = countOccurrences(bodyText, OBJECT_REPLACEMENT_CHARACTER);
+  if (placeholderCount !== attachments.length) {
+    // Some embedded object we don't understand (a table, drawing, ...) also
+    // uses this placeholder, or our attachment-run parse missed one - either
+    // way we can't trust a positional correlation between the two, so stay
+    // read-only rather than guess. See dev notes, 2026-07-13/14.
+    return { status: "unsyncable", reason: "undecodable" };
+  }
+
+  return { status: "ok", title: decodeTitleField(record.fields.TitleEncrypted), bodyText, attachments };
+}
+
+function countOccurrences(text: string, needle: string): number {
+  return text.split(needle).length - 1;
 }
 
 function isDeleted(record: CloudKitRecord): boolean {
@@ -45,10 +58,6 @@ function isDeleted(record: CloudKitRecord): boolean {
   const folderField = record.fields.Folder;
   const folder = isRecord(folderField?.value) ? folderField.value : undefined;
   return folder?.recordName === TRASH_FOLDER_RECORD_NAME;
-}
-
-function hasAttachment(record: CloudKitRecord): boolean {
-  return Object.values(record.fields).some((field) => field.type === "ASSETID");
 }
 
 function decodeTitleField(field: CloudKitFieldValue | undefined): string {

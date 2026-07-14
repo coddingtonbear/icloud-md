@@ -2,6 +2,7 @@ import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ensureAuthenticated } from "../auth/ensureAuthenticated.js";
 import { fetchAllNoteRecords, fetchSharedNoteRecords, type CloudKitRecord } from "../cloudkit/databaseClient.js";
+import { removeAttachmentsForNote, resolveNoteAttachments, type AttachmentAuth } from "../notes/attachmentSync.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { noteFileName, uniqueFileName } from "../notes/filename.js";
 import { mergeNoteVersions } from "../notes/mergeConflict.js";
@@ -11,11 +12,14 @@ import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEn
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import type { IcloudSession } from "../session.js";
 
+const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
+
 interface PullSummary {
   added: number;
   updated: number;
   merged: number;
   removed: number;
+  attachmentsDownloaded: number;
   skippedNewUnsyncable: number;
   droppedUnsyncable: number;
   unsharedUntracked: number;
@@ -44,12 +48,16 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
   );
 
   const notes: CloneState["notes"] = { ...state.notes };
+  const attachments: NonNullable<CloneState["attachments"]> = { ...state.attachments };
   const usedFileNames = new Set(Object.values(state.notes).map((entry) => entry.file));
+  const usedAttachmentFileNames = new Set(Object.values(attachments).map((entry) => path.basename(entry.file)));
+  const attachmentAuth: AttachmentAuth = { session: auth.session, ckdatabasewsUrl: auth.ckdatabasewsUrl, dsid: auth.dsid };
   const summary: PullSummary = {
     added: 0,
     updated: 0,
     merged: 0,
     removed: 0,
+    attachmentsDownloaded: 0,
     skippedNewUnsyncable: 0,
     droppedUnsyncable: 0,
     unsharedUntracked: 0,
@@ -78,7 +86,7 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
         if (!existing) {
           continue;
         }
-        await handleRemoteDeletion(targetDir, record, existing, notes, summary);
+        await handleRemoteDeletion(targetDir, record, existing, notes, attachments, summary);
         continue;
       }
 
@@ -87,33 +95,55 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
           summary.skippedNewUnsyncable += 1;
           continue;
         }
-        const local = await localFileState(targetDir, existing, record.recordName);
-        if (local === "modified") {
-          summary.conflicts.push(
-            `${existing.file}: became unsyncable remotely (${decoded.reason}), and has local edits - left in place, untracked`,
-          );
-        } else {
-          summary.droppedUnsyncable += 1;
-          if (local === "clean") {
-            console.warn(
-              `${existing.file}: no longer syncable remotely (${decoded.reason}) - leaving existing local copy but no longer tracking it`,
-            );
-          }
-        }
-        delete notes[record.recordName];
-        await removeBaseCopy(targetDir, record.recordName);
+        await dropUnsyncableNote(targetDir, record, existing, notes, attachments, summary, decoded.reason);
         continue;
       }
 
       // decoded.status === "ok"
+      let bodyText = decoded.bodyText;
+      if (decoded.attachments.length > 0) {
+        const zoneID = source.sharedZoneOwner
+          ? { zoneName: PRIVATE_NOTES_ZONE.zoneName, ownerRecordName: source.sharedZoneOwner }
+          : PRIVATE_NOTES_ZONE;
+        const resolved = await resolveNoteAttachments(
+          attachmentAuth,
+          source.sharedZoneOwner ? "shared" : "private",
+          zoneID,
+          targetDir,
+          record.recordName,
+          decoded.bodyText,
+          decoded.attachments,
+          attachments,
+          usedAttachmentFileNames,
+        );
+        if (!resolved) {
+          if (!existing) {
+            summary.skippedNewUnsyncable += 1;
+            continue;
+          }
+          await dropUnsyncableNote(targetDir, record, existing, notes, attachments, summary, "attachment");
+          continue;
+        }
+        bodyText = resolved.bodyText;
+        for (const stale of resolved.staleAttachmentRecordNames) {
+          const staleEntry = attachments[stale];
+          if (staleEntry) {
+            await safeUnlink(path.join(targetDir, staleEntry.file));
+          }
+          delete attachments[stale];
+        }
+        Object.assign(attachments, resolved.attachments);
+        summary.attachmentsDownloaded += Object.keys(resolved.attachments).length;
+      }
+
       if (!existing) {
         const fileName = uniqueFileName(noteFileName(decoded.title), usedFileNames);
         usedFileNames.add(fileName);
 
         const filePath = path.join(targetDir, fileName);
-        await writeFile(filePath, decoded.bodyText, "utf-8");
+        await writeFile(filePath, bodyText, "utf-8");
         await applyNoteFileTimes(filePath, record);
-        await writeBaseCopy(targetDir, record.recordName, decoded.bodyText);
+        await writeBaseCopy(targetDir, record.recordName, bodyText);
         notes[record.recordName] = {
           file: fileName,
           recordChangeTag: record.recordChangeTag ?? "",
@@ -127,9 +157,9 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
       const local = await localFileState(targetDir, existing, record.recordName);
       if (local === "clean" || local === "missing") {
         const filePath = path.join(targetDir, existing.file);
-        await writeFile(filePath, decoded.bodyText, "utf-8");
+        await writeFile(filePath, bodyText, "utf-8");
         await applyNoteFileTimes(filePath, record);
-        await writeBaseCopy(targetDir, record.recordName, decoded.bodyText);
+        await writeBaseCopy(targetDir, record.recordName, bodyText);
         if (local === "missing") {
           console.log(`Recreated ${existing.file} (was missing locally)`);
         }
@@ -145,7 +175,7 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
       // local === "modified": real 3-way merge against the base copy.
       const base = (await readBaseCopy(targetDir, record.recordName)) ?? "";
       const localContent = await readFile(path.join(targetDir, existing.file), "utf-8");
-      const outcome = mergeNoteVersions(base, localContent, decoded.bodyText);
+      const outcome = mergeNoteVersions(base, localContent, bodyText);
 
       await writeFile(path.join(targetDir, existing.file), outcome.text, "utf-8");
       notes[record.recordName] = {
@@ -166,13 +196,13 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
     }
   }
 
-  await handleVanishedSharedZones(targetDir, sharedZones, notes, summary);
+  await handleVanishedSharedZones(targetDir, sharedZones, notes, attachments, summary);
 
-  await writeCloneState(targetDir, { syncToken, sharedZoneSyncTokens, notes });
+  await writeCloneState(targetDir, { syncToken, sharedZoneSyncTokens, notes, attachments });
 
   console.log(
     `Pulled into ${targetDir}: ${summary.added} added, ${summary.updated} updated, ${summary.merged} auto-merged, ` +
-      `${summary.removed} removed`,
+      `${summary.removed} removed, ${summary.attachmentsDownloaded} attachment(s) downloaded`,
   );
   if (summary.skippedNewUnsyncable > 0 || summary.droppedUnsyncable > 0) {
     console.log(
@@ -204,6 +234,7 @@ async function handleVanishedSharedZones(
   targetDir: string,
   sharedZones: Array<{ zoneID: { ownerRecordName?: string | undefined } }>,
   notes: CloneState["notes"],
+  attachments: NonNullable<CloneState["attachments"]>,
   summary: PullSummary,
 ): Promise<void> {
   const liveOwners = new Set(
@@ -219,6 +250,9 @@ async function handleVanishedSharedZones(
     );
     delete notes[recordName];
     await removeBaseCopy(targetDir, recordName);
+    for (const removed of await removeAttachmentsForNote(targetDir, recordName, attachments)) {
+      delete attachments[removed];
+    }
     summary.unsharedUntracked += 1;
   }
 }
@@ -228,6 +262,7 @@ async function handleRemoteDeletion(
   record: CloudKitRecord,
   existing: CloneStateNoteEntry,
   notes: CloneState["notes"],
+  attachments: NonNullable<CloneState["attachments"]>,
   summary: PullSummary,
 ): Promise<void> {
   const local = await localFileState(targetDir, existing, record.recordName);
@@ -239,6 +274,9 @@ async function handleRemoteDeletion(
     }
     delete notes[record.recordName];
     await removeBaseCopy(targetDir, record.recordName);
+    for (const removed of await removeAttachmentsForNote(targetDir, record.recordName, attachments)) {
+      delete attachments[removed];
+    }
     summary.removed += 1;
     return;
   }
@@ -254,6 +292,42 @@ async function handleRemoteDeletion(
   // Keep tracking (state entry + base copy) so this doesn't silently drop
   // out of state.json; there's no new recordChangeTag to advance to since
   // the record no longer exists remotely.
+}
+
+/**
+ * A previously-tracked note that's no longer safely syncable - either
+ * `classifyNoteRecord` itself refused it, or (a Phase 4 addition) it
+ * references an attachment we couldn't resolve/download. Local edits are
+ * never discarded silently: a modified file is left in place but reported
+ * as a conflict; a clean one is left in place and simply untracked.
+ */
+async function dropUnsyncableNote(
+  targetDir: string,
+  record: CloudKitRecord,
+  existing: CloneStateNoteEntry,
+  notes: CloneState["notes"],
+  attachments: NonNullable<CloneState["attachments"]>,
+  summary: PullSummary,
+  reason: string,
+): Promise<void> {
+  const local = await localFileState(targetDir, existing, record.recordName);
+  if (local === "modified") {
+    summary.conflicts.push(
+      `${existing.file}: became unsyncable remotely (${reason}), and has local edits - left in place, untracked`,
+    );
+  } else {
+    summary.droppedUnsyncable += 1;
+    if (local === "clean") {
+      console.warn(
+        `${existing.file}: no longer syncable remotely (${reason}) - leaving existing local copy but no longer tracking it`,
+      );
+    }
+  }
+  delete notes[record.recordName];
+  await removeBaseCopy(targetDir, record.recordName);
+  for (const removed of await removeAttachmentsForNote(targetDir, record.recordName, attachments)) {
+    delete attachments[removed];
+  }
 }
 
 async function safeUnlink(filePath: string): Promise<void> {

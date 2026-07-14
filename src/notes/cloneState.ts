@@ -13,6 +13,20 @@ export interface CloneStateNoteEntry {
   sharedZoneOwner?: string | undefined;
 }
 
+export interface CloneStateAttachmentEntry {
+  /** Path relative to the vault root, e.g. "attachments/_7130093.jpeg". */
+  file: string;
+  /** The `Media` record backing this attachment's actual bytes (distinct
+   * from the `Attachment` record this entry is keyed by - see dev notes). */
+  mediaRecordName: string;
+  /** The Media record's `Asset.fileChecksum` as of the last download - the
+   * change-detection signal `pull` compares against before re-downloading. */
+  mediaFileChecksum: string;
+  /** Which note this attachment belongs to, so it can be cleaned up if that
+   * note is deleted or dropped from tracking. */
+  noteRecordName: string;
+}
+
 export interface CloneState {
   /** CloudKit syncToken as of this snapshot; a future `pull` resumes incremental sync from here. */
   syncToken: string | undefined;
@@ -30,6 +44,10 @@ export interface CloneState {
    */
   replicaId?: string | undefined;
   notes: Record<string, CloneStateNoteEntry>;
+  /** Downloaded attachments, keyed by the `Attachment` record's recordName
+   * (the identifier embedded in the owning note's body). Absent entirely in
+   * state files written before Phase 4. */
+  attachments?: Record<string, CloneStateAttachmentEntry> | undefined;
 }
 
 const STATE_DIR_NAME = ".icloud-notes-sync";
@@ -95,7 +113,29 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
     }
   }
 
-  return { syncToken, sharedZoneSyncTokens, replicaId, notes };
+  let attachments: Record<string, CloneStateAttachmentEntry> | undefined;
+  if (isRecord(value.attachments)) {
+    attachments = {};
+    for (const [recordName, entry] of Object.entries(value.attachments)) {
+      if (
+        !isRecord(entry) ||
+        typeof entry.file !== "string" ||
+        typeof entry.mediaRecordName !== "string" ||
+        typeof entry.mediaFileChecksum !== "string" ||
+        typeof entry.noteRecordName !== "string"
+      ) {
+        throw new Error(`${filePath} has a malformed entry for attachment "${recordName}".`);
+      }
+      attachments[recordName] = {
+        file: entry.file,
+        mediaRecordName: entry.mediaRecordName,
+        mediaFileChecksum: entry.mediaFileChecksum,
+        noteRecordName: entry.noteRecordName,
+      };
+    }
+  }
+
+  return { syncToken, sharedZoneSyncTokens, replicaId, notes, attachments };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

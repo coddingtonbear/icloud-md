@@ -7,6 +7,7 @@ import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState, writeCloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
+import { hasAttachmentReference } from "../notes/noteAttachments.js";
 import { localFileState } from "../notes/localFileState.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { compressNoteDocument, decodeNoteBodyText, decompressNoteDocument } from "../notes/noteText.js";
@@ -79,6 +80,23 @@ export async function runPush(session: IcloudSession, targetDir: string, options
     }
     if (localText === "") {
       summary.refused.push(`${entry.file}: pushing a fully emptied note isn't supported yet - edit it in Notes instead`);
+      continue;
+    }
+    // A note that doesn't already have a tracked attachment but whose text
+    // now contains an "attachments/..." reference was hand-typed (or
+    // copy-pasted), not produced by `clone`/`pull` - there's no real file to
+    // upload behind it, so pushing it as literal text would silently
+    // "succeed" while doing something other than what it looks like. A note
+    // that *does* already have a tracked attachment is caught more
+    // specifically below, once we have the remote record to point at.
+    const notePreviouslyHadAttachments = Object.values(state.attachments ?? {}).some(
+      (attachment) => attachment.noteRecordName === recordName,
+    );
+    if (!notePreviouslyHadAttachments && hasAttachmentReference(localText)) {
+      summary.refused.push(
+        `${entry.file}: contains an "attachments/..." reference, but this tool can't upload new attachments - ` +
+          `remove it, or run "icloud-notes restore ${entry.file}" to discard the edit.`,
+      );
       continue;
     }
     candidates.push({ recordName, entry, localText });
@@ -194,6 +212,13 @@ function prepareUpdate(
   if (classified.status !== "ok") {
     const reason = classified.status === "unsyncable" ? classified.reason : classified.status;
     summary.refused.push(`${entry.file}: remote note is no longer safely editable (${reason})`);
+    return undefined;
+  }
+  if (classified.attachments.length > 0) {
+    summary.refused.push(
+      `${entry.file}: this note has an attachment - it can't be safely edited through this tool and will stay ` +
+        `read-only. Run "icloud-notes restore ${entry.file}" to discard your local edit and match the synced copy.`,
+    );
     return undefined;
   }
 
