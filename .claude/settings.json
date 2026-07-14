@@ -4,7 +4,8 @@
       "Bash(npm install *)",
       "Bash(npm uninstall *)",
       "mcp__obsidian__vault_patch",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "mcp__obsidian__vault_append"
     ]
   }
 }
