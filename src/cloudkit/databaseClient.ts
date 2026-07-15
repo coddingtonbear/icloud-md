@@ -146,6 +146,7 @@ export async function fetchZoneNoteRecords(
   database: CloudKitDatabase,
   zoneID: CloudKitZoneID,
   sinceSyncToken?: string,
+  onPage?: (pageRecordCount: number) => void,
 ): Promise<ZoneChangesResult> {
   const records: CloudKitRecord[] = [];
   let syncToken: string | undefined = sinceSyncToken;
@@ -177,10 +178,12 @@ export async function fetchZoneNoteRecords(
       { zones: [zoneRequest] },
     );
     const zone = firstZone(body);
+    const pageRecords = zone.records ?? [];
 
-    records.push(...(zone.records ?? []));
+    records.push(...pageRecords);
     syncToken = zone.syncToken ?? syncToken;
     moreComing = zone.moreComing === true;
+    onPage?.(pageRecords.length);
   }
 
   return { records, syncToken };
@@ -192,8 +195,9 @@ export async function fetchAllNoteRecords(
   ckDatabaseHost: string,
   dsid: string,
   sinceSyncToken?: string,
+  onPage?: (pageRecordCount: number) => void,
 ): Promise<ZoneChangesResult> {
-  return fetchZoneNoteRecords(session, ckDatabaseHost, dsid, "private", { zoneName: "Notes" }, sinceSyncToken);
+  return fetchZoneNoteRecords(session, ckDatabaseHost, dsid, "private", { zoneName: "Notes" }, sinceSyncToken, onPage);
 }
 
 /**
@@ -287,6 +291,7 @@ export async function fetchSharedNoteRecords(
   ckDatabaseHost: string,
   dsid: string,
   sinceSyncTokens: Record<string, string> = {},
+  onPage?: (pageRecordCount: number) => void,
 ): Promise<SharedZoneChanges[]> {
   const zoneIds = await fetchSharedZoneIds(session, ckDatabaseHost, dsid);
   const results: SharedZoneChanges[] = [];
@@ -301,6 +306,7 @@ export async function fetchSharedNoteRecords(
       "shared",
       zoneID,
       sinceSyncToken,
+      onPage,
     );
 
     const missingBody = records.filter(needsBodyLookup);

@@ -12,11 +12,17 @@ import { localFileState } from "../notes/localFileState.js";
 import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { combineUnpublishableReasons } from "../notes/unknownContent.js";
+import type { SyncProgress } from "../progress.js";
 import type { IcloudSession } from "../session.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 
-interface PullSummary {
+export interface PullNotice {
+  level: "info" | "warn";
+  message: string;
+}
+
+export interface PullSummary {
   added: number;
   updated: number;
   merged: number;
@@ -27,9 +33,14 @@ interface PullSummary {
   droppedUnsyncable: number;
   unsharedUntracked: number;
   conflicts: string[];
+  notices: PullNotice[];
 }
 
-export async function runPull(session: IcloudSession, targetDir: string): Promise<void> {
+export async function runPull(
+  session: IcloudSession,
+  targetDir: string,
+  progress?: SyncProgress,
+): Promise<PullSummary> {
   const state = await readCloneState(targetDir);
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
@@ -40,12 +51,24 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
     throw new NotesUnavailableError();
   }
 
-  const { records, syncToken } = await fetchAllNoteRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, state.syncToken);
+  let fetchedCount = 0;
+  const onPage = (pageRecordCount: number): void => {
+    fetchedCount += pageRecordCount;
+    progress?.onFetchPage?.(fetchedCount);
+  };
+  const { records, syncToken } = await fetchAllNoteRecords(
+    auth.session,
+    auth.ckdatabasewsUrl,
+    auth.dsid,
+    state.syncToken,
+    onPage,
+  );
   const sharedZones = await fetchSharedNoteRecords(
     auth.session,
     auth.ckdatabasewsUrl,
     auth.dsid,
     state.sharedZoneSyncTokens ?? {},
+    onPage,
   );
 
   const notes: CloneState["notes"] = { ...state.notes };
@@ -64,6 +87,7 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
     droppedUnsyncable: 0,
     unsharedUntracked: 0,
     conflicts: [],
+    notices: [],
   };
 
   const sources: Array<{ records: CloudKitRecord[]; sharedZoneOwner?: string | undefined }> = [{ records }];
@@ -75,159 +99,143 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
     sources.push({ records: zone.records, sharedZoneOwner: zone.zoneID.ownerRecordName });
   }
 
+  const totalRecords = sources.reduce((sum, source) => sum + source.records.length, 0);
+  progress?.onProcessStart?.(totalRecords);
+
   for (const source of sources) {
     for (const record of source.records) {
-      if (record.recordType !== "Note") {
-        continue;
-      }
-
-      const existing = notes[record.recordName];
-      const decoded = classifyNoteRecord(record);
-
-      if (decoded.status === "deleted") {
-        if (!existing) {
+      try {
+        if (record.recordType !== "Note") {
           continue;
         }
-        await handleRemoteDeletion(targetDir, record, existing, notes, attachments, summary);
-        continue;
-      }
 
-      if (decoded.status === "unsyncable") {
-        if (!existing) {
-          summary.skippedNewUnsyncable += 1;
-          continue;
-        }
-        await dropUnsyncableNote(targetDir, record, existing, notes, attachments, summary, decoded.reason);
-        continue;
-      }
+        const existing = notes[record.recordName];
+        const decoded = classifyNoteRecord(record);
 
-      // decoded.status === "ok"
-      let bodyText = decoded.bodyText;
-      let unpublishableReason = decoded.unpublishableReason;
-      if (decoded.attachments.length > 0) {
-        const zoneID = source.sharedZoneOwner
-          ? { zoneName: PRIVATE_NOTES_ZONE.zoneName, ownerRecordName: source.sharedZoneOwner }
-          : PRIVATE_NOTES_ZONE;
-        const resolved = await resolveNoteAttachments(
-          attachmentAuth,
-          source.sharedZoneOwner ? "shared" : "private",
-          zoneID,
-          targetDir,
-          record.recordName,
-          decoded.bodyText,
-          decoded.attachments,
-          attachments,
-          usedAttachmentFileNames,
-        );
-        bodyText = resolved.bodyText;
-        unpublishableReason = combineUnpublishableReasons(unpublishableReason, resolved.unpublishableReason);
-        for (const stale of resolved.staleAttachmentRecordNames) {
-          const staleEntry = attachments[stale];
-          if (staleEntry) {
-            await safeUnlink(path.join(targetDir, staleEntry.file));
+        if (decoded.status === "deleted") {
+          if (!existing) {
+            continue;
           }
-          delete attachments[stale];
+          await handleRemoteDeletion(targetDir, record, existing, notes, attachments, summary);
+          continue;
         }
-        Object.assign(attachments, resolved.attachments);
-        summary.attachmentsDownloaded += Object.keys(resolved.attachments).length;
-      }
-      if (unpublishableReason) {
-        summary.unpublishable += 1;
-      }
 
-      if (!existing) {
-        const fileName = uniqueFileName(noteFileName(decoded.title), usedFileNames);
-        usedFileNames.add(fileName);
-
-        const filePath = path.join(targetDir, fileName);
-        await writeFile(filePath, bodyText, "utf-8");
-        await applyNoteFileTimes(filePath, record);
-        await writeBaseCopy(targetDir, record.recordName, bodyText);
-        notes[record.recordName] = {
-          file: fileName,
-          recordChangeTag: record.recordChangeTag ?? "",
-          modificationDate: modificationDateOf(record),
-          sharedZoneOwner: source.sharedZoneOwner,
-          unpublishableReason,
-        };
-        summary.added += 1;
-        continue;
-      }
-
-      const local = await localFileState(targetDir, existing, record.recordName);
-      if (local === "clean" || local === "missing") {
-        const filePath = path.join(targetDir, existing.file);
-        await writeFile(filePath, bodyText, "utf-8");
-        await applyNoteFileTimes(filePath, record);
-        await writeBaseCopy(targetDir, record.recordName, bodyText);
-        if (local === "missing") {
-          console.log(`Recreated ${existing.file} (was missing locally)`);
+        if (decoded.status === "unsyncable") {
+          if (!existing) {
+            summary.skippedNewUnsyncable += 1;
+            continue;
+          }
+          await dropUnsyncableNote(targetDir, record, existing, notes, attachments, summary, decoded.reason);
+          continue;
         }
+
+        // decoded.status === "ok"
+        let bodyText = decoded.bodyText;
+        let unpublishableReason = decoded.unpublishableReason;
+        if (decoded.attachments.length > 0) {
+          const zoneID = source.sharedZoneOwner
+            ? { zoneName: PRIVATE_NOTES_ZONE.zoneName, ownerRecordName: source.sharedZoneOwner }
+            : PRIVATE_NOTES_ZONE;
+          const resolved = await resolveNoteAttachments(
+            attachmentAuth,
+            source.sharedZoneOwner ? "shared" : "private",
+            zoneID,
+            targetDir,
+            record.recordName,
+            decoded.bodyText,
+            decoded.attachments,
+            attachments,
+            usedAttachmentFileNames,
+          );
+          bodyText = resolved.bodyText;
+          unpublishableReason = combineUnpublishableReasons(unpublishableReason, resolved.unpublishableReason);
+          for (const stale of resolved.staleAttachmentRecordNames) {
+            const staleEntry = attachments[stale];
+            if (staleEntry) {
+              await safeUnlink(path.join(targetDir, staleEntry.file));
+            }
+            delete attachments[stale];
+          }
+          Object.assign(attachments, resolved.attachments);
+          summary.attachmentsDownloaded += Object.keys(resolved.attachments).length;
+        }
+        if (unpublishableReason) {
+          summary.unpublishable += 1;
+        }
+
+        if (!existing) {
+          const fileName = uniqueFileName(noteFileName(decoded.title), usedFileNames);
+          usedFileNames.add(fileName);
+
+          const filePath = path.join(targetDir, fileName);
+          await writeFile(filePath, bodyText, "utf-8");
+          await applyNoteFileTimes(filePath, record);
+          await writeBaseCopy(targetDir, record.recordName, bodyText);
+          notes[record.recordName] = {
+            file: fileName,
+            recordChangeTag: record.recordChangeTag ?? "",
+            modificationDate: modificationDateOf(record),
+            sharedZoneOwner: source.sharedZoneOwner,
+            unpublishableReason,
+          };
+          summary.added += 1;
+          continue;
+        }
+
+        const local = await localFileState(targetDir, existing, record.recordName);
+        if (local === "clean" || local === "missing") {
+          const filePath = path.join(targetDir, existing.file);
+          await writeFile(filePath, bodyText, "utf-8");
+          await applyNoteFileTimes(filePath, record);
+          await writeBaseCopy(targetDir, record.recordName, bodyText);
+          if (local === "missing") {
+            summary.notices.push({ level: "info", message: `Recreated ${existing.file} (was missing locally)` });
+          }
+          notes[record.recordName] = {
+            ...existing,
+            recordChangeTag: record.recordChangeTag ?? existing.recordChangeTag,
+            modificationDate: modificationDateOf(record),
+            unpublishableReason,
+          };
+          summary.updated += 1;
+          continue;
+        }
+
+        // local === "modified": real 3-way merge against the base copy.
+        const base = (await readBaseCopy(targetDir, record.recordName)) ?? "";
+        const localContent = await readFile(path.join(targetDir, existing.file), "utf-8");
+        const outcome = mergeNoteVersions(base, localContent, bodyText);
+
+        await writeFile(path.join(targetDir, existing.file), outcome.text, "utf-8");
         notes[record.recordName] = {
           ...existing,
           recordChangeTag: record.recordChangeTag ?? existing.recordChangeTag,
           modificationDate: modificationDateOf(record),
           unpublishableReason,
         };
-        summary.updated += 1;
-        continue;
-      }
 
-      // local === "modified": real 3-way merge against the base copy.
-      const base = (await readBaseCopy(targetDir, record.recordName)) ?? "";
-      const localContent = await readFile(path.join(targetDir, existing.file), "utf-8");
-      const outcome = mergeNoteVersions(base, localContent, bodyText);
-
-      await writeFile(path.join(targetDir, existing.file), outcome.text, "utf-8");
-      notes[record.recordName] = {
-        ...existing,
-        recordChangeTag: record.recordChangeTag ?? existing.recordChangeTag,
-        modificationDate: modificationDateOf(record),
-        unpublishableReason,
-      };
-
-      if (outcome.hasConflict) {
-        summary.conflicts.push(`${existing.file}: merged with conflict markers - resolve manually`);
-        // Base copy deliberately NOT advanced: it stays the merge ancestor
-        // until the conflict markers are actually resolved, so the next pull
-        // (if this note changes again) merges against the right common point.
-      } else {
-        await writeBaseCopy(targetDir, record.recordName, outcome.text);
-        summary.merged += 1;
+        if (outcome.hasConflict) {
+          summary.conflicts.push(`${existing.file}: merged with conflict markers - resolve manually`);
+          // Base copy deliberately NOT advanced: it stays the merge ancestor
+          // until the conflict markers are actually resolved, so the next pull
+          // (if this note changes again) merges against the right common point.
+        } else {
+          await writeBaseCopy(targetDir, record.recordName, outcome.text);
+          summary.merged += 1;
+        }
+      } finally {
+        progress?.onRecordProcessed?.();
       }
     }
   }
+
+  progress?.onProcessComplete?.();
 
   await handleVanishedSharedZones(targetDir, sharedZones, notes, attachments, summary);
 
   await writeCloneState(targetDir, { syncToken, sharedZoneSyncTokens, notes, attachments });
 
-  console.log(
-    `Pulled into ${targetDir}: ${summary.added} added, ${summary.updated} updated, ${summary.merged} auto-merged, ` +
-      `${summary.removed} removed, ${summary.attachmentsDownloaded} attachment(s) downloaded`,
-  );
-  if (summary.unpublishable > 0) {
-    console.log(
-      `${summary.unpublishable} note(s) contain content this tool couldn't fully parse - read-only`,
-    );
-  }
-  if (summary.skippedNewUnsyncable > 0 || summary.droppedUnsyncable > 0) {
-    console.log(
-      `${summary.skippedNewUnsyncable} new unsyncable note(s) skipped, ${summary.droppedUnsyncable} note(s) ` +
-        "dropped from tracking (no longer syncable)",
-    );
-  }
-  if (summary.unsharedUntracked > 0) {
-    console.log(
-      `${summary.unsharedUntracked} shared note(s) no longer shared with you - local copies left in place, untracked`,
-    );
-  }
-  if (summary.conflicts.length > 0) {
-    console.log(`${summary.conflicts.length} conflict(s) - resolve manually:`);
-    for (const conflict of summary.conflicts) {
-      console.log(`  - ${conflict}`);
-    }
-  }
+  return summary;
 }
 
 /**
@@ -252,9 +260,10 @@ async function handleVanishedSharedZones(
     if (!entry.sharedZoneOwner || liveOwners.has(entry.sharedZoneOwner)) {
       continue;
     }
-    console.warn(
-      `${entry.file}: no longer shared with you - leaving local copy in place but no longer tracking it`,
-    );
+    summary.notices.push({
+      level: "warn",
+      message: `${entry.file}: no longer shared with you - leaving local copy in place but no longer tracking it`,
+    });
     delete notes[recordName];
     await removeBaseCopy(targetDir, recordName);
     for (const removed of await removeAttachmentsForNote(targetDir, recordName, attachments)) {
@@ -327,9 +336,10 @@ async function dropUnsyncableNote(
   } else {
     summary.droppedUnsyncable += 1;
     if (local === "clean") {
-      console.warn(
-        `${existing.file}: no longer syncable remotely (${reason}) - leaving existing local copy but no longer tracking it`,
-      );
+      summary.notices.push({
+        level: "warn",
+        message: `${existing.file}: no longer syncable remotely (${reason}) - leaving existing local copy but no longer tracking it`,
+      });
     }
   }
   delete notes[record.recordName];

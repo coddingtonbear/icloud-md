@@ -11,11 +11,12 @@ import { writeCloneState, type CloneState } from "../notes/cloneState.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { combineUnpublishableReasons } from "../notes/unknownContent.js";
 import { NotesUnavailableError } from "../errors.js";
+import type { SyncProgress } from "../progress.js";
 import type { IcloudSession } from "../session.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 
-interface CloneSummary {
+export interface CloneSummary {
   written: number;
   writtenShared: number;
   writtenUnpublishable: number;
@@ -24,7 +25,11 @@ interface CloneSummary {
   skippedUndecodable: number;
 }
 
-export async function runClone(session: IcloudSession, targetDir: string): Promise<void> {
+export async function runClone(
+  session: IcloudSession,
+  targetDir: string,
+  progress?: SyncProgress,
+): Promise<CloneSummary> {
   const auth = await ensureAuthenticated(session);
   if (!auth.ckdatabasewsUrl) {
     throw new NotesUnavailableError();
@@ -32,8 +37,19 @@ export async function runClone(session: IcloudSession, targetDir: string): Promi
 
   await mkdir(targetDir, { recursive: true });
 
-  const { records, syncToken } = await fetchAllNoteRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid);
-  const sharedZones = await fetchSharedNoteRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid);
+  let fetchedCount = 0;
+  const onPage = (pageRecordCount: number): void => {
+    fetchedCount += pageRecordCount;
+    progress?.onFetchPage?.(fetchedCount);
+  };
+  const { records, syncToken } = await fetchAllNoteRecords(
+    auth.session,
+    auth.ckdatabasewsUrl,
+    auth.dsid,
+    undefined,
+    onPage,
+  );
+  const sharedZones = await fetchSharedNoteRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, {}, onPage);
 
   const summary: CloneSummary = {
     written: 0,
@@ -58,83 +74,83 @@ export async function runClone(session: IcloudSession, targetDir: string): Promi
     sources.push({ records: zone.records, sharedZoneOwner: zone.zoneID.ownerRecordName });
   }
 
+  const totalRecords = sources.reduce((sum, source) => sum + source.records.length, 0);
+  progress?.onProcessStart?.(totalRecords);
+
   for (const source of sources) {
     for (const record of source.records) {
-      if (record.recordType !== "Note") {
-        continue;
-      }
+      try {
+        if (record.recordType !== "Note") {
+          continue;
+        }
 
-      const decoded = classifyNoteRecord(record);
-      if (decoded.status === "deleted") {
-        summary.skippedDeleted += 1;
-        continue;
-      }
-      if (decoded.status === "unsyncable") {
-        summary.skippedUndecodable += 1;
-        continue;
-      }
+        const decoded = classifyNoteRecord(record);
+        if (decoded.status === "deleted") {
+          summary.skippedDeleted += 1;
+          continue;
+        }
+        if (decoded.status === "unsyncable") {
+          summary.skippedUndecodable += 1;
+          continue;
+        }
 
-      let bodyText = decoded.bodyText;
-      let unpublishableReason = decoded.unpublishableReason;
-      if (decoded.attachments.length > 0) {
-        const zoneID = source.sharedZoneOwner
-          ? { zoneName: PRIVATE_NOTES_ZONE.zoneName, ownerRecordName: source.sharedZoneOwner }
-          : PRIVATE_NOTES_ZONE;
-        const resolved = await resolveNoteAttachments(
-          attachmentAuth,
-          source.sharedZoneOwner ? "shared" : "private",
-          zoneID,
-          targetDir,
-          record.recordName,
-          decoded.bodyText,
-          decoded.attachments,
-          attachments,
-          usedAttachmentFileNames,
-        );
-        bodyText = resolved.bodyText;
-        unpublishableReason = combineUnpublishableReasons(unpublishableReason, resolved.unpublishableReason);
-        Object.assign(attachments, resolved.attachments);
-        summary.attachmentsDownloaded += Object.keys(resolved.attachments).length;
+        let bodyText = decoded.bodyText;
+        let unpublishableReason = decoded.unpublishableReason;
+        if (decoded.attachments.length > 0) {
+          const zoneID = source.sharedZoneOwner
+            ? { zoneName: PRIVATE_NOTES_ZONE.zoneName, ownerRecordName: source.sharedZoneOwner }
+            : PRIVATE_NOTES_ZONE;
+          const resolved = await resolveNoteAttachments(
+            attachmentAuth,
+            source.sharedZoneOwner ? "shared" : "private",
+            zoneID,
+            targetDir,
+            record.recordName,
+            decoded.bodyText,
+            decoded.attachments,
+            attachments,
+            usedAttachmentFileNames,
+          );
+          bodyText = resolved.bodyText;
+          unpublishableReason = combineUnpublishableReasons(unpublishableReason, resolved.unpublishableReason);
+          Object.assign(attachments, resolved.attachments);
+          summary.attachmentsDownloaded += Object.keys(resolved.attachments).length;
+        }
+
+        const fileName = uniqueFileName(noteFileName(decoded.title), usedFileNames);
+        usedFileNames.add(fileName);
+
+        const filePath = path.join(targetDir, fileName);
+        await writeFile(filePath, bodyText, "utf-8");
+        await applyNoteFileTimes(filePath, record);
+        await writeBaseCopy(targetDir, record.recordName, bodyText);
+        if (source.sharedZoneOwner) {
+          summary.writtenShared += 1;
+        } else {
+          summary.written += 1;
+        }
+        if (unpublishableReason) {
+          summary.writtenUnpublishable += 1;
+        }
+
+        const modificationDate = modificationDateOf(record);
+
+        notes[record.recordName] = {
+          file: fileName,
+          recordChangeTag: record.recordChangeTag ?? "",
+          modificationDate,
+          sharedZoneOwner: source.sharedZoneOwner,
+          unpublishableReason,
+        };
+      } finally {
+        progress?.onRecordProcessed?.();
       }
-
-      const fileName = uniqueFileName(noteFileName(decoded.title), usedFileNames);
-      usedFileNames.add(fileName);
-
-      const filePath = path.join(targetDir, fileName);
-      await writeFile(filePath, bodyText, "utf-8");
-      await applyNoteFileTimes(filePath, record);
-      await writeBaseCopy(targetDir, record.recordName, bodyText);
-      if (source.sharedZoneOwner) {
-        summary.writtenShared += 1;
-      } else {
-        summary.written += 1;
-      }
-      if (unpublishableReason) {
-        summary.writtenUnpublishable += 1;
-      }
-
-      const modificationDate = modificationDateOf(record);
-
-      notes[record.recordName] = {
-        file: fileName,
-        recordChangeTag: record.recordChangeTag ?? "",
-        modificationDate,
-        sharedZoneOwner: source.sharedZoneOwner,
-        unpublishableReason,
-      };
     }
   }
 
+  progress?.onProcessComplete?.();
+
   await writeCloneState(targetDir, { syncToken, sharedZoneSyncTokens, notes, attachments });
 
-  console.log(
-    `Cloned ${summary.written} notes (plus ${summary.writtenShared} shared with you) into ${targetDir}, ` +
-      `${summary.attachmentsDownloaded} attachment(s) downloaded`,
-  );
-  if (summary.writtenUnpublishable > 0) {
-    console.log(
-      `${summary.writtenUnpublishable} note(s) written with content this tool couldn't fully parse - read-only`,
-    );
-  }
-  console.log(`Skipped: ${summary.skippedDeleted} deleted, ${summary.skippedUndecodable} undecodable`);
+  return summary;
 }
