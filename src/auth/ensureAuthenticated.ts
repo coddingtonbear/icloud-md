@@ -1,5 +1,6 @@
 import { checkAuthentication, type AuthCheckResult } from "../cloudkit/setupClient.js";
 import { performBrowserLogin } from "./browserLogin.js";
+import { AuthenticationExpiredError, SilentReauthFailedError } from "../errors.js";
 import { DEFAULT_SESSION_PATH, persistSessionIfRotated, writeSessionFile, type IcloudSession } from "../session.js";
 
 export type AuthCheckOk = Extract<AuthCheckResult, { ok: true }>;
@@ -37,7 +38,7 @@ export async function ensureAuthenticated(
   }
 
   if (auth.status !== 421) {
-    throw new Error(`Not authenticated (HTTP ${auth.status}): ${auth.error}`);
+    throw new AuthenticationExpiredError(auth.status, auth.error);
   }
 
   console.log("Session expired; attempting silent re-authentication via the persistent browser profile...");
@@ -46,16 +47,16 @@ export async function ensureAuthenticated(
   try {
     recovered = await recover({ headless: true, timeoutMs: HEADLESS_RECOVERY_TIMEOUT_MS });
   } catch (cause) {
-    throw new Error(
+    throw new SilentReauthFailedError(
       "Session expired, and silent (headless) re-authentication failed - this profile likely needs a human for " +
-        'this sign-in. Run "npm run cli -- login" to sign in interactively.',
+        "this sign-in.",
       { cause },
     );
   }
 
   const recoveredAuth = await checkAuth(recovered);
   if (!recoveredAuth.ok) {
-    throw new Error(
+    throw new SilentReauthFailedError(
       `Recovered a session via headless re-authentication, but it failed verification ` +
         `(HTTP ${recoveredAuth.status}): ${recoveredAuth.error}`,
     );

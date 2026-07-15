@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { CorruptSessionFileError, MissingSessionFileError } from "./errors.js";
 
 /** A captured browser session: enough to make authenticated iCloud web-service requests. */
 export interface IcloudSession {
@@ -24,11 +25,7 @@ export async function loadSession(sessionPath: string = DEFAULT_SESSION_PATH): P
   try {
     raw = await readFile(sessionPath, "utf8");
   } catch (cause) {
-    throw new Error(
-      `No session file found at ${sessionPath}. Run "npm run cli -- login" (or "npm run import-har -- ` +
-        '<path-to.har>" from a browser HAR export) to create one.',
-      { cause },
-    );
+    throw new MissingSessionFileError(sessionPath, { cause });
   }
 
   const parsed: unknown = JSON.parse(raw);
@@ -124,13 +121,13 @@ function assertIcloudSession(value: unknown, sessionPath: string): IcloudSession
   const requiredStringFields = ["cookie", "clientId", "clientBuildNumber", "clientMasteringNumber", "capturedAt"] as const;
 
   if (typeof value !== "object" || value === null) {
-    throw new Error(`Session file at ${sessionPath} does not contain a JSON object.`);
+    throw new CorruptSessionFileError(`Session file at ${sessionPath} does not contain a JSON object.`);
   }
   const record = value as Record<string, unknown>;
 
   for (const field of requiredStringFields) {
     if (typeof record[field] !== "string" || record[field] === "") {
-      throw new Error(`Session file at ${sessionPath} is missing a non-empty "${field}" field.`);
+      throw new CorruptSessionFileError(`Session file at ${sessionPath} is missing a non-empty "${field}" field.`);
     }
   }
 

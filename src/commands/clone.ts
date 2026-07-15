@@ -9,6 +9,7 @@ import { noteFileName, uniqueFileName } from "../notes/filename.js";
 import { writeBaseCopy } from "../notes/baseCopy.js";
 import { writeCloneState, type CloneState } from "../notes/cloneState.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
+import { NotesUnavailableError } from "../errors.js";
 import type { IcloudSession } from "../session.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
@@ -25,7 +26,7 @@ interface CloneSummary {
 export async function runClone(session: IcloudSession, targetDir: string): Promise<void> {
   const auth = await ensureAuthenticated(session);
   if (!auth.ckdatabasewsUrl) {
-    throw new Error("Authenticated, but the account reported no ckdatabasews host - can't reach Notes.");
+    throw new NotesUnavailableError();
   }
 
   await mkdir(targetDir, { recursive: true });

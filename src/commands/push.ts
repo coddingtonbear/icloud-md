@@ -6,6 +6,7 @@ import { lookupRecords, updateNoteRecord, type CloudKitRecord } from "../cloudki
 import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState, writeCloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
+import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
 import { hasAttachmentReference } from "../notes/noteAttachments.js";
 import { localFileState } from "../notes/localFileState.js";
@@ -56,9 +57,7 @@ export async function runPush(session: IcloudSession, targetDir: string, options
   const dryRun = options.dryRun === true;
   const state = await readCloneState(targetDir);
   if (!state) {
-    throw new Error(
-      `${targetDir} doesn't look like a cloned notes directory (no .icloud-notes-sync/state.json) - run "clone" first.`,
-    );
+    throw new NotClonedDirectoryError(targetDir);
   }
 
   const summary: PushSummary = { pushed: 0, conflicts: [], refused: [] };
@@ -110,7 +109,7 @@ export async function runPush(session: IcloudSession, targetDir: string, options
 
   const auth = await ensureAuthenticated(session);
   if (!auth.ckdatabasewsUrl) {
-    throw new Error("Authenticated, but the account reported no ckdatabasews host - can't reach Notes.");
+    throw new NotesUnavailableError();
   }
 
   // Fresh lookup of every candidate: both the staleness check and the
@@ -130,7 +129,7 @@ export async function runPush(session: IcloudSession, targetDir: string, options
   state.replicaId = replicaId;
   const replicaIdBytes = new Uint8Array(Buffer.from(replicaId, "base64"));
   if (replicaIdBytes.length !== 16) {
-    throw new Error("state.json has a malformed replicaId (expected 16 bytes, base64-encoded)");
+    throw new CorruptStateFileError("state.json has a malformed replicaId (expected 16 bytes, base64-encoded)");
   }
 
   for (const candidate of candidates) {

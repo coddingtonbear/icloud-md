@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { CorruptStateFileError } from "../errors.js";
 
 export interface CloneStateNoteEntry {
   file: string;
@@ -77,7 +78,7 @@ export async function readCloneState(targetDir: string): Promise<CloneState | un
 
 function assertCloneState(value: unknown, filePath: string): CloneState {
   if (typeof value !== "object" || value === null || !isRecord(value) || !isRecord(value.notes)) {
-    throw new Error(`${filePath} does not look like a valid state file (missing "notes" object).`);
+    throw new CorruptStateFileError(`${filePath} does not look like a valid state file (missing "notes" object).`);
   }
 
   const syncToken = typeof value.syncToken === "string" ? value.syncToken : undefined;
@@ -90,7 +91,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
       typeof entry.recordChangeTag !== "string" ||
       typeof entry.modificationDate !== "number"
     ) {
-      throw new Error(`${filePath} has a malformed entry for note "${recordName}".`);
+      throw new CorruptStateFileError(`${filePath} has a malformed entry for note "${recordName}".`);
     }
     notes[recordName] = {
       file: entry.file,
@@ -107,7 +108,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
     sharedZoneSyncTokens = {};
     for (const [owner, token] of Object.entries(value.sharedZoneSyncTokens)) {
       if (typeof token !== "string") {
-        throw new Error(`${filePath} has a malformed shared-zone syncToken for owner "${owner}".`);
+        throw new CorruptStateFileError(`${filePath} has a malformed shared-zone syncToken for owner "${owner}".`);
       }
       sharedZoneSyncTokens[owner] = token;
     }
@@ -124,7 +125,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
         typeof entry.mediaFileChecksum !== "string" ||
         typeof entry.noteRecordName !== "string"
       ) {
-        throw new Error(`${filePath} has a malformed entry for attachment "${recordName}".`);
+        throw new CorruptStateFileError(`${filePath} has a malformed entry for attachment "${recordName}".`);
       }
       attachments[recordName] = {
         file: entry.file,

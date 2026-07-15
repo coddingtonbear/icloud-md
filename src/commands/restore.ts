@@ -2,6 +2,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { readBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState } from "../notes/cloneState.js";
+import { NotClonedDirectoryError, UntrackedFileError } from "../errors.js";
 
 /**
  * Discards a tracked note's local edits, overwriting it with its base copy -
@@ -14,15 +15,13 @@ import { readCloneState } from "../notes/cloneState.js";
 export async function runRestore(targetDir: string, fileArg: string): Promise<void> {
   const state = await readCloneState(targetDir);
   if (!state) {
-    throw new Error(
-      `${targetDir} doesn't look like a cloned notes directory (no .icloud-notes-sync/state.json) - run "clone" first.`,
-    );
+    throw new NotClonedDirectoryError(targetDir);
   }
 
   const fileName = path.basename(fileArg);
   const match = Object.entries(state.notes).find(([, entry]) => entry.file === fileName);
   if (!match) {
-    throw new Error(`"${fileName}" isn't a tracked note in ${targetDir} (check the file name and try again).`);
+    throw new UntrackedFileError(fileName, targetDir);
   }
   const [recordName, entry] = match;
 

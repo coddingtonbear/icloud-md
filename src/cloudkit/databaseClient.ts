@@ -1,5 +1,6 @@
 import type { IcloudSession } from "../session.js";
 import { loggedFetch } from "../debugLog.js";
+import { CloudKitRequestFailedError } from "../errors.js";
 
 export interface CloudKitFieldValue {
   value: unknown;
@@ -124,7 +125,7 @@ async function postDatabase(
   );
 
   if (!response.ok) {
-    throw new Error(`${operation} request failed (${database} db): HTTP ${response.status}`);
+    throw new CloudKitRequestFailedError(`${operation} request failed (${database} db): HTTP ${response.status}`);
   }
 
   return response.json();
@@ -363,7 +364,7 @@ export async function fetchAssetBytes(downloadURL: string): Promise<Buffer> {
     headers: { Origin: "https://www.icloud.com", Referer: "https://www.icloud.com/" },
   });
   if (!response.ok) {
-    throw new Error(`Attachment download failed: HTTP ${response.status}`);
+    throw new CloudKitRequestFailedError(`Attachment download failed: HTTP ${response.status}`);
   }
   return Buffer.from(await response.arrayBuffer());
 }
@@ -456,7 +457,7 @@ export function firstZone(body: unknown): ParsedZone {
   // would make a broken fetch look like a clean empty sync.
   if (typeof zone.serverErrorCode === "string") {
     const reason = typeof zone.reason === "string" ? zone.reason : "no reason given";
-    throw new Error(`changes/zone failed for a zone: ${zone.serverErrorCode} (${reason})`);
+    throw new CloudKitRequestFailedError(`changes/zone failed for a zone: ${zone.serverErrorCode} (${reason})`);
   }
 
   const records = Array.isArray(zone.records) ? zone.records.map(parseRecord) : undefined;

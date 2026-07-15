@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { chromium, type BrowserContext, type Page, type Response as PlaywrightResponse } from "playwright";
 import { DEFAULT_CLIENT_BUILD_NUMBER, DEFAULT_CLIENT_MASTERING_NUMBER } from "./clientConstants.js";
+import { ChromiumNotInstalledError, SignInIncompleteError } from "../errors.js";
 import type { IcloudSession } from "../session.js";
 
 /**
@@ -170,7 +171,7 @@ export function sessionFromBrowserCapture(
 ): IcloudSession {
   const cookie = buildIcloudCookieHeader(cookies);
   if (cookie === "") {
-    throw new Error("The browser session contained no icloud.com cookies to capture - sign-in did not complete.");
+    throw new SignInIncompleteError("The browser session contained no icloud.com cookies to capture - sign-in did not complete.");
   }
 
   const params = extractClientParams(setupRequestUrl);
@@ -265,10 +266,7 @@ export async function performBrowserLogin(options: BrowserLoginOptions = {}): Pr
   try {
     context = await chromium.launchPersistentContext(profileDir, { headless, viewport: null });
   } catch (cause) {
-    throw new Error(
-      'Could not launch the login browser. If Playwright\'s Chromium is not installed yet, run "npx playwright install chromium" and retry.',
-      { cause },
-    );
+    throw new ChromiumNotInstalledError({ cause });
   }
 
   try {
@@ -298,7 +296,7 @@ export async function performBrowserLogin(options: BrowserLoginOptions = {}): Pr
       response = await successPromise;
     } catch (cause) {
       const timedOut = cause instanceof Error && cause.name === "TimeoutError";
-      throw new Error(
+      throw new SignInIncompleteError(
         timedOut
           ? `Timed out after ${timeoutMs}ms waiting for sign-in to complete.`
           : "The browser window was closed before sign-in completed.",

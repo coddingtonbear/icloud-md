@@ -4,6 +4,7 @@ import { ensureAuthenticated } from "../auth/ensureAuthenticated.js";
 import { fetchAllNoteRecords, fetchSharedNoteRecords, type CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { removeAttachmentsForNote, resolveNoteAttachments, type AttachmentAuth } from "../notes/attachmentSync.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
+import { NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { noteFileName, uniqueFileName } from "../notes/filename.js";
 import { mergeNoteVersions } from "../notes/mergeConflict.js";
 import { readBaseCopy, removeBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
@@ -29,14 +30,12 @@ interface PullSummary {
 export async function runPull(session: IcloudSession, targetDir: string): Promise<void> {
   const state = await readCloneState(targetDir);
   if (!state) {
-    throw new Error(
-      `${targetDir} doesn't look like a cloned notes directory (no .icloud-notes-sync/state.json) - run "clone" first.`,
-    );
+    throw new NotClonedDirectoryError(targetDir);
   }
 
   const auth = await ensureAuthenticated(session);
   if (!auth.ckdatabasewsUrl) {
-    throw new Error("Authenticated, but the account reported no ckdatabasews host - can't reach Notes.");
+    throw new NotesUnavailableError();
   }
 
   const { records, syncToken } = await fetchAllNoteRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, state.syncToken);
