@@ -1,14 +1,38 @@
 {
   "name": "icloud-notes-sync",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "type": "module",
   "description": "Sync Apple Notes to a git-backed local folder via CloudKit's private web services.",
+  "license": "MIT",
+  "author": "Adam Coddington",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coddingtonbear/icloud-notes-sync.git"
+  },
+  "homepage": "https://github.com/coddingtonbear/icloud-notes-sync#readme",
+  "bugs": {
+    "url": "https://github.com/coddingtonbear/icloud-notes-sync/issues"
+  },
+  "keywords": [
+    "apple-notes",
+    "icloud",
+    "notes",
+    "sync",
+    "cli",
+    "git"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "bin": {
     "icloud-notes": "./dist/cli.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "import-har": "tsx src/scripts/importHar.ts",
     "test": "tsx --test $(find src -name '*.test.ts')"

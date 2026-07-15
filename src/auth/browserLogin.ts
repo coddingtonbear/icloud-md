@@ -1,4 +1,5 @@
 import { mkdir } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { chromium, type BrowserContext, type Page, type Response as PlaywrightResponse } from "playwright";
@@ -247,6 +248,61 @@ function keepMeSignedInWatcher(page: Page, isDone: () => boolean, status: (messa
   })();
 }
 
+/** Playwright's own message when a browser's binary hasn't been downloaded yet (matched the same way Playwright's CLI itself detects this failure). */
+export function isMissingChromiumError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("Executable doesn't exist");
+}
+
+/** Runs `npx playwright install chromium` as a child process, streaming its own progress output straight through. */
+function installChromium(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("npx", ["playwright", "install", "chromium"], { stdio: "inherit" });
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`"npx playwright install chromium" exited with code ${code}`));
+      }
+    });
+  });
+}
+
+/**
+ * Launches the persistent login browser, transparently downloading Chromium
+ * on first use rather than requiring a separate manual install step. Only the
+ * specific "browser executable doesn't exist" failure triggers an install
+ * attempt; any other launch failure (or a failure of the install itself)
+ * falls back to `ChromiumNotInstalledError`, which still points the user at
+ * running the command by hand.
+ */
+async function launchWithLazyChromiumInstall(
+  profileDir: string,
+  headless: boolean,
+  status: (message: string) => void,
+): Promise<BrowserContext> {
+  try {
+    return await chromium.launchPersistentContext(profileDir, { headless, viewport: null });
+  } catch (cause) {
+    if (!isMissingChromiumError(cause)) {
+      throw new ChromiumNotInstalledError({ cause });
+    }
+  }
+
+  status("First-time setup: downloading the sign-in browser (~150MB, one-time)...");
+  try {
+    await installChromium();
+  } catch (cause) {
+    throw new ChromiumNotInstalledError({ cause });
+  }
+
+  try {
+    return await chromium.launchPersistentContext(profileDir, { headless, viewport: null });
+  } catch (cause) {
+    throw new ChromiumNotInstalledError({ cause });
+  }
+}
+
 /**
  * Opens the login window and resolves with a captured session once sign-in
  * completes. Rejects if the user closes the window first (interactive mode)
@@ -262,12 +318,7 @@ export async function performBrowserLogin(options: BrowserLoginOptions = {}): Pr
   const timeoutMs = options.timeoutMs ?? 0;
   await mkdir(profileDir, { recursive: true, mode: 0o700 });
 
-  let context: BrowserContext;
-  try {
-    context = await chromium.launchPersistentContext(profileDir, { headless, viewport: null });
-  } catch (cause) {
-    throw new ChromiumNotInstalledError({ cause });
-  }
+  const context = await launchWithLazyChromiumInstall(profileDir, headless, status);
 
   try {
     const page = context.pages()[0] ?? (await context.newPage());

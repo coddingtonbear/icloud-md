@@ -5,6 +5,7 @@ import {
   extractClientParams,
   isFullySignedInBody,
   isIcloudDomain,
+  isMissingChromiumError,
   sessionFromBrowserCapture,
   type CapturedCookie,
 } from "./browserLogin.js";
@@ -123,4 +124,17 @@ test("isFullySignedInBody rejects bodies without account info", () => {
   assert.equal(isFullySignedInBody(null), false);
   assert.equal(isFullySignedInBody({}), false);
   assert.equal(isFullySignedInBody({ success: true }), false);
+});
+
+test("isMissingChromiumError matches Playwright's own missing-executable message", () => {
+  assert.equal(
+    isMissingChromiumError(new Error("Executable doesn't exist at /home/user/.cache/ms-playwright/chromium-1234/chrome")),
+    true,
+  );
+});
+
+test("isMissingChromiumError rejects other launch failures and non-Error values", () => {
+  assert.equal(isMissingChromiumError(new Error("spawn EACCES")), false);
+  assert.equal(isMissingChromiumError("Executable doesn't exist"), false);
+  assert.equal(isMissingChromiumError(undefined), false);
 });

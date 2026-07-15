@@ -79,13 +79,15 @@ every vault, not scoped to whichever directory the CLI happens to be
 invoked from: `login` once, then any number of `clone`/`pull` targets reuse
 the same session. This only supports one Apple ID at a time:
 
-1. One-time setup: `npm run build && npm link` puts the `icloud-notes`
-   command on your `PATH` (re-run `npm run build` after source changes),
-   then `npx playwright install chromium` fetches the login browser (a
-   one-off ~150 MB download).
+1. One-time setup: `npm install -g icloud-notes-sync` puts the `icloud-notes`
+   command on your `PATH`. (Working from a clone instead: `npm run build &&
+   npm link`, re-run `npm run build` after source changes.)
 2. `icloud-notes login` opens the browser window; sign in as you normally
-   would. The command detects completion on its own, verifies the captured
-   session, and closes the window. Closing the window yourself aborts.
+   would. The first run downloads the login browser automatically (a
+   one-off ~150 MB Chromium fetch, via `npx playwright install chromium`
+   under the hood) before opening it. The command detects sign-in completion
+   on its own, verifies the captured session, and closes the window. Closing
+   the window yourself aborts.
 3. The login browser keeps a persistent profile under
    `~/.config/icloud-notes-sync/browser-profile/`, so after the first
    sign-in Apple treats it as a trusted, returning browser — later `login`
