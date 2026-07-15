@@ -3,10 +3,13 @@ import assert from "node:assert/strict";
 import {
   decodeAttachmentFilename,
   decodeNoteAttachmentRefs,
+  formatAttachmentMarkdown,
   hasAttachmentReference,
   isImageUti,
+  isTableUti,
   parseAssetField,
   renderAttachmentPlaceholders,
+  renderPlaceholders,
   type AttachmentReference,
 } from "./noteAttachments.js";
 
@@ -90,6 +93,31 @@ test("parseAssetField returns undefined for non-ASSETID or malformed fields", ()
   assert.equal(parseAssetField({ value: "not an object", type: "ASSETID" }), undefined);
   assert.equal(parseAssetField({ value: { downloadURL: "x" }, type: "ASSETID" }), undefined);
   assert.equal(parseAssetField({ value: { downloadURL: "x", fileChecksum: "y" }, type: "STRING" }), undefined);
+});
+
+test("isTableUti recognizes the table UTI and rejects file UTIs", () => {
+  assert.equal(isTableUti("com.apple.notes.table"), true);
+  assert.equal(isTableUti("public.jpeg"), false);
+  assert.equal(isTableUti("com.apple.m4a-audio"), false);
+});
+
+test("formatAttachmentMarkdown matches what renderAttachmentPlaceholders produces per-ref", () => {
+  const ref: AttachmentReference = { attachmentIdentifier: "A", typeUti: "public.jpeg" };
+  assert.equal(formatAttachmentMarkdown(ref, "attachments/photo.jpeg"), "![photo.jpeg](attachments/photo.jpeg)");
+});
+
+test("renderPlaceholders substitutes a mix of table markdown and file links by position", () => {
+  const result = renderPlaceholders("Title\n￼\n￼\n", ["| a | b |\n| --- | --- |", "[call.m4a](attachments/call.m4a)"]);
+  assert.equal(result, "Title\n| a | b |\n| --- | --- |\n[call.m4a](attachments/call.m4a)\n");
+});
+
+test("renderPlaceholders leaves a placeholder untouched when its replacement is undefined", () => {
+  const result = renderPlaceholders("￼￼", ["resolved", undefined]);
+  assert.equal(result, "resolved￼");
+});
+
+test("renderPlaceholders is a no-op with no replacements", () => {
+  assert.equal(renderPlaceholders("Plain text", []), "Plain text");
 });
 
 test("hasAttachmentReference detects a hand-typed attachments/ link or embed", () => {

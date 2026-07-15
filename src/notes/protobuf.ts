@@ -79,6 +79,16 @@ export function getLastBytesField(fields: Map<number, ProtoValue[]>, fieldNumber
   return last && last.wireType === 2 ? last.bytes : undefined;
 }
 
+/** Returns the last (latest wins) varint value for a field number. */
+export function getLastVarintField(fields: Map<number, ProtoValue[]>, fieldNumber: number): bigint | undefined {
+  const values = fields.get(fieldNumber);
+  if (!values || values.length === 0) {
+    return undefined;
+  }
+  const last = values[values.length - 1];
+  return last && last.wireType === 0 ? last.varint : undefined;
+}
+
 /**
  * Reads a message as an ordered token list, preserving the position of every
  * field occurrence. Re-encoding via `encodeProtoTokens` reproduces the

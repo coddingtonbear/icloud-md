@@ -4,7 +4,7 @@ import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
-import { extractMediaRecordNames, matchAttachmentRecords, removeAttachmentsForNote } from "./attachmentSync.js";
+import { decodeTableAttachment, extractMediaRecordNames, matchAttachmentRecords, removeAttachmentsForNote } from "./attachmentSync.js";
 import type { CloneStateAttachmentEntry } from "./cloneState.js";
 import type { AttachmentReference } from "./noteAttachments.js";
 
@@ -72,6 +72,22 @@ const IMAGE_MEDIA_RECORD: CloudKitRecord = {
       type: "ASSETID",
     },
     FilenameEncrypted: { value: "XzcxMzAwOTMuanBlZw==", type: "ENCRYPTED_BYTES" },
+  },
+};
+
+// Real `Attachment` record captured live for "Test Table Note (2)", first save
+// (dev notes, 2026-07-14T10:46/14:41) - a table's MergeableDataEncrypted lives
+// directly on the Attachment record, with no Media reference at all.
+const TABLE_ATTACHMENT_RECORD: CloudKitRecord = {
+  recordName: "92df3572-94a6-48f5-be27-075e91f80a2c",
+  recordType: "Attachment",
+  fields: {
+    UTI: { value: "com.apple.notes.table", type: "STRING" },
+    MergeableDataEncrypted: {
+      value:
+        "eJzt1E9oFFccwPGZyWZ39iWNr5OahofQdgxJjHZdB5tDxUOTqKTEoJtNemghxHW0u2x2ZXdFI3opiBcPihRLyUULObVNm4stNFQwSslhD+k/Dy0UNNAiEimoB7H27SbVbLKhh1JP32GH3/x+7/d5895jd23D+fq2ZRvSUF/etoQtgvrZbDZUX+ptO6BabcNx3Vej/3KpoG06VtTUsUbHGh1rdbR1DOr4gqoXQgRKM+vMUq+nNtumarMtZ6P7WncsPnIg7Xdn00dHMz3JnJ8oJLOZPv9QIZ6NJQ+/X1A/mx+Y35tiwhQnRJ8TXPj2G/1RsjxhaeHl2G6WK6auWKoc2y3VJGw99kRf63Tf0+cOyzZLt/OS3p7cOhuev3dhr3F5z0yxMXq+S1dNR16fbL6/M198PD98LRG5dHXKaReOsKKlbQXU02Mq10K6FnxWW9ZZW6Uz9Kym6lPCtvQhBRxLmhWZVZHVVGSB//tE7vRfnPbnHtxtGZ+9NTbUsLB4Ilc2dY7sOntj/5mBybbQw9S2pX0Kvafwin3W61rdqhMpdYoqnfVrnEhtRRasyEIVma06vMV31On5Gla8I6xrLy57xz+9pa/muhW9eraoXNa7O9bjWG9F/+PZWioS2+IYVWZZw1Ss0amyxsaVa+x67mt07eRBP1NIFsbcpkSu2o/YDeT99CE3mMjFssfybnhwsLenN3PQP+6GE7nF3rxbl/DT6aWk4+VEdjQycuRI2o90x3rikf6B/qOjB/xclYGBQi6ZOdyxftVA6S3L+zPZgp+PLP3NrB7o7V5jAIFAIBAIBAKBQCAQCAQCgUAgEAgEAoFAIBAIBAKBQCAQCAQCgUAgEAgEAoFAIBAIBAKBQCAQCAQCgUAgEAgEAoFAIBAIBAKBQCAQCAQCgUAgEAgEAoFAIBAIBAKBQCAQCAQCgUAgEAgEAoFAIBAIBAKBQCAQCAQCgUAgEAgEAoFAIBAIBAKBQCAQCAQCgUAgEAgEAoFAVApPnmycaYlt/u6jYzt+/OlU17vvePLED198dfOT7WO/zQ21npuO/uHJ65PN93fmi4/nh68lIpeuTnnSP9V2OvDhGxOfnpt69PFfG+Ke3Dobnr93Ya9xec9MsTF6vsuTEyd794nxz4Y7fy/KP9XufZ68sqlzZNfZG/vPDEy2hR6mtnnyvdZXZFPdo19v/mLEPo8PbvTknf6L0/7cg7st47O3xoYaFt7cIJRYtUrHsi19m38DuMWS1w==",
+      type: "ENCRYPTED_BYTES",
+    },
   },
 };
 
@@ -268,4 +284,30 @@ test("matchAttachmentRecords disambiguates a filename collision the same way not
     used,
   );
   assert.equal(matched?.[0]?.relativeFile, "attachments/_7130093 2.jpeg");
+});
+
+test("decodeTableAttachment renders a real captured table's MergeableDataEncrypted as markdown", () => {
+  const markdown = decodeTableAttachment(TABLE_ATTACHMENT_RECORD);
+  assert.equal(markdown, ["| A0 | B0 |", "| --- | --- |", "|  |  |"].join("\n"));
+});
+
+test("decodeTableAttachment refuses when the record is missing", () => {
+  assert.equal(decodeTableAttachment(undefined), undefined);
+});
+
+test("decodeTableAttachment refuses a record that isn't an Attachment", () => {
+  assert.equal(decodeTableAttachment({ ...TABLE_ATTACHMENT_RECORD, recordType: "Note" }), undefined);
+});
+
+test("decodeTableAttachment refuses when MergeableDataEncrypted is missing", () => {
+  assert.equal(decodeTableAttachment({ recordName: "R1", recordType: "Attachment", fields: {} }), undefined);
+});
+
+test("decodeTableAttachment refuses malformed MergeableDataEncrypted rather than throwing", () => {
+  const broken: CloudKitRecord = {
+    recordName: "R1",
+    recordType: "Attachment",
+    fields: { MergeableDataEncrypted: { value: Buffer.from("not a table").toString("base64"), type: "ENCRYPTED_BYTES" } },
+  };
+  assert.equal(decodeTableAttachment(broken), undefined);
 });

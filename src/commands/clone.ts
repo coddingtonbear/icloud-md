@@ -95,7 +95,7 @@ export async function runClone(session: IcloudSession, targetDir: string): Promi
         }
         bodyText = resolved.bodyText;
         Object.assign(attachments, resolved.attachments);
-        summary.attachmentsDownloaded += decoded.attachments.length;
+        summary.attachmentsDownloaded += Object.keys(resolved.attachments).length;
       }
 
       const fileName = uniqueFileName(noteFileName(decoded.title), usedFileNames);

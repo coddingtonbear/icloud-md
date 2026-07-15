@@ -9,11 +9,14 @@ import {
 } from "../cloudkit/databaseClient.js";
 import type { IcloudSession } from "../session.js";
 import type { CloneStateAttachmentEntry } from "./cloneState.js";
+import { decodeTableMarkdown } from "./decodeTableRecord.js";
 import { uniqueFileName } from "./filename.js";
 import {
   decodeAttachmentFilename,
+  formatAttachmentMarkdown,
+  isTableUti,
   parseAssetField,
-  renderAttachmentPlaceholders,
+  renderPlaceholders,
   type AttachmentReference,
 } from "./noteAttachments.js";
 
@@ -134,19 +137,26 @@ export interface AttachmentSyncResult {
 }
 
 /**
- * Resolves and downloads every attachment a note references, writing new or
- * changed files under `attachments/` and rendering the note's placeholders
- * into markdown pointing at them.
+ * Resolves every embedded reference a note contains - downloading file
+ * attachments into `attachments/` and rendering a table's structure as a
+ * markdown table inline - and rewrites the note's placeholders accordingly.
+ *
+ * A `com.apple.notes.table` reference is an `Attachment` record like any
+ * other, but its payload lives directly on that record's own
+ * `MergeableDataEncrypted` field rather than chaining through `Media` -
+ * see `decodeTableRecord.ts` and dev notes, 2026-07-14T10:10/14:46.
  *
  * Returns `undefined` - refusing the whole note, same as any other
- * "structure we don't understand" case - if any hop doesn't match what
- * we've verified live: the embedded identifier must resolve to a record of
- * type `Attachment`, its `Media` reference must resolve to a record of type
- * `Media`, and that record needs a well-formed `Asset` field. See dev
- * notes, 2026-07-13/14, for how this chain was mapped. The actual matching
- * (`extractMediaRecordNames`/`matchAttachmentRecords`) is pure and unit-
- * tested against real captures; this function is the thin network+fs
- * wrapper around it, verified live instead.
+ * "structure we don't understand" case - if any reference doesn't match
+ * what we've verified live: a file reference's embedded identifier must
+ * resolve to an `Attachment` record whose `Media` reference resolves to a
+ * `Media` record with a well-formed `Asset` field (dev notes,
+ * 2026-07-13/14); a table reference must resolve to an `Attachment` record
+ * with a well-formed, left-to-right `MergeableDataEncrypted` table document.
+ * The actual matching (`extractMediaRecordNames`/`matchAttachmentRecords`,
+ * `decodeTableMarkdown`) is pure and unit-tested against real captures;
+ * this function is the thin network+fs wrapper around it, verified live
+ * instead.
  */
 export async function resolveNoteAttachments(
   auth: AttachmentAuth,
@@ -175,49 +185,102 @@ export async function resolveNoteAttachments(
     zoneID,
     refs.map((ref) => ref.attachmentIdentifier),
   );
-  const mediaRecordNames = extractMediaRecordNames(refs, attachmentRecords);
-  if (!mediaRecordNames) {
-    return undefined;
-  }
+  const attachmentByName = new Map(attachmentRecords.map((record) => [record.recordName, record]));
 
-  const mediaRecords = await lookupRecords(
-    auth.session,
-    auth.ckdatabasewsUrl,
-    auth.dsid,
-    database,
-    zoneID,
-    mediaRecordNames,
-  );
-  const matched = matchAttachmentRecords(
-    refs,
-    mediaRecordNames,
-    mediaRecords,
-    noteRecordName,
-    existingAttachments,
-    usedAttachmentFileNames,
-  );
-  if (!matched) {
-    return undefined;
+  // One entry per ref, same document order as the U+FFFC placeholders;
+  // filled in below as each ref (table or file) resolves.
+  const replacements: (string | undefined)[] = new Array(refs.length).fill(undefined);
+  const fileRefs: AttachmentReference[] = [];
+  const fileRefIndexes: number[] = [];
+
+  for (let i = 0; i < refs.length; i += 1) {
+    const ref = refs[i];
+    if (!ref) {
+      continue;
+    }
+    if (isTableUti(ref.typeUti)) {
+      const markdown = decodeTableAttachment(attachmentByName.get(ref.attachmentIdentifier));
+      if (markdown === undefined) {
+        return undefined;
+      }
+      replacements[i] = markdown;
+    } else {
+      fileRefIndexes.push(i);
+      fileRefs.push(ref);
+    }
   }
 
   const attachments: Record<string, CloneStateAttachmentEntry> = {};
-  for (const attachment of matched) {
-    if (attachment.needsDownload) {
-      const bytes = await fetchAssetBytes(attachment.downloadURL);
-      await mkdir(path.join(targetDir, ATTACHMENTS_DIR), { recursive: true });
-      await writeFile(path.join(targetDir, attachment.relativeFile), bytes);
+  if (fileRefs.length > 0) {
+    const mediaRecordNames = extractMediaRecordNames(fileRefs, attachmentRecords);
+    if (!mediaRecordNames) {
+      return undefined;
     }
-    attachments[attachment.recordName] = attachment.entry;
+
+    const mediaRecords = await lookupRecords(
+      auth.session,
+      auth.ckdatabasewsUrl,
+      auth.dsid,
+      database,
+      zoneID,
+      mediaRecordNames,
+    );
+    const matched = matchAttachmentRecords(
+      fileRefs,
+      mediaRecordNames,
+      mediaRecords,
+      noteRecordName,
+      existingAttachments,
+      usedAttachmentFileNames,
+    );
+    if (!matched) {
+      return undefined;
+    }
+
+    for (let j = 0; j < matched.length; j += 1) {
+      const attachment = matched[j];
+      const ref = fileRefs[j];
+      const index = fileRefIndexes[j];
+      if (!attachment || !ref || index === undefined) {
+        continue;
+      }
+      if (attachment.needsDownload) {
+        const bytes = await fetchAssetBytes(attachment.downloadURL);
+        await mkdir(path.join(targetDir, ATTACHMENTS_DIR), { recursive: true });
+        await writeFile(path.join(targetDir, attachment.relativeFile), bytes);
+      }
+      attachments[attachment.recordName] = attachment.entry;
+      replacements[index] = formatAttachmentMarkdown(ref, attachment.relativeFile);
+    }
   }
 
   const staleAttachmentRecordNames = previousForNote.filter((recordName) => !(recordName in attachments));
-  const relativeFiles = matched.map((attachment) => attachment.relativeFile);
 
   return {
-    bodyText: renderAttachmentPlaceholders(bodyText, refs, relativeFiles),
+    bodyText: renderPlaceholders(bodyText, replacements),
     attachments,
     staleAttachmentRecordNames,
   };
+}
+
+/** Decodes a table reference's `MergeableDataEncrypted` payload into
+ * markdown, or `undefined` if the record doesn't match what's been
+ * verified live (missing/malformed, or a table shape this decoder refuses -
+ * e.g. right-to-left column direction) - refusing the whole note rather
+ * than guessing, same as any other unresolvable reference. */
+export function decodeTableAttachment(attachmentRecord: CloudKitRecord | undefined): string | undefined {
+  if (!attachmentRecord || attachmentRecord.recordType !== "Attachment") {
+    return undefined;
+  }
+  const mergeableField = attachmentRecord.fields.MergeableDataEncrypted;
+  if (!mergeableField || typeof mergeableField.value !== "string") {
+    return undefined;
+  }
+  try {
+    return decodeTableMarkdown(Buffer.from(mergeableField.value, "base64"));
+  } catch {
+    return undefined;
+  }
 }
 
 /** Deletes every attachment file tracked for a note (it was deleted, or

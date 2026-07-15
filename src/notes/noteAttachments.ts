@@ -76,6 +76,16 @@ export function isImageUti(typeUti: string): boolean {
   return IMAGE_UTIS.has(typeUti);
 }
 
+/** A table is embedded the same way a file attachment is (an `Attachment`
+ * record referenced via a field-12 `AttachmentInfo` run), but this UTI
+ * marks it as a self-contained mergeable sub-document instead of a file -
+ * see `decodeTableRecord.ts`. */
+export const TABLE_UTI = "com.apple.notes.table";
+
+export function isTableUti(typeUti: string): boolean {
+  return typeUti === TABLE_UTI;
+}
+
 /** Matches a markdown link/embed pointing at `attachments/...`, i.e. the
  * exact shape `renderAttachmentPlaceholders` produces. Used by `push` to
  * catch a hand-typed reference to a file that was never actually uploaded -
@@ -86,6 +96,39 @@ const ATTACHMENT_REFERENCE_PATTERN = /!?\[[^\]]*\]\(attachments\/[^)]+\)/;
 
 export function hasAttachmentReference(text: string): boolean {
   return ATTACHMENT_REFERENCE_PATTERN.test(text);
+}
+
+/** The markdown embed (images) or link (everything else) for one resolved
+ * file attachment, pointing at its downloaded file under `attachments/`. */
+export function formatAttachmentMarkdown(ref: AttachmentReference, relativeFile: string): string {
+  const displayName = path.basename(relativeFile);
+  const href = relativeFile
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  return isImageUti(ref.typeUti) ? `![${displayName}](${href})` : `[${displayName}](${href})`;
+}
+
+/**
+ * Replaces each U+FFFC placeholder in `bodyText`, in order, with the
+ * corresponding entry of `replacements` - one per placeholder, same document
+ * order. Used directly by callers that mix attachment kinds (e.g. a table
+ * alongside a file attachment) and need a different replacement string per
+ * placeholder; `renderAttachmentPlaceholders` below is the file-only
+ * convenience wrapper most callers want.
+ */
+export function renderPlaceholders(bodyText: string, replacements: readonly (string | undefined)[]): string {
+  if (replacements.length === 0) {
+    return bodyText;
+  }
+  let index = 0;
+  return bodyText.replaceAll(OBJECT_REPLACEMENT_CHARACTER, () => {
+    const replacement = replacements[index];
+    index += 1;
+    // Shouldn't happen given callers verify counts match; leave unresolved
+    // placeholders untouched rather than fabricate a link.
+    return replacement ?? OBJECT_REPLACEMENT_CHARACTER;
+  });
 }
 
 /**
@@ -104,27 +147,13 @@ export function renderAttachmentPlaceholders(
   if (refs.length !== relativeFiles.length) {
     throw new Error(`attachment ref count (${refs.length}) doesn't match resolved file count (${relativeFiles.length})`);
   }
-  if (refs.length === 0) {
-    return bodyText;
-  }
-
-  let index = 0;
-  return bodyText.replaceAll(OBJECT_REPLACEMENT_CHARACTER, () => {
-    const ref = refs[index];
-    const relativeFile = relativeFiles[index];
-    index += 1;
-    if (!ref || !relativeFile) {
-      // Shouldn't happen given the length check above; leave unresolved
-      // placeholders untouched rather than fabricate a link.
-      return OBJECT_REPLACEMENT_CHARACTER;
-    }
-    const displayName = path.basename(relativeFile);
-    const href = relativeFile
-      .split("/")
-      .map((segment) => encodeURIComponent(segment))
-      .join("/");
-    return isImageUti(ref.typeUti) ? `![${displayName}](${href})` : `[${displayName}](${href})`;
-  });
+  return renderPlaceholders(
+    bodyText,
+    refs.map((ref, i) => {
+      const relativeFile = relativeFiles[i];
+      return relativeFile === undefined ? undefined : formatAttachmentMarkdown(ref, relativeFile);
+    }),
+  );
 }
 
 /** Decodes a Media record's FilenameEncrypted field, falling back to a
