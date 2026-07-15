@@ -3,11 +3,13 @@ import chalk from "chalk";
 import cliProgress from "cli-progress";
 import ora from "ora";
 import { reauthenticateFolder, resolveFolderAccount } from "./auth/folderAuth.js";
+import { parseSinceDuration, runBugReport } from "./commands/bugReport.js";
 import { runClone, type CloneSummary } from "./commands/clone.js";
 import { runPull, type PullSummary } from "./commands/pull.js";
 import { runPush } from "./commands/push.js";
 import { runRestore } from "./commands/restore.js";
 import { IcloudNotesSyncError, NotClonedDirectoryError } from "./errors.js";
+import { recordLastError } from "./lastError.js";
 import { readCloneState } from "./notes/cloneState.js";
 import type { SyncProgress } from "./progress.js";
 
@@ -147,6 +149,30 @@ async function restore(args: string[]): Promise<void> {
   await runRestore(dirArg ?? ".", fileArg);
 }
 
+const BUG_REPORT_USAGE =
+  "Usage: icloud-notes bug-report --since <duration> [directory]\n" +
+  '  <duration> is a number followed by "m" (minutes), "h" (hours), or "d" (days) - e.g. 30m, 6h, 2d.\n' +
+  "  A range is required rather than assumed, since the log is shared across every account used on this machine.";
+
+async function bugReport(args: string[]): Promise<void> {
+  const sinceIndex = args.indexOf("--since");
+  let since: Date | undefined;
+  let positional = args;
+  if (sinceIndex !== -1) {
+    since = parseSinceDuration(args[sinceIndex + 1] ?? "");
+    positional = args.filter((_arg, index) => index !== sinceIndex && index !== sinceIndex + 1);
+  }
+
+  const unknownFlag = positional.find((arg) => arg.startsWith("--"));
+  if (!since || unknownFlag || positional.length > 1) {
+    console.error(BUG_REPORT_USAGE);
+    process.exitCode = 1;
+    return;
+  }
+
+  await runBugReport(positional[0] ?? ".", since);
+}
+
 async function reauthenticate(targetDirArg: string | undefined): Promise<void> {
   const targetDir = targetDirArg ?? ".";
   console.log("Opening a browser window for iCloud sign-in...");
@@ -184,6 +210,9 @@ async function main(): Promise<void> {
       case "restore":
         await restore(rest);
         return;
+      case "bug-report":
+        await bugReport(rest);
+        return;
       default:
         console.error(
           "Usage: icloud-notes <command>\n\n" +
@@ -194,11 +223,16 @@ async function main(): Promise<void> {
             "  push [directory]      Upload locally edited notes (--dry-run to preview); conflicts are reported, never overwritten\n" +
             "  restore <file> [directory]  Discard a tracked note's local edits, reverting it to the last synced copy\n" +
             "  reauthenticate [directory]  Force a fresh sign-in for a directory's already-bound account (defaults to the current directory)\n" +
-            "  verify-auth [directory]     Check whether a directory's bound account is authenticated (defaults to the current directory)",
+            "  verify-auth [directory]     Check whether a directory's bound account is authenticated (defaults to the current directory)\n" +
+            "  bug-report --since <duration> [directory]  Bundle version info, the last error, local state, and " +
+            "debug-log entries from the given duration (e.g. 1h, 2d) into a file to attach to a GitHub issue",
         );
         process.exitCode = 1;
     }
   } catch (error) {
+    // Best-effort: a failure to persist this shouldn't mask the real error below.
+    await recordLastError(error).catch(() => {});
+
     if (error instanceof IcloudNotesSyncError) {
       console.error(chalk.red(error.message));
       if (error.hint) {

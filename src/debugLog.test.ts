@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { appendDebugLog } from "./debugLog.js";
+import { appendDebugLog, readDebugLogSince } from "./debugLog.js";
 
 interface LoggedRecord {
   note: string;
@@ -89,4 +89,56 @@ test("creates the parent directory if it doesn't exist yet", () =>
     const records = await readLoggedRecords(nestedPath);
     assert.equal(records.length, 1);
     assert.equal(records[0]?.note, "created");
+  }));
+
+test("readDebugLogSince returns an empty array when the log file doesn't exist", () =>
+  withTempLogPath(async (logPath) => {
+    assert.deepEqual(await readDebugLogSince(new Date(0), logPath), []);
+  }));
+
+test("readDebugLogSince only returns records at or after the given time", () =>
+  withTempLogPath(async (logPath) => {
+    const lines = [
+      { timestamp: "2026-07-14T10:00:00.000Z", note: "tooOld" },
+      { timestamp: "2026-07-14T12:00:00.000Z", note: "atBoundary" },
+      { timestamp: "2026-07-14T13:00:00.000Z", note: "afterBoundary" },
+    ];
+    await writeFile(logPath, lines.map((line) => JSON.stringify(line)).join("\n") + "\n", "utf-8");
+
+    const records = await readDebugLogSince(new Date("2026-07-14T12:00:00.000Z"), logPath);
+    assert.deepEqual(
+      records.map((record) => record.note),
+      ["atBoundary", "afterBoundary"],
+    );
+  }));
+
+test("readDebugLogSince excludes a line whose timestamp string isn't a parseable date", () =>
+  withTempLogPath(async (logPath) => {
+    const lines = [
+      { timestamp: "not-a-real-date", note: "unparseableTimestamp" },
+      { timestamp: "2026-07-14T12:00:00.000Z", note: "good" },
+    ];
+    await writeFile(logPath, lines.map((line) => JSON.stringify(line)).join("\n") + "\n", "utf-8");
+
+    const records = await readDebugLogSince(new Date(0), logPath);
+    assert.deepEqual(
+      records.map((record) => record.note),
+      ["good"],
+    );
+  }));
+
+test("readDebugLogSince skips malformed lines instead of throwing", () =>
+  withTempLogPath(async (logPath) => {
+    const goodLine = JSON.stringify({ timestamp: "2026-07-14T12:00:00.000Z", note: "good" });
+    await writeFile(
+      logPath,
+      ["not json at all", JSON.stringify({ note: "missingTimestamp" }), "", goodLine].join("\n") + "\n",
+      "utf-8",
+    );
+
+    const records = await readDebugLogSince(new Date(0), logPath);
+    assert.deepEqual(
+      records.map((record) => record.note),
+      ["good"],
+    );
   }));

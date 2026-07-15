@@ -1,6 +1,7 @@
-import { appendFile, mkdir } from "node:fs/promises";
-import os from "node:os";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import { CONFIG_DIR } from "./configDir.js";
+import { isEnoent } from "./fsUtil.js";
 
 /**
  * All request/response troubleshooting data lives here rather than on stdout,
@@ -8,7 +9,7 @@ import path from "node:path";
  * account's own subdirectory (see accountStore.ts) - this log itself stays
  * one file across all accounts, since it's just raw (redacted) HTTP traffic.
  */
-export const DEFAULT_DEBUG_LOG_PATH = path.join(os.homedir(), ".config", "icloud-notes-sync", "debug.log");
+export const DEFAULT_DEBUG_LOG_PATH = path.join(CONFIG_DIR, "debug.log");
 
 const SENSITIVE_HEADER_NAMES = new Set([
   "cookie",
@@ -62,6 +63,9 @@ export interface DebugLogEntry {
   request?: { method: string; url: string; headers: Record<string, string> };
   response?: { status: number; headers: Record<string, string>; body: unknown };
 }
+
+/** One line as actually written by `appendDebugLog` - the entry plus the timestamp it adds. */
+export type DebugLogRecord = DebugLogEntry & { timestamp: string };
 
 /** Appends one JSON-lines record. Sensitive header/body values are redacted before writing. */
 export async function appendDebugLog(entry: DebugLogEntry, debugLogPath: string = DEFAULT_DEBUG_LOG_PATH): Promise<void> {
@@ -119,4 +123,59 @@ export async function loggedFetch(
   );
 
   return response;
+}
+
+/**
+ * Reads every already-redacted record logged at or after `since` - the slice
+ * `bug-report` bundles. The log is one file shared across every account and
+ * folder ever used on this machine (see the module doc comment above), so
+ * this can't scope by folder; only the time range narrows it. Lines that
+ * aren't valid JSON (or don't match the expected shape) are skipped rather
+ * than failing the whole read - defensive against a log file interrupted
+ * mid-write or hand-edited.
+ */
+export async function readDebugLogSince(since: Date, debugLogPath: string = DEFAULT_DEBUG_LOG_PATH): Promise<DebugLogRecord[]> {
+  let raw: string;
+  try {
+    raw = await readFile(debugLogPath, "utf-8");
+  } catch (cause) {
+    if (isEnoent(cause)) {
+      return [];
+    }
+    throw cause;
+  }
+
+  const records: DebugLogRecord[] = [];
+  for (const line of raw.split("\n")) {
+    if (line.trim() === "") {
+      continue;
+    }
+    const record = parseDebugLogLine(line);
+    if (record && Date.parse(record.timestamp) >= since.getTime()) {
+      records.push(record);
+    }
+  }
+  return records;
+}
+
+function parseDebugLogLine(line: string): DebugLogRecord | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    typeof (parsed as { timestamp?: unknown }).timestamp !== "string" ||
+    typeof (parsed as { note?: unknown }).note !== "string"
+  ) {
+    return undefined;
+  }
+  // An unparseable (but string-typed) timestamp isn't rejected here - it
+  // naturally fails the `>= since` comparison in `readDebugLogSince` (NaN
+  // compares false against anything), so a second `Date.parse` here would
+  // just duplicate that check.
+  return parsed as DebugLogRecord;
 }

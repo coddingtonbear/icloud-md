@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { CorruptStateFileError } from "../errors.js";
+import { isEnoent } from "../fsUtil.js";
 
 export interface CloneStateNoteEntry {
   file: string;
@@ -72,8 +73,8 @@ export interface CloneState {
   attachments?: Record<string, CloneStateAttachmentEntry> | undefined;
 }
 
-const STATE_DIR_NAME = ".icloud-notes-sync";
-const STATE_FILE_NAME = "state.json";
+export const STATE_DIR_NAME = ".icloud-notes-sync";
+export const STATE_FILE_NAME = "state.json";
 
 export async function writeCloneState(targetDir: string, state: CloneState): Promise<void> {
   const dir = path.join(targetDir, STATE_DIR_NAME);
@@ -171,8 +172,4 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-function isEnoent(err: unknown): boolean {
-  return err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT";
 }
