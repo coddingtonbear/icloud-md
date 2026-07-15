@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { CorruptStateFileError } from "../errors.js";
 import { readCloneState, writeCloneState, type CloneState } from "./cloneState.js";
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
@@ -79,4 +80,40 @@ test("reads a pre-shared-notes state file (no shared fields) without error", () 
     assert.equal(readBack?.sharedZoneSyncTokens, undefined);
     assert.equal(readBack?.notes["REC-1"]?.sharedZoneOwner, undefined);
     assert.equal(readBack?.notes["REC-1"]?.file, "Note (REC1).md");
+  }));
+
+test("round-trips the bound account", () =>
+  withTempDir(async (dir) => {
+    const state: CloneState = {
+      account: { appleId: "me@example.com", dsid: "1234" },
+      syncToken: "token",
+      notes: {},
+    };
+
+    await writeCloneState(dir, state);
+    const readBack = await readCloneState(dir);
+
+    assert.deepEqual(readBack?.account, { appleId: "me@example.com", dsid: "1234" });
+  }));
+
+test("reads a pre-account-binding state file (no account field) without error", () =>
+  withTempDir(async (dir) => {
+    const legacy: CloneState = { syncToken: "old-token", notes: {} };
+    await writeCloneState(dir, legacy);
+
+    const readBack = await readCloneState(dir);
+    assert.equal(readBack?.account, undefined);
+  }));
+
+test("throws CorruptStateFileError for a malformed account field", () =>
+  withTempDir(async (dir) => {
+    const stateDir = path.join(dir, ".icloud-notes-sync");
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(
+      path.join(stateDir, "state.json"),
+      JSON.stringify({ notes: {}, account: { appleId: "me@example.com" } }),
+      "utf-8",
+    );
+
+    await assert.rejects(readCloneState(dir), CorruptStateFileError);
   }));

@@ -1,18 +1,17 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { ensureAuthenticated } from "../auth/ensureAuthenticated.js";
+import { bindNewFolderAccount } from "../auth/folderAuth.js";
 import { fetchAllNoteRecords, fetchSharedNoteRecords } from "../cloudkit/databaseClient.js";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { resolveNoteAttachments, type AttachmentAuth } from "../notes/attachmentSync.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { noteFileName, uniqueFileName } from "../notes/filename.js";
 import { writeBaseCopy } from "../notes/baseCopy.js";
-import { writeCloneState, type CloneState } from "../notes/cloneState.js";
+import { readCloneState, writeCloneState, type CloneState } from "../notes/cloneState.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { combineUnpublishableReasons } from "../notes/unknownContent.js";
-import { NotesUnavailableError } from "../errors.js";
+import { AlreadyClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import type { SyncProgress } from "../progress.js";
-import type { IcloudSession } from "../session.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 
@@ -25,12 +24,24 @@ export interface CloneSummary {
   skippedUndecodable: number;
 }
 
+/**
+ * `clone` only ever performs the *initial* export into a directory - mirrors
+ * `git clone`'s own refusal to run against a non-empty destination. Re-running
+ * it against an already-bound folder isn't a safe "resync" as this function
+ * is written: it always does a full fresh fetch with no diffing against
+ * local edits and never cleans up files for notes deleted upstream, unlike
+ * `pull`. Use `pull` for an existing clone instead.
+ */
 export async function runClone(
-  session: IcloudSession,
   targetDir: string,
   progress?: SyncProgress,
+  onLoginStatus?: (message: string) => void,
 ): Promise<CloneSummary> {
-  const auth = await ensureAuthenticated(session);
+  if (await readCloneState(targetDir)) {
+    throw new AlreadyClonedDirectoryError(targetDir);
+  }
+
+  const auth = await bindNewFolderAccount({ onStatus: onLoginStatus });
   if (!auth.ckdatabasewsUrl) {
     throw new NotesUnavailableError();
   }
@@ -150,7 +161,13 @@ export async function runClone(
 
   progress?.onProcessComplete?.();
 
-  await writeCloneState(targetDir, { syncToken, sharedZoneSyncTokens, notes, attachments });
+  await writeCloneState(targetDir, {
+    account: { appleId: auth.appleId, dsid: auth.dsid },
+    syncToken,
+    sharedZoneSyncTokens,
+    notes,
+    attachments,
+  });
 
   return summary;
 }

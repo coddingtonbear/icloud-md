@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  AccountMismatchError,
+  AlreadyClonedDirectoryError,
   AuthenticationExpiredError,
   ChromiumNotInstalledError,
   CloudKitRequestFailedError,
@@ -12,6 +14,7 @@ import {
   NotesUnavailableError,
   SignInIncompleteError,
   SilentReauthFailedError,
+  UnboundAccountError,
   UntrackedFileError,
 } from "./errors.js";
 
@@ -45,6 +48,9 @@ test("subclasses report their own constructor name via `name`, and are all insta
     new CorruptStateFileError("state.json has a malformed replicaId"),
     new CloudKitRequestFailedError("records/lookup request failed (private db): HTTP 500"),
     new UntrackedFileError("missing-note.md", "/some/dir"),
+    new AlreadyClonedDirectoryError("/some/dir"),
+    new UnboundAccountError("/some/dir"),
+    new AccountMismatchError("/some/dir", "me@example.com", "someone-else@example.com"),
   ];
 
   for (const error of errors) {
@@ -58,7 +64,7 @@ test("subclasses report their own constructor name via `name`, and are all insta
 test("AuthenticationExpiredError formats the HTTP status and detail into its message", () => {
   const error = new AuthenticationExpiredError(421, "HTTP 421");
   assert.equal(error.message, "Not authenticated (HTTP 421): HTTP 421");
-  assert.match(error.hint ?? "", /login/);
+  assert.match(error.hint ?? "", /reauthenticate/);
 });
 
 test("NotClonedDirectoryError names the offending directory and points at `clone`", () => {
@@ -67,10 +73,10 @@ test("NotClonedDirectoryError names the offending directory and points at `clone
   assert.match(error.hint ?? "", /clone/);
 });
 
-test("MissingSessionFileError names the session path and points at `login`", () => {
-  const error = new MissingSessionFileError("/home/user/.config/icloud-notes-sync/session.local.json");
+test("MissingSessionFileError names the session path and points at `reauthenticate`", () => {
+  const error = new MissingSessionFileError("/home/user/.config/icloud-notes-sync/accounts/1234/session.local.json");
   assert.match(error.message, /session\.local\.json/);
-  assert.match(error.hint ?? "", /login/);
+  assert.match(error.hint ?? "", /reauthenticate/);
 });
 
 test("MissingSessionFileError preserves the underlying fs error as `cause`", () => {
@@ -105,4 +111,26 @@ test("UntrackedFileError names the file and the directory it wasn't found in", (
   const error = new UntrackedFileError("missing-note.md", "/tmp/vault");
   assert.match(error.message, /missing-note\.md/);
   assert.match(error.message, /\/tmp\/vault/);
+});
+
+test("AlreadyClonedDirectoryError names the directory and points at `pull`", () => {
+  const error = new AlreadyClonedDirectoryError("/tmp/vault");
+  assert.match(error.message, /\/tmp\/vault/);
+  assert.match(error.message, /already a cloned notes directory/);
+  assert.match(error.hint ?? "", /pull/);
+});
+
+test("UnboundAccountError names the directory and points at re-cloning", () => {
+  const error = new UnboundAccountError("/tmp/vault");
+  assert.match(error.message, /\/tmp\/vault/);
+  assert.match(error.message, /no account bound/);
+  assert.match(error.hint ?? "", /clone/);
+});
+
+test("AccountMismatchError names the directory and both Apple IDs", () => {
+  const error = new AccountMismatchError("/tmp/vault", "me@example.com", "someone-else@example.com");
+  assert.match(error.message, /\/tmp\/vault/);
+  assert.match(error.message, /me@example\.com/);
+  assert.match(error.message, /someone-else@example\.com/);
+  assert.match(error.hint ?? "", /me@example\.com/);
 });

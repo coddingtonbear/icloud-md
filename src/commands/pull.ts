@@ -1,6 +1,6 @@
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { ensureAuthenticated } from "../auth/ensureAuthenticated.js";
+import { resolveFolderAccount } from "../auth/folderAuth.js";
 import { fetchAllNoteRecords, fetchSharedNoteRecords, type CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { removeAttachmentsForNote, resolveNoteAttachments, type AttachmentAuth } from "../notes/attachmentSync.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
@@ -13,7 +13,6 @@ import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEn
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { combineUnpublishableReasons } from "../notes/unknownContent.js";
 import type { SyncProgress } from "../progress.js";
-import type { IcloudSession } from "../session.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 
@@ -37,16 +36,16 @@ export interface PullSummary {
 }
 
 export async function runPull(
-  session: IcloudSession,
   targetDir: string,
   progress?: SyncProgress,
+  onLoginStatus?: (message: string) => void,
 ): Promise<PullSummary> {
   const state = await readCloneState(targetDir);
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
   }
 
-  const auth = await ensureAuthenticated(session);
+  const auth = await resolveFolderAccount(targetDir, state.account, { onStatus: onLoginStatus });
   if (!auth.ckdatabasewsUrl) {
     throw new NotesUnavailableError();
   }
@@ -233,7 +232,7 @@ export async function runPull(
 
   await handleVanishedSharedZones(targetDir, sharedZones, notes, attachments, summary);
 
-  await writeCloneState(targetDir, { syncToken, sharedZoneSyncTokens, notes, attachments });
+  await writeCloneState(targetDir, { account: state.account, syncToken, sharedZoneSyncTokens, notes, attachments });
 
   return summary;
 }

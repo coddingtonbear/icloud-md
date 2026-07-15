@@ -1,7 +1,6 @@
 import { checkAuthentication, type AuthCheckResult } from "../cloudkit/setupClient.js";
-import { performBrowserLogin } from "./browserLogin.js";
 import { AuthenticationExpiredError, SilentReauthFailedError } from "../errors.js";
-import { DEFAULT_SESSION_PATH, persistSessionIfRotated, writeSessionFile, type IcloudSession } from "../session.js";
+import { persistSessionIfRotated, writeSessionFile, type IcloudSession } from "../session.js";
 
 export type AuthCheckOk = Extract<AuthCheckResult, { ok: true }>;
 
@@ -9,7 +8,13 @@ const HEADLESS_RECOVERY_TIMEOUT_MS = 90_000;
 
 export interface EnsureAuthenticatedDeps {
   checkAuth?: typeof checkAuthentication;
-  recover?: typeof performBrowserLogin;
+  /**
+   * Attempts a headless recovery login on a 421 and resolves with the
+   * recovered session. Required, not defaulted: which persistent browser
+   * profile to relaunch is always account-specific (see `folderAuth.ts`),
+   * so there's no universal default worth baking in here.
+   */
+  recover: (options: { headless: boolean; timeoutMs: number }) => Promise<IcloudSession>;
 }
 
 /**
@@ -21,15 +26,15 @@ export interface EnsureAuthenticatedDeps {
  * 2026-07-13 dev notes - a real browser did exactly this after a multi-hour
  * idle period, with no human involved). Only worth trying when the profile
  * can recover on its own; if that fails (e.g. a fresh interactive 2FA is
- * actually required), the caller should fall back to `login`.
+ * actually required), the caller should fall back to `reauthenticate`.
  */
 export async function ensureAuthenticated(
   session: IcloudSession,
-  sessionPath: string = DEFAULT_SESSION_PATH,
-  deps: EnsureAuthenticatedDeps = {},
+  sessionPath: string,
+  deps: EnsureAuthenticatedDeps,
 ): Promise<AuthCheckOk> {
   const checkAuth = deps.checkAuth ?? checkAuthentication;
-  const recover = deps.recover ?? performBrowserLogin;
+  const recover = deps.recover;
 
   const auth = await checkAuth(session);
   if (auth.ok) {

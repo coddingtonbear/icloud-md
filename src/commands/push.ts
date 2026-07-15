@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import { ensureAuthenticated } from "../auth/ensureAuthenticated.js";
+import { resolveFolderAccount } from "../auth/folderAuth.js";
 import { lookupRecords, updateNoteRecord, type CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState, writeCloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
@@ -19,13 +19,14 @@ import {
   noteDocumentRoundTrips,
   parseNoteDocument,
 } from "../notes/noteDocument.js";
-import type { IcloudSession } from "../session.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 
 export interface PushOptions {
   /** Report what would be pushed without sending anything or touching state. */
   dryRun?: boolean;
+  /** Routes any headless-recovery login status messages; defaults to staying silent (see `resolveFolderAccount`). */
+  onLoginStatus?: (message: string) => void;
 }
 
 interface PushCandidate {
@@ -54,7 +55,7 @@ interface PushSummary {
  *  3. Verification: the rebuilt document is decoded again and must yield
  *     exactly the local file's text before it's uploaded.
  */
-export async function runPush(session: IcloudSession, targetDir: string, options: PushOptions = {}): Promise<void> {
+export async function runPush(targetDir: string, options: PushOptions = {}): Promise<void> {
   const dryRun = options.dryRun === true;
   const state = await readCloneState(targetDir);
   if (!state) {
@@ -115,7 +116,7 @@ export async function runPush(session: IcloudSession, targetDir: string, options
     return;
   }
 
-  const auth = await ensureAuthenticated(session);
+  const auth = await resolveFolderAccount(targetDir, state.account, { onStatus: options.onLoginStatus });
   if (!auth.ckdatabasewsUrl) {
     throw new NotesUnavailableError();
   }

@@ -4,8 +4,9 @@ import path from "node:path";
 
 /**
  * All request/response troubleshooting data lives here rather than on stdout,
- * in the same shared ~/.config/icloud-notes-sync/ directory session.ts writes
- * the session file to - see session.ts's DEFAULT_SESSION_PATH.
+ * in the same shared ~/.config/icloud-notes-sync/ directory that holds every
+ * account's own subdirectory (see accountStore.ts) - this log itself stays
+ * one file across all accounts, since it's just raw (redacted) HTTP traffic.
  */
 export const DEFAULT_DEBUG_LOG_PATH = path.join(os.homedir(), ".config", "icloud-notes-sync", "debug.log");
 

@@ -43,7 +43,7 @@ https://p<N>-ckdatabasews.icloud.com/database/1/com.apple.notes/production/priva
 using the same request shapes as CloudKit JS (`records/query`,
 `records/lookup`, `records/modify`, `changes/zone`, with a `syncToken` /
 `moreComing` model for incremental sync). Authentication is deliberately
-*not* reimplemented: `login` opens a real (headed) browser window via
+*not* reimplemented: signing in opens a real (headed) browser window via
 Playwright, Apple's own pages run the entire sign-in flow — password,
 whatever 2FA variant the account uses, CAPTCHAs, interstitials — and once
 the page's own `setup.icloud.com` bootstrap call succeeds, the session
@@ -69,41 +69,55 @@ read — decoding has to try both.
 
 ## Current status
 
-Phase 0 is mostly done. `icloud-notes login` opens a browser window on
-`www.icloud.com`, waits for you to complete sign-in there (any 2FA variant
-works — Apple's own pages are doing the work), then captures the session
-cookies, verifies them against `/validate`, writes
-`~/.config/icloud-notes-sync/session.local.json`, and closes the window.
-The session (and a request/response debug log - see below) is shared across
-every vault, not scoped to whichever directory the CLI happens to be
-invoked from: `login` once, then any number of `clone`/`pull` targets reuse
-the same session. This only supports one Apple ID at a time:
+Phase 0 is mostly done. Authentication is **per-folder, but transparently
+so**: credentials are never stored inside a vault directory itself (a vault
+is exactly the kind of thing that gets copied/zipped/synced/committed
+elsewhere, and most of those paths don't respect `.gitignore`), but the CLI
+still behaves as if each folder owns its own login. Every Apple ID this
+machine has signed into gets its own subdirectory under
+`~/.config/icloud-notes-sync/accounts/<dsid>/` (session, a persistent
+Playwright browser profile, and a small non-secret `meta.json`); a cloned
+folder's own `.icloud-notes-sync/state.json` records only which account it's
+bound to (`{ appleId, dsid }`), never any credential material itself.
 
 1. One-time setup: `npm install -g icloud-notes-sync` puts the `icloud-notes`
    command on your `PATH`. (Working from a clone instead: `npm run build &&
    npm link`, re-run `npm run build` after source changes.)
-2. `icloud-notes login` opens the browser window; sign in as you normally
-   would. The first run downloads the login browser automatically (a
-   one-off ~150 MB Chromium fetch, via `npx playwright install chromium`
-   under the hood) before opening it. The command detects sign-in completion
-   on its own, verifies the captured session, and closes the window. Closing
-   the window yourself aborts.
-3. The login browser keeps a persistent profile under
-   `~/.config/icloud-notes-sync/browser-profile/`, so after the first
-   sign-in Apple treats it as a trusted, returning browser — later `login`
-   runs typically skip 2FA (and may need no interaction at all if the
-   profile's own session is still alive).
-4. `icloud-notes verify-auth` calls the same `/setup/ws/1/validate`
-   endpoint the web client calls on page load, using that session. Success
-   confirms the session is valid and prints the account's `dsid` and the
-   partition-specific CloudKit host (e.g. `p43-ckdatabasews.icloud.com`)
-   that all Notes calls need.
+2. `icloud-notes clone <directory>` on a brand-new directory always opens a
+   browser window on `www.icloud.com` first - sign in as you normally would.
+   The first run downloads the login browser automatically (a one-off
+   ~150 MB Chromium fetch, via `npx playwright install chromium` under the
+   hood) before opening it. The command detects sign-in completion on its
+   own, verifies the captured session, and closes the window. Closing the
+   window yourself aborts. Whichever Apple ID you sign into becomes (or is
+   matched against) that folder's bound account - so `clone ./my-notes` and
+   `clone ./someone-elses-notes` can freely use different Apple IDs, with no
+   flag needed.
+3. Each account's login keeps its own persistent browser profile under
+   `~/.config/icloud-notes-sync/accounts/<dsid>/browser-profile/`, so after
+   the first sign-in for that Apple ID, Apple treats it as a trusted,
+   returning browser - later sign-ins for that same account typically skip
+   2FA (and may need no interaction at all if the profile's own session is
+   still alive). `icloud-notes reauthenticate [directory]` forces a fresh
+   sign-in against an already-cloned folder's bound account (defaults to the
+   current directory) - useful if silent recovery can't get back in on its
+   own. It refuses - rather than silently rebinding the folder - if you sign
+   into a different Apple ID than the one that folder was cloned for.
+4. `icloud-notes verify-auth [directory]` calls the same
+   `/setup/ws/1/validate` endpoint the web client calls on page load, using
+   that folder's bound account's session (defaults to the current
+   directory). Success confirms the session is valid and prints the
+   account's `dsid` and the partition-specific CloudKit host (e.g.
+   `p43-ckdatabasews.icloud.com`) that all Notes calls need.
 
 One fallback bootstrap path also exists: `npm run import-har --
-<path-to-file.har>` extracts cookies from a Chrome DevTools export, mainly
-for debugging against a known-good browser session. (For headless
-environments, run `login` on a machine with a display and copy
-`session.local.json` over — the session file is host-independent.)
+<path-to-file.har>` extracts cookies from a Chrome DevTools export, verifies
+them, and writes them into that account's own subdirectory the same way a
+browser login would - mainly for debugging against a known-good browser
+session. (For headless environments, run `clone`/`reauthenticate` on a
+machine with a display and copy that account's whole
+`~/.config/icloud-notes-sync/accounts/<dsid>/` subdirectory over - it's
+host-independent.)
 
 `icloud-notes clone <directory>` is implemented: it walks the whole Notes
 zone, decodes plain-text note bodies, downloads any attachments (see
@@ -234,13 +248,13 @@ deletions, and writing to shared notes are all still out of scope.
 caused by racing a *browser tab's* own background heartbeat — the tab calls
 `/setup/ws/1/validate` every 14 minutes and rotates the session's bearer
 token (`X-APPLE-WEBAUTH-TOKEN`) each time, invalidating whatever value was
-snapshotted into the HAR. A session minted by `login` isn't shared with any
-browser tab, so it isn't racing against that heartbeat. Whether it can still
-go stale from long idle periods independent of that heartbeat is still an
-open question (see the project's dev notes) — this tool doesn't yet drive
-its own periodic `/validate` refresh, so if `verify-auth` ever reports a
-stale session, re-running `login` (fast, since the persistent browser
-profile usually skips 2FA) is the fallback.
+snapshotted into the HAR. A session minted by a real sign-in isn't shared
+with any browser tab, so it isn't racing against that heartbeat. Whether it
+can still go stale from long idle periods independent of that heartbeat is
+still an open question (see the project's dev notes) — this tool doesn't yet
+drive its own periodic `/validate` refresh, so if `verify-auth` ever reports
+a stale session, `icloud-notes reauthenticate [directory]` (fast, since the
+account's persistent browser profile usually skips 2FA) is the fallback.
 
 ## Commands
 
@@ -248,14 +262,19 @@ Deliberately reusing git's own vocabulary rather than inventing new terms,
 since the tool is explicitly modeled on git's fetch/push workflow and these
 words are already the most discoverable choice for what each one does:
 
-- **`login`** *(implemented)* — sign in via a browser window (Apple's own
-  pages handle password/2FA) and write
-  `~/.config/icloud-notes-sync/session.local.json`, shared by every vault.
-  Not git vocabulary, but there's no `git` equivalent to steal a name from
-  here.
 - **`clone <directory>`** *(implemented)* — full initial export: fetch every
   note (downloading any attachments alongside them) and write it into a
-  fresh directory, alongside sync state.
+  fresh directory, alongside sync state. Signs in via a browser window the
+  first time a directory (or a new Apple ID) is used - there's no separate
+  `login` step. Refuses to run against a directory that's already been
+  cloned (same spirit as `git clone` refusing a non-empty destination) -
+  use `pull` there instead.
+- **`reauthenticate [directory]`** *(implemented)* — force a fresh sign-in
+  for an already-cloned directory's bound account (defaults to the current
+  directory). Not git vocabulary, but there's no `git` equivalent to steal a
+  name from here. Refuses - rather than silently rebinding the folder - if
+  the completed sign-in turns out to be for a different Apple ID than the
+  one that directory was cloned for.
 - **`pull [directory]`** *(implemented)* — run inside (or pointed at) a
   cloned directory; fetches whatever changed remotely since the last sync
   (using the stored `syncToken`) and updates local files accordingly, or

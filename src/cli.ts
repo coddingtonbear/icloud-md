@@ -2,15 +2,14 @@
 import chalk from "chalk";
 import cliProgress from "cli-progress";
 import ora from "ora";
-import { ensureAuthenticated } from "./auth/ensureAuthenticated.js";
+import { reauthenticateFolder, resolveFolderAccount } from "./auth/folderAuth.js";
 import { runClone, type CloneSummary } from "./commands/clone.js";
-import { runLogin } from "./commands/login.js";
 import { runPull, type PullSummary } from "./commands/pull.js";
 import { runPush } from "./commands/push.js";
 import { runRestore } from "./commands/restore.js";
-import { IcloudNotesSyncError } from "./errors.js";
+import { IcloudNotesSyncError, NotClonedDirectoryError } from "./errors.js";
+import { readCloneState } from "./notes/cloneState.js";
 import type { SyncProgress } from "./progress.js";
-import { loadSession } from "./session.js";
 
 /**
  * Live terminal rendering for `clone`/`pull` progress - the only place ora
@@ -93,9 +92,14 @@ function printPullSummary(targetDir: string, summary: PullSummary): void {
   }
 }
 
-async function verifyAuth(): Promise<void> {
-  const session = await loadSession();
-  const result = await ensureAuthenticated(session);
+async function verifyAuth(targetDirArg: string | undefined): Promise<void> {
+  const targetDir = targetDirArg ?? ".";
+  const state = await readCloneState(targetDir);
+  if (!state) {
+    throw new NotClonedDirectoryError(targetDir);
+  }
+
+  const result = await resolveFolderAccount(targetDir, state.account, { onStatus: (message) => console.log(message) });
 
   console.log(`Authenticated as ${result.appleId}${result.fullName ? ` (${result.fullName})` : ""}`);
   console.log(`dsid: ${result.dsid}`);
@@ -108,15 +112,13 @@ async function clone(targetDirArg: string | undefined): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const session = await loadSession();
-  const summary = await runClone(session, targetDirArg, makeSyncProgress());
+  const summary = await runClone(targetDirArg, makeSyncProgress(), (message) => console.log(message));
   printCloneSummary(targetDirArg, summary);
 }
 
 async function pull(targetDirArg: string | undefined): Promise<void> {
   const targetDir = targetDirArg ?? ".";
-  const session = await loadSession();
-  const summary = await runPull(session, targetDir, makeSyncProgress());
+  const summary = await runPull(targetDir, makeSyncProgress(), (message) => console.log(message));
   printPullSummary(targetDir, summary);
 }
 
@@ -129,8 +131,10 @@ async function push(args: string[]): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const session = await loadSession();
-  await runPush(session, positional[0] ?? ".", { dryRun: flags.includes("--dry-run") });
+  await runPush(positional[0] ?? ".", {
+    dryRun: flags.includes("--dry-run"),
+    onLoginStatus: (message) => console.log(message),
+  });
 }
 
 async function restore(args: string[]): Promise<void> {
@@ -143,8 +147,11 @@ async function restore(args: string[]): Promise<void> {
   await runRestore(dirArg ?? ".", fileArg);
 }
 
-async function login(): Promise<void> {
-  await runLogin();
+async function reauthenticate(targetDirArg: string | undefined): Promise<void> {
+  const targetDir = targetDirArg ?? ".";
+  console.log("Opening a browser window for iCloud sign-in...");
+  const result = await reauthenticateFolder(targetDir, { onStatus: (message) => console.log(message) });
+  console.log(`Reauthenticated as ${result.appleId} (dsid ${result.dsid}) for ${targetDir}.`);
 }
 
 /**
@@ -159,11 +166,11 @@ async function main(): Promise<void> {
 
   try {
     switch (command) {
-      case "login":
-        await login();
+      case "reauthenticate":
+        await reauthenticate(rest[0]);
         return;
       case "verify-auth":
-        await verifyAuth();
+        await verifyAuth(rest[0]);
         return;
       case "clone":
         await clone(rest[0]);
@@ -181,12 +188,13 @@ async function main(): Promise<void> {
         console.error(
           "Usage: icloud-notes <command>\n\n" +
             "Commands:\n" +
-            "  login                 Sign in via a browser window (Apple's own pages handle 2FA); shared across all vaults\n" +
-            "  verify-auth           Check whether the stored session is authenticated\n" +
-            "  clone <directory>     Fetch all Notes into a fresh local directory\n" +
+            "  clone <directory>     Fetch all Notes into a fresh local directory; signs in via a browser window " +
+            "the first time a directory (or a new account) is used\n" +
             "  pull [directory]      Fetch changes since the last clone/pull (defaults to the current directory)\n" +
             "  push [directory]      Upload locally edited notes (--dry-run to preview); conflicts are reported, never overwritten\n" +
-            "  restore <file> [directory]  Discard a tracked note's local edits, reverting it to the last synced copy",
+            "  restore <file> [directory]  Discard a tracked note's local edits, reverting it to the last synced copy\n" +
+            "  reauthenticate [directory]  Force a fresh sign-in for a directory's already-bound account (defaults to the current directory)\n" +
+            "  verify-auth [directory]     Check whether a directory's bound account is authenticated (defaults to the current directory)",
         );
         process.exitCode = 1;
     }

@@ -36,7 +36,20 @@ export interface CloneStateAttachmentEntry {
   noteRecordName: string;
 }
 
+export interface CloneStateAccount {
+  appleId: string;
+  dsid: string;
+}
+
 export interface CloneState {
+  /**
+   * Which Apple ID this folder was cloned for - resolves to that account's
+   * own session under `~/.config/icloud-notes-sync/accounts/<dsid>/` (see
+   * `accountStore.ts`), never anything secret stored here. Absent only for
+   * folders cloned before per-folder account binding existed; `pull`/`push`/
+   * `reauthenticate` refuse to run without it (see `UnboundAccountError`).
+   */
+  account?: CloneStateAccount | undefined;
   /** CloudKit syncToken as of this snapshot; a future `pull` resumes incremental sync from here. */
   syncToken: string | undefined;
   /**
@@ -145,7 +158,15 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
     }
   }
 
-  return { syncToken, sharedZoneSyncTokens, replicaId, notes, attachments };
+  let account: CloneStateAccount | undefined;
+  if (value.account !== undefined) {
+    if (!isRecord(value.account) || typeof value.account.appleId !== "string" || typeof value.account.dsid !== "string") {
+      throw new CorruptStateFileError(`${filePath} has a malformed "account" field.`);
+    }
+    account = { appleId: value.account.appleId, dsid: value.account.dsid };
+  }
+
+  return { account, syncToken, sharedZoneSyncTokens, replicaId, notes, attachments };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

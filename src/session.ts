@@ -1,5 +1,4 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { CorruptSessionFileError, MissingSessionFileError } from "./errors.js";
 
@@ -13,14 +12,12 @@ export interface IcloudSession {
 }
 
 /**
- * One shared session in ~/.config/, not per-clone-directory: `login` happens
- * once, and any number of `clone`/`pull` targets reuse it. Only supports one
- * Apple ID at a time - fine for a personal tool, would need a profile/name
- * argument to support more.
+ * Every session file lives under a specific Apple ID's own directory (see
+ * `accountStore.ts`'s `accountSessionPath`), not at one shared path - a
+ * machine can hold sessions for more than one account, each folder bound to
+ * whichever one it was cloned for.
  */
-export const DEFAULT_SESSION_PATH = path.join(os.homedir(), ".config", "icloud-notes-sync", "session.local.json");
-
-export async function loadSession(sessionPath: string = DEFAULT_SESSION_PATH): Promise<IcloudSession> {
+export async function loadSession(sessionPath: string): Promise<IcloudSession> {
   let raw: string;
   try {
     raw = await readFile(sessionPath, "utf8");
@@ -33,7 +30,7 @@ export async function loadSession(sessionPath: string = DEFAULT_SESSION_PATH): P
 }
 
 /** Writes a session file with the same permissions convention import-har/login both rely on. */
-export async function writeSessionFile(session: IcloudSession, sessionPath: string = DEFAULT_SESSION_PATH): Promise<void> {
+export async function writeSessionFile(session: IcloudSession, sessionPath: string): Promise<void> {
   await mkdir(path.dirname(sessionPath), { recursive: true, mode: 0o700 });
   await writeFile(sessionPath, JSON.stringify(session, null, 2) + "\n", { mode: 0o600 });
 }
@@ -109,7 +106,7 @@ export function mergeSetCookiesIntoSession(session: IcloudSession, setCookieHead
 export async function persistSessionIfRotated(
   previous: IcloudSession,
   next: IcloudSession,
-  sessionPath: string = DEFAULT_SESSION_PATH,
+  sessionPath: string,
 ): Promise<void> {
   if (next.cookie === previous.cookie) {
     return;

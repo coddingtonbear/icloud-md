@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { DEFAULT_SESSION_PATH, writeSessionFile } from "../session.js";
+import { accountSessionPath, writeAccountMeta } from "../auth/accountStore.js";
+import { checkAuthentication } from "../cloudkit/setupClient.js";
+import { writeSessionFile, type IcloudSession } from "../session.js";
 
 interface HarHeader {
   name: string;
@@ -93,17 +95,31 @@ async function main(): Promise<void> {
     return;
   }
 
-  const cookieCount = cookie.split(";").filter((pair) => pair.trim().length > 0).length;
-
-  await writeSessionFile({
+  const candidateSession: IcloudSession = {
     cookie,
     clientId,
     clientBuildNumber,
     clientMasteringNumber,
     capturedAt: new Date().toISOString(),
-  });
+  };
 
-  console.log(`Wrote ${cookieCount} cookies to ${DEFAULT_SESSION_PATH}`);
+  // Unlike a browser-driven login, a HAR capture is never actually verified
+  // against the server - this call is that verification, and it's also how
+  // we discover which account (dsid) this HAR belongs to, so it lands in
+  // that account's own subdirectory rather than some undefined default.
+  const result = await checkAuthentication(candidateSession);
+  if (!result.ok) {
+    console.error(`Captured cookies from the HAR, but they failed verification (HTTP ${result.status}): ${result.error}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const sessionPath = accountSessionPath(result.dsid);
+  await writeSessionFile(result.session, sessionPath);
+  await writeAccountMeta({ appleId: result.appleId, dsid: result.dsid });
+
+  const cookieCount = cookie.split(";").filter((pair) => pair.trim().length > 0).length;
+  console.log(`Wrote ${cookieCount} cookies for ${result.appleId} to ${sessionPath}`);
 }
 
 function asHarFile(value: unknown, harPath: string): HarFile {
