@@ -9,6 +9,7 @@ import { noteFileName, uniqueFileName } from "../notes/filename.js";
 import { writeBaseCopy } from "../notes/baseCopy.js";
 import { writeCloneState, type CloneState } from "../notes/cloneState.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
+import { combineUnpublishableReasons } from "../notes/unknownContent.js";
 import { NotesUnavailableError } from "../errors.js";
 import type { IcloudSession } from "../session.js";
 
@@ -17,8 +18,8 @@ const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 interface CloneSummary {
   written: number;
   writtenShared: number;
+  writtenUnpublishable: number;
   attachmentsDownloaded: number;
-  skippedUnresolvableAttachment: number;
   skippedDeleted: number;
   skippedUndecodable: number;
 }
@@ -37,8 +38,8 @@ export async function runClone(session: IcloudSession, targetDir: string): Promi
   const summary: CloneSummary = {
     written: 0,
     writtenShared: 0,
+    writtenUnpublishable: 0,
     attachmentsDownloaded: 0,
-    skippedUnresolvableAttachment: 0,
     skippedDeleted: 0,
     skippedUndecodable: 0,
   };
@@ -74,6 +75,7 @@ export async function runClone(session: IcloudSession, targetDir: string): Promi
       }
 
       let bodyText = decoded.bodyText;
+      let unpublishableReason = decoded.unpublishableReason;
       if (decoded.attachments.length > 0) {
         const zoneID = source.sharedZoneOwner
           ? { zoneName: PRIVATE_NOTES_ZONE.zoneName, ownerRecordName: source.sharedZoneOwner }
@@ -89,11 +91,8 @@ export async function runClone(session: IcloudSession, targetDir: string): Promi
           attachments,
           usedAttachmentFileNames,
         );
-        if (!resolved) {
-          summary.skippedUnresolvableAttachment += 1;
-          continue;
-        }
         bodyText = resolved.bodyText;
+        unpublishableReason = combineUnpublishableReasons(unpublishableReason, resolved.unpublishableReason);
         Object.assign(attachments, resolved.attachments);
         summary.attachmentsDownloaded += Object.keys(resolved.attachments).length;
       }
@@ -110,6 +109,9 @@ export async function runClone(session: IcloudSession, targetDir: string): Promi
       } else {
         summary.written += 1;
       }
+      if (unpublishableReason) {
+        summary.writtenUnpublishable += 1;
+      }
 
       const modificationDate = modificationDateOf(record);
 
@@ -118,6 +120,7 @@ export async function runClone(session: IcloudSession, targetDir: string): Promi
         recordChangeTag: record.recordChangeTag ?? "",
         modificationDate,
         sharedZoneOwner: source.sharedZoneOwner,
+        unpublishableReason,
       };
     }
   }
@@ -128,8 +131,10 @@ export async function runClone(session: IcloudSession, targetDir: string): Promi
     `Cloned ${summary.written} notes (plus ${summary.writtenShared} shared with you) into ${targetDir}, ` +
       `${summary.attachmentsDownloaded} attachment(s) downloaded`,
   );
-  console.log(
-    `Skipped: ${summary.skippedDeleted} deleted, ${summary.skippedUndecodable} undecodable, ` +
-      `${summary.skippedUnresolvableAttachment} with an attachment we couldn't fetch`,
-  );
+  if (summary.writtenUnpublishable > 0) {
+    console.log(
+      `${summary.writtenUnpublishable} note(s) written with content this tool couldn't fully parse - read-only`,
+    );
+  }
+  console.log(`Skipped: ${summary.skippedDeleted} deleted, ${summary.skippedUndecodable} undecodable`);
 }

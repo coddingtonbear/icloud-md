@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { classifyNoteRecord } from "./decodeNoteRecord.js";
 import { compressNoteDocument } from "./noteText.js";
 import { bytesToken, encodeProtoTokens } from "./protobuf.js";
+import { UNKNOWN_CONTENT_BANNER } from "./unknownContent.js";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 
 function makeRecord(fields: CloudKitRecord["fields"]): CloudKitRecord {
@@ -37,6 +38,7 @@ test("a plain-text note decodes as ok with no attachments", () => {
     title: "",
     bodyText: "Grocery list\nEggs\nMilk",
     attachments: [],
+    publishable: true,
   });
 });
 
@@ -49,6 +51,7 @@ test("a real audio-attachment note decodes as ok, surfacing the embedded attachm
   assert.deepEqual(result.attachments, [
     { attachmentIdentifier: "7DAFDA6F-4AC4-41D8-9958-049373B80824", typeUti: "com.apple.m4a-audio" },
   ]);
+  assert.equal(result.publishable, true);
 });
 
 test("a real image-attachment note decodes as ok, surfacing the embedded attachment reference", () => {
@@ -62,15 +65,24 @@ test("a real image-attachment note decodes as ok, surfacing the embedded attachm
   assert.deepEqual(result.attachments, [
     { attachmentIdentifier: "7ED80274-4400-4C02-87EA-F542F056FF02", typeUti: "public.jpeg" },
   ]);
+  assert.equal(result.publishable, true);
 });
 
-test("a placeholder character with no matching attachment run is undecodable, not guessed at", () => {
+test("a placeholder character with no matching attachment run is still written, banner-marked and unpublishable", () => {
   // Synthetic: the U+FFFC placeholder with no AttachmentInfo run behind it -
   // e.g. an embedded object type we don't parse (a table, a drawing). Can't
-  // trust a positional correlation that doesn't exist, so refuse rather than
-  // silently drop the placeholder.
+  // trust a positional correlation that doesn't exist, so we can't localize
+  // exactly which placeholder is the problem - fetch it anyway with a
+  // whole-note banner, but never allow it to be pushed.
   const record = makeRecord({ TextDataEncrypted: encodeTextField("Some note\n\uFFFC") });
-  assert.deepEqual(classifyNoteRecord(record), { status: "unsyncable", reason: "undecodable" });
+  assert.deepEqual(classifyNoteRecord(record), {
+    status: "ok",
+    title: "",
+    bodyText: `${UNKNOWN_CONTENT_BANNER}Some note\n\uFFFC`,
+    attachments: [],
+    publishable: false,
+    unpublishableReason: "contains unrecognized embedded content this tool couldn't parse or place precisely",
+  });
 });
 
 test("a note missing TextDataEncrypted is undecodable", () => {

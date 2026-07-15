@@ -19,6 +19,7 @@ import {
   renderPlaceholders,
   type AttachmentReference,
 } from "./noteAttachments.js";
+import { formatUnknownEmbedMarker } from "./unknownContent.js";
 
 export interface AttachmentAuth {
   session: IcloudSession;
@@ -42,65 +43,63 @@ export interface MatchedAttachment {
 /**
  * Given a note's attachment references and the already-fetched `Attachment`
  * records they name, returns each one's `Media` recordName - the next hop
- * to look up - or `undefined` if any reference doesn't resolve to a real
- * `Attachment` record with a `Media` reference (refusing the whole note,
- * same as any other "structure we don't understand" case).
+ * to look up - in the same order as `refs`. An entry is `undefined` where a
+ * reference doesn't resolve to a real `Attachment` record with a `Media`
+ * reference; per the Safety Guarantee Audit, that degrades just that one
+ * embed (an unknown-content marker) rather than refusing the whole note.
  */
 export function extractMediaRecordNames(
   refs: readonly AttachmentReference[],
   attachmentRecords: readonly CloudKitRecord[],
-): string[] | undefined {
+): (string | undefined)[] {
   const attachmentByName = new Map(attachmentRecords.map((record) => [record.recordName, record]));
-  const mediaRecordNames: string[] = [];
 
-  for (const ref of refs) {
+  return refs.map((ref) => {
     const attachmentRecord = attachmentByName.get(ref.attachmentIdentifier);
     if (!attachmentRecord || attachmentRecord.recordType !== "Attachment") {
       return undefined;
     }
     const mediaRef = attachmentRecord.fields.Media?.value;
-    const mediaRecordName = isRecordRef(mediaRef) ? mediaRef.recordName : undefined;
-    if (!mediaRecordName) {
-      return undefined;
-    }
-    mediaRecordNames.push(mediaRecordName);
-  }
-
-  return mediaRecordNames;
+    return isRecordRef(mediaRef) ? mediaRef.recordName : undefined;
+  });
 }
 
 /**
  * Matches each attachment reference to its `Media` record (already fetched,
  * one per ref, same order as `mediaRecordNames` from
  * `extractMediaRecordNames`) and decides a local file name and whether it
- * needs (re)downloading. Returns `undefined` if any `Media` record is
+ * needs (re)downloading. An entry is `undefined` where the `Media` record is
  * missing, isn't actually a `Media` record, or lacks a well-formed `Asset`
- * field - refusing the whole note.
+ * field; per the Safety Guarantee Audit, that degrades just that one embed
+ * rather than refusing the whole note.
  */
 export function matchAttachmentRecords(
   refs: readonly AttachmentReference[],
-  mediaRecordNames: readonly string[],
+  mediaRecordNames: readonly (string | undefined)[],
   mediaRecords: readonly CloudKitRecord[],
   noteRecordName: string,
   existingAttachments: Record<string, CloneStateAttachmentEntry>,
   usedAttachmentFileNames: Set<string>,
-): MatchedAttachment[] | undefined {
+): (MatchedAttachment | undefined)[] {
   const mediaByName = new Map(mediaRecords.map((record) => [record.recordName, record]));
-  const matched: MatchedAttachment[] = [];
+  const matched: (MatchedAttachment | undefined)[] = [];
 
   for (let i = 0; i < refs.length; i += 1) {
     const ref = refs[i];
     const mediaRecordName = mediaRecordNames[i];
     if (!ref || !mediaRecordName) {
-      return undefined;
+      matched.push(undefined);
+      continue;
     }
     const mediaRecord = mediaByName.get(mediaRecordName);
     if (!mediaRecord || mediaRecord.recordType !== "Media") {
-      return undefined;
+      matched.push(undefined);
+      continue;
     }
     const asset = parseAssetField(mediaRecord.fields.Asset);
     if (!asset) {
-      return undefined;
+      matched.push(undefined);
+      continue;
     }
 
     const existing = existingAttachments[ref.attachmentIdentifier];
@@ -134,6 +133,12 @@ export interface AttachmentSyncResult {
    * longer referenced (the note was edited to remove one) - the caller
    * should delete their files and drop these keys from state.attachments. */
   staleAttachmentRecordNames: string[];
+  /** Set when one or more references didn't resolve to what we've verified
+   * live (a table/file shape we couldn't parse) - those got an inline
+   * unknown-content marker instead. Per the Safety Guarantee Audit, this
+   * note must never be pushed; the caller should record this on the note's
+   * state entry. `undefined` when every reference resolved normally. */
+  unpublishableReason?: string | undefined;
 }
 
 /**
@@ -146,17 +151,16 @@ export interface AttachmentSyncResult {
  * `MergeableDataEncrypted` field rather than chaining through `Media` -
  * see `decodeTableRecord.ts` and dev notes, 2026-07-14T10:10/14:46.
  *
- * Returns `undefined` - refusing the whole note, same as any other
- * "structure we don't understand" case - if any reference doesn't match
- * what we've verified live: a file reference's embedded identifier must
- * resolve to an `Attachment` record whose `Media` reference resolves to a
- * `Media` record with a well-formed `Asset` field (dev notes,
- * 2026-07-13/14); a table reference must resolve to an `Attachment` record
- * with a well-formed, left-to-right `MergeableDataEncrypted` table document.
- * The actual matching (`extractMediaRecordNames`/`matchAttachmentRecords`,
- * `decodeTableMarkdown`) is pure and unit-tested against real captures;
- * this function is the thin network+fs wrapper around it, verified live
- * instead.
+ * Per the Safety Guarantee Audit, a reference that doesn't match what we've
+ * verified live - a file reference whose `Attachment`/`Media`/`Asset` chain
+ * doesn't resolve, or a table whose `MergeableDataEncrypted` doesn't decode -
+ * no longer refuses the whole note. Instead that one placeholder gets an
+ * inline "unparsed content" admonition and `unpublishableReason` is set, so
+ * the rest of the note (and any other, resolvable references) still comes
+ * through. The actual matching (`extractMediaRecordNames`/
+ * `matchAttachmentRecords`, `decodeTableMarkdown`) is pure and unit-tested
+ * against real captures; this function is the thin network+fs wrapper
+ * around it, verified live instead.
  */
 export async function resolveNoteAttachments(
   auth: AttachmentAuth,
@@ -168,7 +172,7 @@ export async function resolveNoteAttachments(
   refs: readonly AttachmentReference[],
   existingAttachments: Record<string, CloneStateAttachmentEntry>,
   usedAttachmentFileNames: Set<string>,
-): Promise<AttachmentSyncResult | undefined> {
+): Promise<AttachmentSyncResult> {
   const previousForNote = Object.keys(existingAttachments).filter(
     (recordName) => existingAttachments[recordName]?.noteRecordName === noteRecordName,
   );
@@ -192,6 +196,7 @@ export async function resolveNoteAttachments(
   const replacements: (string | undefined)[] = new Array(refs.length).fill(undefined);
   const fileRefs: AttachmentReference[] = [];
   const fileRefIndexes: number[] = [];
+  const unresolvedTypeUtis: string[] = [];
 
   for (let i = 0; i < refs.length; i += 1) {
     const ref = refs[i];
@@ -201,9 +206,11 @@ export async function resolveNoteAttachments(
     if (isTableUti(ref.typeUti)) {
       const markdown = decodeTableAttachment(attachmentByName.get(ref.attachmentIdentifier));
       if (markdown === undefined) {
-        return undefined;
+        replacements[i] = formatUnknownEmbedMarker(ref.typeUti);
+        unresolvedTypeUtis.push(ref.typeUti);
+      } else {
+        replacements[i] = markdown;
       }
-      replacements[i] = markdown;
     } else {
       fileRefIndexes.push(i);
       fileRefs.push(ref);
@@ -213,9 +220,7 @@ export async function resolveNoteAttachments(
   const attachments: Record<string, CloneStateAttachmentEntry> = {};
   if (fileRefs.length > 0) {
     const mediaRecordNames = extractMediaRecordNames(fileRefs, attachmentRecords);
-    if (!mediaRecordNames) {
-      return undefined;
-    }
+    const knownMediaRecordNames = mediaRecordNames.filter((name): name is string => name !== undefined);
 
     const mediaRecords = await lookupRecords(
       auth.session,
@@ -223,7 +228,7 @@ export async function resolveNoteAttachments(
       auth.dsid,
       database,
       zoneID,
-      mediaRecordNames,
+      knownMediaRecordNames,
     );
     const matched = matchAttachmentRecords(
       fileRefs,
@@ -233,15 +238,17 @@ export async function resolveNoteAttachments(
       existingAttachments,
       usedAttachmentFileNames,
     );
-    if (!matched) {
-      return undefined;
-    }
 
-    for (let j = 0; j < matched.length; j += 1) {
+    for (let j = 0; j < fileRefs.length; j += 1) {
       const attachment = matched[j];
       const ref = fileRefs[j];
       const index = fileRefIndexes[j];
-      if (!attachment || !ref || index === undefined) {
+      if (!ref || index === undefined) {
+        continue;
+      }
+      if (!attachment) {
+        replacements[index] = formatUnknownEmbedMarker(ref.typeUti);
+        unresolvedTypeUtis.push(ref.typeUti);
         continue;
       }
       if (attachment.needsDownload) {
@@ -255,19 +262,25 @@ export async function resolveNoteAttachments(
   }
 
   const staleAttachmentRecordNames = previousForNote.filter((recordName) => !(recordName in attachments));
+  const unpublishableReason =
+    unresolvedTypeUtis.length > 0
+      ? `contains embedded content this tool can't parse (${[...new Set(unresolvedTypeUtis)].join(", ")})`
+      : undefined;
 
   return {
     bodyText: renderPlaceholders(bodyText, replacements),
     attachments,
     staleAttachmentRecordNames,
+    unpublishableReason,
   };
 }
 
 /** Decodes a table reference's `MergeableDataEncrypted` payload into
  * markdown, or `undefined` if the record doesn't match what's been
  * verified live (missing/malformed, or a table shape this decoder refuses -
- * e.g. right-to-left column direction) - refusing the whole note rather
- * than guessing, same as any other unresolvable reference. */
+ * e.g. right-to-left column direction). The caller (`resolveNoteAttachments`)
+ * turns `undefined` into an inline unknown-content marker for just this one
+ * reference rather than guessing at its structure. */
 export function decodeTableAttachment(attachmentRecord: CloudKitRecord | undefined): string | undefined {
   if (!attachmentRecord || attachmentRecord.recordType !== "Attachment") {
     return undefined;

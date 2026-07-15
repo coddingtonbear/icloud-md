@@ -12,6 +12,14 @@ export interface CloneStateNoteEntry {
    * account's own (private-database) notes.
    */
   sharedZoneOwner?: string | undefined;
+  /**
+   * Set when this note contains content this tool couldn't fully parse (an
+   * unresolvable embed, or unrecognized structure) - see the Safety
+   * Guarantee Audit dev notes. Purely informational: `push` never trusts
+   * this field, re-deriving the same check fresh from the live remote
+   * record every time. Absent when the note is fully publishable.
+   */
+  unpublishableReason?: string | undefined;
 }
 
 export interface CloneStateAttachmentEntry {
@@ -98,6 +106,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
       recordChangeTag: entry.recordChangeTag,
       modificationDate: entry.modificationDate,
       sharedZoneOwner: typeof entry.sharedZoneOwner === "string" ? entry.sharedZoneOwner : undefined,
+      unpublishableReason: typeof entry.unpublishableReason === "string" ? entry.unpublishableReason : undefined,
     };
   }
 

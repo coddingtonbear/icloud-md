@@ -162,10 +162,13 @@ test("extractMediaRecordNames resolves the Media reference from a real Attachmen
   ]);
 });
 
-test("extractMediaRecordNames refuses when the identifier doesn't resolve to an Attachment record", () => {
+test("extractMediaRecordNames leaves that entry undefined when the identifier doesn't resolve to an Attachment record", () => {
   const refs: AttachmentReference[] = [{ attachmentIdentifier: "MISSING", typeUti: "public.jpeg" }];
-  assert.equal(extractMediaRecordNames(refs, []), undefined);
-  assert.equal(extractMediaRecordNames(refs, [{ ...IMAGE_ATTACHMENT_RECORD, recordName: "MISSING", recordType: "Note" }]), undefined);
+  assert.deepEqual(extractMediaRecordNames(refs, []), [undefined]);
+  assert.deepEqual(
+    extractMediaRecordNames(refs, [{ ...IMAGE_ATTACHMENT_RECORD, recordName: "MISSING", recordType: "Note" }]),
+    [undefined],
+  );
 });
 
 test("matchAttachmentRecords resolves a new audio attachment's filename and download from real records", () => {
@@ -264,10 +267,10 @@ test("matchAttachmentRecords re-downloads when the tracked checksum has changed"
   assert.equal(matched?.[0]?.relativeFile, "attachments/_7130093.jpeg");
 });
 
-test("matchAttachmentRecords refuses when the Media record has no well-formed Asset field", () => {
+test("matchAttachmentRecords leaves that entry undefined when the Media record has no well-formed Asset field", () => {
   const refs: AttachmentReference[] = [{ attachmentIdentifier: "A", typeUti: "public.jpeg" }];
   const brokenMedia: CloudKitRecord = { recordName: "M1", recordType: "Media", fields: {} };
-  assert.equal(matchAttachmentRecords(refs, ["M1"], [brokenMedia], "NOTE1", {}, new Set()), undefined);
+  assert.deepEqual(matchAttachmentRecords(refs, ["M1"], [brokenMedia], "NOTE1", {}, new Set()), [undefined]);
 });
 
 test("matchAttachmentRecords disambiguates a filename collision the same way notes do", () => {

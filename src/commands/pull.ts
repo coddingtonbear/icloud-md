@@ -11,6 +11,7 @@ import { readBaseCopy, removeBaseCopy, writeBaseCopy } from "../notes/baseCopy.j
 import { localFileState } from "../notes/localFileState.js";
 import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
+import { combineUnpublishableReasons } from "../notes/unknownContent.js";
 import type { IcloudSession } from "../session.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
@@ -21,6 +22,7 @@ interface PullSummary {
   merged: number;
   removed: number;
   attachmentsDownloaded: number;
+  unpublishable: number;
   skippedNewUnsyncable: number;
   droppedUnsyncable: number;
   unsharedUntracked: number;
@@ -57,6 +59,7 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
     merged: 0,
     removed: 0,
     attachmentsDownloaded: 0,
+    unpublishable: 0,
     skippedNewUnsyncable: 0,
     droppedUnsyncable: 0,
     unsharedUntracked: 0,
@@ -100,6 +103,7 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
 
       // decoded.status === "ok"
       let bodyText = decoded.bodyText;
+      let unpublishableReason = decoded.unpublishableReason;
       if (decoded.attachments.length > 0) {
         const zoneID = source.sharedZoneOwner
           ? { zoneName: PRIVATE_NOTES_ZONE.zoneName, ownerRecordName: source.sharedZoneOwner }
@@ -115,15 +119,8 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
           attachments,
           usedAttachmentFileNames,
         );
-        if (!resolved) {
-          if (!existing) {
-            summary.skippedNewUnsyncable += 1;
-            continue;
-          }
-          await dropUnsyncableNote(targetDir, record, existing, notes, attachments, summary, "attachment");
-          continue;
-        }
         bodyText = resolved.bodyText;
+        unpublishableReason = combineUnpublishableReasons(unpublishableReason, resolved.unpublishableReason);
         for (const stale of resolved.staleAttachmentRecordNames) {
           const staleEntry = attachments[stale];
           if (staleEntry) {
@@ -133,6 +130,9 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
         }
         Object.assign(attachments, resolved.attachments);
         summary.attachmentsDownloaded += Object.keys(resolved.attachments).length;
+      }
+      if (unpublishableReason) {
+        summary.unpublishable += 1;
       }
 
       if (!existing) {
@@ -148,6 +148,7 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
           recordChangeTag: record.recordChangeTag ?? "",
           modificationDate: modificationDateOf(record),
           sharedZoneOwner: source.sharedZoneOwner,
+          unpublishableReason,
         };
         summary.added += 1;
         continue;
@@ -166,6 +167,7 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
           ...existing,
           recordChangeTag: record.recordChangeTag ?? existing.recordChangeTag,
           modificationDate: modificationDateOf(record),
+          unpublishableReason,
         };
         summary.updated += 1;
         continue;
@@ -181,6 +183,7 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
         ...existing,
         recordChangeTag: record.recordChangeTag ?? existing.recordChangeTag,
         modificationDate: modificationDateOf(record),
+        unpublishableReason,
       };
 
       if (outcome.hasConflict) {
@@ -203,6 +206,11 @@ export async function runPull(session: IcloudSession, targetDir: string): Promis
     `Pulled into ${targetDir}: ${summary.added} added, ${summary.updated} updated, ${summary.merged} auto-merged, ` +
       `${summary.removed} removed, ${summary.attachmentsDownloaded} attachment(s) downloaded`,
   );
+  if (summary.unpublishable > 0) {
+    console.log(
+      `${summary.unpublishable} note(s) contain content this tool couldn't fully parse - read-only`,
+    );
+  }
   if (summary.skippedNewUnsyncable > 0 || summary.droppedUnsyncable > 0) {
     console.log(
       `${summary.skippedNewUnsyncable} new unsyncable note(s) skipped, ${summary.droppedUnsyncable} note(s) ` +
@@ -294,9 +302,11 @@ async function handleRemoteDeletion(
 }
 
 /**
- * A previously-tracked note that's no longer safely syncable - either
- * `classifyNoteRecord` itself refused it, or (a Phase 4 addition) it
- * references an attachment we couldn't resolve/download. Local edits are
+ * A previously-tracked note that's no longer safely syncable at all -
+ * `classifyNoteRecord` returned `"unsyncable"` (a genuine decode failure,
+ * e.g. missing text data). Unrecognized *embedded* content no longer lands
+ * here - it's written with an unknown-content marker and flagged
+ * unpublishable instead, per the Safety Guarantee Audit. Local edits are
  * never discarded silently: a modified file is left in place but reported
  * as a conflict; a clean one is left in place and simply untracked.
  */

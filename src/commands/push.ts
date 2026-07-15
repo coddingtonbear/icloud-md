@@ -9,6 +9,7 @@ import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
 import { hasAttachmentReference } from "../notes/noteAttachments.js";
+import { hasUnknownContentMarker } from "../notes/unknownContent.js";
 import { localFileState } from "../notes/localFileState.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { compressNoteDocument, decodeNoteBodyText, decompressNoteDocument } from "../notes/noteText.js";
@@ -79,6 +80,13 @@ export async function runPush(session: IcloudSession, targetDir: string, options
     }
     if (localText === "") {
       summary.refused.push(`${entry.file}: pushing a fully emptied note isn't supported yet - edit it in Notes instead`);
+      continue;
+    }
+    if (hasUnknownContentMarker(localText)) {
+      summary.refused.push(
+        `${entry.file}: this note contains content this tool can't parse and can never be pushed - ` +
+          `run "icloud-notes restore ${entry.file}" to discard your local edit.`,
+      );
       continue;
     }
     // A note that doesn't already have a tracked attachment but whose text
@@ -211,6 +219,13 @@ function prepareUpdate(
   if (classified.status !== "ok") {
     const reason = classified.status === "unsyncable" ? classified.reason : classified.status;
     summary.refused.push(`${entry.file}: remote note is no longer safely editable (${reason})`);
+    return undefined;
+  }
+  if (!classified.publishable) {
+    summary.refused.push(
+      `${entry.file}: this note contains content this tool can't parse - it can't be safely edited. ` +
+        `Run "icloud-notes restore ${entry.file}" to discard your local edit.`,
+    );
     return undefined;
   }
   if (classified.attachments.length > 0) {

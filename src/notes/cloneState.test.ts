@@ -39,6 +39,31 @@ test("round-trips shared-zone owners and per-zone syncTokens", () =>
     assert.equal(readBack?.syncToken, "private-token");
   }));
 
+test("round-trips unpublishableReason, absent means fully publishable", () =>
+  withTempDir(async (dir) => {
+    const state: CloneState = {
+      syncToken: "token",
+      notes: {
+        "REC-DEGRADED": {
+          file: "Table Note (REC).md",
+          recordChangeTag: "a",
+          modificationDate: 1,
+          unpublishableReason: "contains embedded content this tool can't parse (com.apple.notes.table)",
+        },
+        "REC-CLEAN": { file: "Plain Note (REC).md", recordChangeTag: "b", modificationDate: 2 },
+      },
+    };
+
+    await writeCloneState(dir, state);
+    const readBack = await readCloneState(dir);
+
+    assert.equal(
+      readBack?.notes["REC-DEGRADED"]?.unpublishableReason,
+      "contains embedded content this tool can't parse (com.apple.notes.table)",
+    );
+    assert.equal(readBack?.notes["REC-CLEAN"]?.unpublishableReason, undefined);
+  }));
+
 test("reads a pre-shared-notes state file (no shared fields) without error", () =>
   withTempDir(async (dir) => {
     // Exactly what writeCloneState produced before shared-note support existed.

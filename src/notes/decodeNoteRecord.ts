@@ -1,11 +1,22 @@
 import type { CloudKitFieldValue, CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { decodeNoteAttachmentRefs, OBJECT_REPLACEMENT_CHARACTER, type AttachmentReference } from "./noteAttachments.js";
 import { decodeNoteBodyText } from "./noteText.js";
+import { UNKNOWN_CONTENT_BANNER } from "./unknownContent.js";
 
 export type NoteDecodeResult =
   | { status: "deleted" }
   | { status: "unsyncable"; reason: "undecodable" }
-  | { status: "ok"; title: string; bodyText: string; attachments: AttachmentReference[] };
+  | {
+      status: "ok";
+      title: string;
+      bodyText: string;
+      attachments: AttachmentReference[];
+      /** False when this note contains content we can't safely push - see
+       * the Safety Guarantee Audit dev notes. `push` always re-derives this
+       * itself from a fresh record fetch; it's the authoritative gate. */
+      publishable: boolean;
+      unpublishableReason?: string | undefined;
+    };
 
 const TRASH_FOLDER_RECORD_NAME = "TrashFolder-CloudKit";
 
@@ -30,15 +41,26 @@ export function classifyNoteRecord(record: CloudKitRecord): NoteDecodeResult {
 
   const attachments = decodeNoteAttachmentRefs(compressed);
   const placeholderCount = countOccurrences(bodyText, OBJECT_REPLACEMENT_CHARACTER);
+  const title = decodeTitleField(record.fields.TitleEncrypted);
   if (placeholderCount !== attachments.length) {
     // Some embedded object we don't understand (a table, drawing, ...) also
     // uses this placeholder, or our attachment-run parse missed one - either
-    // way we can't trust a positional correlation between the two, so stay
-    // read-only rather than guess. See dev notes, 2026-07-13/14.
-    return { status: "unsyncable", reason: "undecodable" };
+    // way we can't trust a positional correlation between the two, so we
+    // can't localize *which* placeholder is the problem. Per the Safety
+    // Guarantee Audit: still fetch the note (banner up top, since we can't
+    // pinpoint the spot), but never allow it to be pushed. See dev notes,
+    // 2026-07-13/14.
+    return {
+      status: "ok",
+      title,
+      bodyText: UNKNOWN_CONTENT_BANNER + bodyText,
+      attachments,
+      publishable: false,
+      unpublishableReason: "contains unrecognized embedded content this tool couldn't parse or place precisely",
+    };
   }
 
-  return { status: "ok", title: decodeTitleField(record.fields.TitleEncrypted), bodyText, attachments };
+  return { status: "ok", title, bodyText, attachments, publishable: true };
 }
 
 function countOccurrences(text: string, needle: string): number {
