@@ -1,9 +1,9 @@
 import { mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import os from "node:os";
 import path from "node:path";
 import { chromium, type BrowserContext, type Page, type Response as PlaywrightResponse } from "playwright";
 import { DEFAULT_CLIENT_BUILD_NUMBER, DEFAULT_CLIENT_MASTERING_NUMBER } from "./clientConstants.js";
+import { CONFIG_DIR } from "../configDir.js";
 import { ChromiumNotInstalledError, SignInIncompleteError } from "../errors.js";
 import type { IcloudSession } from "../session.js";
 
@@ -26,7 +26,7 @@ import type { IcloudSession } from "../session.js";
  * device trust Apple grants after a completed 2FA). Reusing one profile means
  * repeat logins look like a returning browser and typically skip 2FA entirely.
  */
-export const DEFAULT_BROWSER_PROFILE_DIR = path.join(os.homedir(), ".config", "icloud-notes-sync", "browser-profile");
+export const DEFAULT_BROWSER_PROFILE_DIR = path.join(CONFIG_DIR, "browser-profile");
 
 const ICLOUD_HOME = "https://www.icloud.com/";
 

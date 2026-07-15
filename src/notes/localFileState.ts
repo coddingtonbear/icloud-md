@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { isEnoent } from "../fsUtil.js";
 import { readBaseCopy } from "./baseCopy.js";
 import type { CloneStateNoteEntry } from "./cloneState.js";
 
@@ -35,8 +36,4 @@ export async function localFileState(
     return "modified";
   }
   return content === base ? "clean" : "modified";
-}
-
-function isEnoent(err: unknown): boolean {
-  return err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT";
 }

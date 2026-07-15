@@ -1,5 +1,6 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { isEnoent } from "../fsUtil.js";
 
 /**
  * Pristine "last known synced" copy of each note's text, keyed by recordName
@@ -37,8 +38,4 @@ export async function removeBaseCopy(targetDir: string, recordName: string): Pro
 
 function baseCopyPath(targetDir: string, recordName: string): string {
   return path.join(targetDir, ...BASE_DIR_SEGMENTS, `${recordName}.md`);
-}
-
-function isEnoent(err: unknown): boolean {
-  return err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT";
 }

@@ -5,6 +5,7 @@ import { fetchAllNoteRecords, fetchSharedNoteRecords, type CloudKitRecord } from
 import { removeAttachmentsForNote, resolveNoteAttachments, type AttachmentAuth } from "../notes/attachmentSync.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
+import { isEnoent } from "../fsUtil.js";
 import { noteFileName, uniqueFileName } from "../notes/filename.js";
 import { mergeNoteVersions } from "../notes/mergeConflict.js";
 import { readBaseCopy, removeBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
@@ -356,8 +357,4 @@ async function safeUnlink(filePath: string): Promise<void> {
       throw cause;
     }
   }
-}
-
-function isEnoent(err: unknown): boolean {
-  return err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT";
 }

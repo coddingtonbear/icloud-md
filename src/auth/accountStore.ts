@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
+import { CONFIG_DIR } from "../configDir.js";
+import { isEnoent } from "../fsUtil.js";
 
 /**
  * Every Apple ID this machine has ever signed into gets its own subdirectory
@@ -17,10 +18,10 @@ import path from "node:path";
  * parameter, defaulted to this real path - tests substitute a temp
  * directory instead, so nothing here ever touches a real `~/.config`.
  */
-export const ACCOUNTS_ROOT = path.join(os.homedir(), ".config", "icloud-notes-sync", "accounts");
+export const ACCOUNTS_ROOT = path.join(CONFIG_DIR, "accounts");
 
 /** Scratch space for the throwaway login profile used to discover a new/unbound folder's account - see `folderAuth.ts`. */
-export const TMP_ROOT = path.join(os.homedir(), ".config", "icloud-notes-sync", "tmp");
+export const TMP_ROOT = path.join(CONFIG_DIR, "tmp");
 
 export interface AccountMeta {
   appleId: string;
@@ -94,8 +95,4 @@ export async function promoteEphemeralProfile(ephemeralDir: string, dsid: string
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-function isEnoent(err: unknown): boolean {
-  return err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT";
 }

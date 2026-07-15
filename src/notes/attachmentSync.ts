@@ -7,6 +7,7 @@ import {
   type CloudKitRecord,
   type CloudKitZoneID,
 } from "../cloudkit/databaseClient.js";
+import { isEnoent } from "../fsUtil.js";
 import type { IcloudSession } from "../session.js";
 import type { CloneStateAttachmentEntry } from "./cloneState.js";
 import { decodeTableMarkdown } from "./decodeTableRecord.js";
@@ -323,10 +324,6 @@ async function safeUnlink(filePath: string): Promise<void> {
       throw cause;
     }
   }
-}
-
-function isEnoent(err: unknown): boolean {
-  return err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT";
 }
 
 function isRecordRef(value: unknown): value is { recordName: string } {
