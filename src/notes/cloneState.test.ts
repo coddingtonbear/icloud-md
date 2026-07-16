@@ -117,3 +117,43 @@ test("throws CorruptStateFileError for a malformed account field", () =>
 
     await assert.rejects(readCloneState(dir), CorruptStateFileError);
   }));
+
+test("round-trips table attachments", () =>
+  withTempDir(async (dir) => {
+    const state: CloneState = {
+      syncToken: "token",
+      notes: {
+        "REC-TABLE": { file: "Table Note (REC).md", recordChangeTag: "a", modificationDate: 1 },
+      },
+      tableAttachments: {
+        "ATT-1": { noteRecordName: "REC-TABLE" },
+      },
+    };
+
+    await writeCloneState(dir, state);
+    const readBack = await readCloneState(dir);
+
+    assert.deepEqual(readBack?.tableAttachments, { "ATT-1": { noteRecordName: "REC-TABLE" } });
+  }));
+
+test("reads a pre-table-history state file (no tableAttachments field) without error", () =>
+  withTempDir(async (dir) => {
+    const legacy: CloneState = { syncToken: "old-token", notes: {} };
+    await writeCloneState(dir, legacy);
+
+    const readBack = await readCloneState(dir);
+    assert.equal(readBack?.tableAttachments, undefined);
+  }));
+
+test("throws CorruptStateFileError for a malformed table attachment entry", () =>
+  withTempDir(async (dir) => {
+    const stateDir = path.join(dir, ".icloud-notes-sync");
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(
+      path.join(stateDir, "state.json"),
+      JSON.stringify({ notes: {}, tableAttachments: { "ATT-1": {} } }),
+      "utf-8",
+    );
+
+    await assert.rejects(readCloneState(dir), CorruptStateFileError);
+  }));

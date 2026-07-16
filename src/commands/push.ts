@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveFolderAccount } from "../auth/folderAuth.js";
 import type { IcloudSession } from "../session.js";
@@ -10,12 +10,14 @@ import { classifyNoteRecord, type NoteDecodeResult } from "../notes/decodeNoteRe
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
 import { findMarkdownTableBlocks } from "../notes/decodeTableRecord.js";
+import { mergeNoteVersions } from "../notes/mergeConflict.js";
 import { hasAttachmentReference, isTableUti } from "../notes/noteAttachments.js";
 import { hasUnknownContentMarker } from "../notes/unknownContent.js";
 import { localFileState } from "../notes/localFileState.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { compressNoteDocument, decodeNoteBodyText, decompressNoteDocument } from "../notes/noteText.js";
 import { prepareTableAttachmentUpdate, reconstructBodyTextWithPlaceholders } from "../notes/tablePushEdit.js";
+import { recordVersion } from "../notes/versionHistory.js";
 import {
   applyTextEdit,
   encodeNoteDocument,
@@ -170,8 +172,48 @@ export async function runPush(targetDir: string, options: PushOptions = {}): Pro
       summary.conflicts.push(`${entry.file}: no longer exists remotely - run "pull" to reconcile`);
       continue;
     }
+
+    // Snapshot the record's current server-side text before anything below
+    // can `continue` past it - a changed-remotely conflict (the very next
+    // check) is exactly the "someone edited this outside our tool" case
+    // version history exists to catch; capturing here, unconditionally,
+    // means it's caught whether or not this candidate ends up conflicting.
+    const noteTextValue = record.fields.TextDataEncrypted?.value;
+    if (typeof noteTextValue === "string") {
+      await recordVersion(targetDir, {
+        recordName: record.recordName,
+        recordType: "Note",
+        field: "TextDataEncrypted",
+        recordChangeTag: record.recordChangeTag ?? "",
+        valueBase64: noteTextValue,
+      });
+    }
+
     if ((record.recordChangeTag ?? "") !== entry.recordChangeTag) {
-      summary.conflicts.push(`${entry.file}: changed remotely since the last pull - run "pull" (which merges) first`);
+      const classified = classifyNoteRecord(record);
+      if (classified.status !== "ok") {
+        summary.conflicts.push(`${entry.file}: changed remotely since the last pull - run "pull" (which merges) first`);
+        continue;
+      }
+      // Real 3-way merge, same machinery `pull` already uses - the file
+      // ends up in exactly the state a manual `pull` would have left it in,
+      // without a separate command. Per-candidate: one conflicting note
+      // doesn't block the others in this same push from going through.
+      const base = (await readBaseCopy(targetDir, recordName)) ?? "";
+      const outcome = mergeNoteVersions(base, localText, classified.bodyText);
+      await writeFile(path.join(targetDir, entry.file), outcome.text, "utf-8");
+
+      if (outcome.hasConflict) {
+        summary.conflicts.push(
+          `${entry.file}: changed remotely since the last pull - merged with conflict markers, resolve manually`,
+        );
+        // Base copy deliberately NOT advanced, matching `pull`'s own
+        // discipline - the next merge needs the right common ancestor.
+      } else {
+        await writeBaseCopy(targetDir, recordName, outcome.text);
+        state.notes[recordName] = { ...entry, recordChangeTag: record.recordChangeTag ?? entry.recordChangeTag };
+        console.log(`${entry.file}: merged remote changes into your local edit - re-run push to upload`);
+      }
       continue;
     }
 
@@ -182,6 +224,7 @@ export async function runPush(targetDir: string, options: PushOptions = {}): Pro
       auth.session,
       auth.ckdatabasewsUrl,
       auth.dsid,
+      targetDir,
       record,
       entry,
       localText,
@@ -267,6 +310,7 @@ async function prepareUpdate(
   session: IcloudSession,
   ckdatabasewsUrl: string,
   dsid: string,
+  targetDir: string,
   record: CloudKitRecord,
   entry: CloneStateNoteEntry,
   localText: string,
@@ -300,6 +344,7 @@ async function prepareUpdate(
       session,
       ckdatabasewsUrl,
       dsid,
+      targetDir,
       record,
       classified,
       entry,
@@ -334,6 +379,7 @@ async function prepareTableCandidate(
   session: IcloudSession,
   ckdatabasewsUrl: string,
   dsid: string,
+  targetDir: string,
   record: CloudKitRecord,
   classified: OkNoteRecordResult,
   entry: CloneStateNoteEntry,
@@ -360,6 +406,27 @@ async function prepareTableCandidate(
     classified.attachments.map((ref) => ref.attachmentIdentifier),
   );
   const attachmentByName = new Map(attachmentRecords.map((r) => [r.recordName, r]));
+
+  // Snapshot every fetched table's current server-side bytes before the
+  // per-ref loop below can `continue`/return past a deleted one - matching
+  // the Note-record hook above, this has to fire unconditionally, not just
+  // for tables that end up getting written.
+  for (const attachmentRecord of attachmentRecords) {
+    if (attachmentRecord.deleted === true) {
+      continue;
+    }
+    const mergeableValue = attachmentRecord.fields.MergeableDataEncrypted?.value;
+    if (typeof mergeableValue === "string") {
+      await recordVersion(targetDir, {
+        recordName: attachmentRecord.recordName,
+        recordType: "Attachment",
+        field: "MergeableDataEncrypted",
+        recordChangeTag: attachmentRecord.recordChangeTag ?? "",
+        valueBase64: mergeableValue,
+        noteRecordName: record.recordName,
+      });
+    }
+  }
 
   const updates: RecordUpdate[] = [];
   for (let i = 0; i < classified.attachments.length; i += 1) {

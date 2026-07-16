@@ -9,7 +9,7 @@ import {
 } from "../cloudkit/databaseClient.js";
 import { isEnoent } from "../fsUtil.js";
 import type { IcloudSession } from "../session.js";
-import type { CloneStateAttachmentEntry } from "./cloneState.js";
+import type { CloneStateAttachmentEntry, CloneStateTableAttachmentEntry } from "./cloneState.js";
 import { decodeTableMarkdown } from "./decodeTableRecord.js";
 import { uniqueFileName } from "./filename.js";
 import {
@@ -125,6 +125,18 @@ export function matchAttachmentRecords(
   return matched;
 }
 
+/** A resolved table's raw `MergeableDataEncrypted` bytes plus enough
+ * identity to snapshot it into version history - deliberately separate from
+ * `CloneStateTableAttachmentEntry` (which is state-tracking only, no raw
+ * bytes) since not every caller of `resolveNoteAttachments` wants to pay for
+ * building version snapshots. */
+export interface TableAttachmentSnapshotSource {
+  recordName: string;
+  noteRecordName: string;
+  recordChangeTag: string;
+  valueBase64: string;
+}
+
 export interface AttachmentSyncResult {
   /** `bodyText` with each U+FFFC placeholder replaced by a markdown embed/link. */
   bodyText: string;
@@ -134,6 +146,16 @@ export interface AttachmentSyncResult {
    * longer referenced (the note was edited to remove one) - the caller
    * should delete their files and drop these keys from state.attachments. */
   staleAttachmentRecordNames: string[];
+  /** This note's current table attachments, keyed by Attachment recordName -
+   * merge into state.tableAttachments. */
+  tableAttachments: Record<string, CloneStateTableAttachmentEntry>;
+  /** Previously-tracked table attachment recordNames for this note that are
+   * no longer referenced - the caller should drop these keys from
+   * state.tableAttachments (no file to delete, unlike a file attachment). */
+  staleTableAttachmentRecordNames: string[];
+  /** One entry per table reference that resolved this call - the caller
+   * (`pull`) feeds these into `versionHistory.ts`'s `recordVersion`. */
+  tableAttachmentSnapshots: TableAttachmentSnapshotSource[];
   /** Set when one or more references didn't resolve to what we've verified
    * live (a table/file shape we couldn't parse) - those got an inline
    * unknown-content marker instead. Per the Safety Guarantee Audit, this
@@ -172,14 +194,25 @@ export async function resolveNoteAttachments(
   bodyText: string,
   refs: readonly AttachmentReference[],
   existingAttachments: Record<string, CloneStateAttachmentEntry>,
+  existingTableAttachments: Record<string, CloneStateTableAttachmentEntry>,
   usedAttachmentFileNames: Set<string>,
 ): Promise<AttachmentSyncResult> {
   const previousForNote = Object.keys(existingAttachments).filter(
     (recordName) => existingAttachments[recordName]?.noteRecordName === noteRecordName,
   );
+  const previousTableForNote = Object.keys(existingTableAttachments).filter(
+    (recordName) => existingTableAttachments[recordName]?.noteRecordName === noteRecordName,
+  );
 
   if (refs.length === 0) {
-    return { bodyText, attachments: {}, staleAttachmentRecordNames: previousForNote };
+    return {
+      bodyText,
+      attachments: {},
+      staleAttachmentRecordNames: previousForNote,
+      tableAttachments: {},
+      staleTableAttachmentRecordNames: previousTableForNote,
+      tableAttachmentSnapshots: [],
+    };
   }
 
   const attachmentRecords = await lookupRecords(
@@ -198,6 +231,8 @@ export async function resolveNoteAttachments(
   const fileRefs: AttachmentReference[] = [];
   const fileRefIndexes: number[] = [];
   const unresolvedTypeUtis: string[] = [];
+  const tableAttachments: Record<string, CloneStateTableAttachmentEntry> = {};
+  const tableAttachmentSnapshots: TableAttachmentSnapshotSource[] = [];
 
   for (let i = 0; i < refs.length; i += 1) {
     const ref = refs[i];
@@ -205,12 +240,23 @@ export async function resolveNoteAttachments(
       continue;
     }
     if (isTableUti(ref.typeUti)) {
-      const markdown = decodeTableAttachment(attachmentByName.get(ref.attachmentIdentifier));
+      const attachmentRecord = attachmentByName.get(ref.attachmentIdentifier);
+      const markdown = decodeTableAttachment(attachmentRecord);
       if (markdown === undefined) {
         replacements[i] = formatUnknownEmbedMarker(ref.typeUti);
         unresolvedTypeUtis.push(ref.typeUti);
       } else {
         replacements[i] = markdown;
+        tableAttachments[ref.attachmentIdentifier] = { noteRecordName };
+        const rawValue = attachmentRecord?.fields.MergeableDataEncrypted?.value;
+        if (typeof rawValue === "string") {
+          tableAttachmentSnapshots.push({
+            recordName: ref.attachmentIdentifier,
+            noteRecordName,
+            recordChangeTag: attachmentRecord?.recordChangeTag ?? "",
+            valueBase64: rawValue,
+          });
+        }
       }
     } else {
       fileRefIndexes.push(i);
@@ -263,6 +309,9 @@ export async function resolveNoteAttachments(
   }
 
   const staleAttachmentRecordNames = previousForNote.filter((recordName) => !(recordName in attachments));
+  const staleTableAttachmentRecordNames = previousTableForNote.filter(
+    (recordName) => !(recordName in tableAttachments),
+  );
   const unpublishableReason =
     unresolvedTypeUtis.length > 0
       ? `contains embedded content this tool can't parse (${[...new Set(unresolvedTypeUtis)].join(", ")})`
@@ -272,6 +321,9 @@ export async function resolveNoteAttachments(
     bodyText: renderPlaceholders(bodyText, replacements),
     attachments,
     staleAttachmentRecordNames,
+    tableAttachments,
+    staleTableAttachmentRecordNames,
+    tableAttachmentSnapshots,
     unpublishableReason,
   };
 }
@@ -314,6 +366,19 @@ export async function removeAttachmentsForNote(
     removed.push(recordName);
   }
   return removed;
+}
+
+/** Drops table-attachment tracking entries for a note - no file to delete (a
+ * table has no downloaded file, just its rendered markdown inline), so this
+ * is pure bookkeeping. Returns the recordNames removed, so the caller can
+ * drop them from `state.tableAttachments`. */
+export function removeTableAttachmentsForNote(
+  noteRecordName: string,
+  tableAttachments: Record<string, CloneStateTableAttachmentEntry>,
+): string[] {
+  return Object.entries(tableAttachments)
+    .filter(([, entry]) => entry.noteRecordName === noteRecordName)
+    .map(([recordName]) => recordName);
 }
 
 async function safeUnlink(filePath: string): Promise<void> {

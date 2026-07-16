@@ -4,8 +4,14 @@ import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
-import { decodeTableAttachment, extractMediaRecordNames, matchAttachmentRecords, removeAttachmentsForNote } from "./attachmentSync.js";
-import type { CloneStateAttachmentEntry } from "./cloneState.js";
+import {
+  decodeTableAttachment,
+  extractMediaRecordNames,
+  matchAttachmentRecords,
+  removeAttachmentsForNote,
+  removeTableAttachmentsForNote,
+} from "./attachmentSync.js";
+import type { CloneStateAttachmentEntry, CloneStateTableAttachmentEntry } from "./cloneState.js";
 import type { AttachmentReference } from "./noteAttachments.js";
 
 // Real records captured live from "Call with Janice Elkins" (audio) and
@@ -143,6 +149,18 @@ test("removeAttachmentsForNote returns an empty list when the note has no attach
     const removed = await removeAttachmentsForNote(dir, "NOTE1", {});
     assert.deepEqual(removed, []);
   }));
+
+test("removeTableAttachmentsForNote returns only the recordNames belonging to the given note", () => {
+  const tableAttachments: Record<string, CloneStateTableAttachmentEntry> = {
+    "ATT-TABLE-1": { noteRecordName: "NOTE1" },
+    "ATT-TABLE-2": { noteRecordName: "NOTE2" },
+  };
+  assert.deepEqual(removeTableAttachmentsForNote("NOTE1", tableAttachments), ["ATT-TABLE-1"]);
+});
+
+test("removeTableAttachmentsForNote returns an empty list when the note has no table attachments", () => {
+  assert.deepEqual(removeTableAttachmentsForNote("NOTE1", {}), []);
+});
 
 test("extractMediaRecordNames resolves the Media reference from a real Attachment record (audio)", () => {
   const refs: AttachmentReference[] = [

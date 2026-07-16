@@ -37,6 +37,12 @@ export interface CloneStateAttachmentEntry {
   noteRecordName: string;
 }
 
+export interface CloneStateTableAttachmentEntry {
+  /** Which note this table attachment belongs to, so it can be cleaned up
+   * if that note is deleted or dropped from tracking. */
+  noteRecordName: string;
+}
+
 export interface CloneStateAccount {
   appleId: string;
   dsid: string;
@@ -71,6 +77,15 @@ export interface CloneState {
    * (the identifier embedded in the owning note's body). Absent entirely in
    * state files written before Phase 4. */
   attachments?: Record<string, CloneStateAttachmentEntry> | undefined;
+  /** Table attachments currently referenced by a note, keyed by the
+   * `Attachment` record's recordName - same identifier space as
+   * `attachments`, but tracked separately since a table has no downloaded
+   * file (its content is rendered inline as markdown) and so none of
+   * `CloneStateAttachmentEntry`'s file/checksum fields apply. Exists so a
+   * note's table recordNames are known outside of a single pull's in-memory
+   * scope (version history lookups, staleness cleanup). Absent entirely in
+   * state files written before this tracking existed. */
+  tableAttachments?: Record<string, CloneStateTableAttachmentEntry> | undefined;
 }
 
 export const STATE_DIR_NAME = ".icloud-notes-sync";
@@ -159,6 +174,17 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
     }
   }
 
+  let tableAttachments: Record<string, CloneStateTableAttachmentEntry> | undefined;
+  if (isRecord(value.tableAttachments)) {
+    tableAttachments = {};
+    for (const [recordName, entry] of Object.entries(value.tableAttachments)) {
+      if (!isRecord(entry) || typeof entry.noteRecordName !== "string") {
+        throw new CorruptStateFileError(`${filePath} has a malformed entry for table attachment "${recordName}".`);
+      }
+      tableAttachments[recordName] = { noteRecordName: entry.noteRecordName };
+    }
+  }
+
   let account: CloneStateAccount | undefined;
   if (value.account !== undefined) {
     if (!isRecord(value.account) || typeof value.account.appleId !== "string" || typeof value.account.dsid !== "string") {
@@ -167,7 +193,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
     account = { appleId: value.account.appleId, dsid: value.account.dsid };
   }
 
-  return { account, syncToken, sharedZoneSyncTokens, replicaId, notes, attachments };
+  return { account, syncToken, sharedZoneSyncTokens, replicaId, notes, attachments, tableAttachments };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

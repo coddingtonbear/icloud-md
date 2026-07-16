@@ -5,9 +5,12 @@ import ora from "ora";
 import { reauthenticateFolder, resolveFolderAccount } from "./auth/folderAuth.js";
 import { parseSinceDuration, runBugReport } from "./commands/bugReport.js";
 import { runClone, type CloneSummary } from "./commands/clone.js";
+import { runDiff } from "./commands/diff.js";
+import { runHistory } from "./commands/history.js";
 import { runPull, type PullSummary } from "./commands/pull.js";
 import { runPush } from "./commands/push.js";
 import { runRestore } from "./commands/restore.js";
+import { runRevert } from "./commands/revert.js";
 import { IcloudNotesSyncError, NotClonedDirectoryError } from "./errors.js";
 import { recordLastError } from "./lastError.js";
 import { readCloneState } from "./notes/cloneState.js";
@@ -149,6 +152,65 @@ async function restore(args: string[]): Promise<void> {
   await runRestore(dirArg ?? ".", fileArg);
 }
 
+async function history(args: string[]): Promise<void> {
+  const [fileArg, dirArg] = args;
+  if (!fileArg) {
+    console.error("Usage: icloud-notes history <file> [directory]");
+    process.exitCode = 1;
+    return;
+  }
+  await runHistory(dirArg ?? ".", fileArg);
+}
+
+const DIFF_USAGE =
+  "Usage: icloud-notes diff <file> <ref> [directory]\n" +
+  "  <ref> is a snapshot id (diffed against the current remote copy) or <from>..<to> (two snapshot ids) - " +
+  'ids come from "icloud-notes history <file>".';
+
+async function diff(args: string[]): Promise<void> {
+  const [fileArg, refArg, dirArg] = args;
+  if (!fileArg || !refArg) {
+    console.error(DIFF_USAGE);
+    process.exitCode = 1;
+    return;
+  }
+
+  const parts = refArg.split("..");
+  let fromId: string;
+  let toId: string | undefined;
+  if (parts.length === 1 && parts[0]) {
+    fromId = parts[0];
+  } else if (parts.length === 2 && parts[0] && parts[1]) {
+    [fromId, toId] = [parts[0], parts[1]];
+  } else {
+    console.error(`Invalid ref "${refArg}" - expected a snapshot id or <from>..<to>.\n${DIFF_USAGE}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  await runDiff(dirArg ?? ".", fileArg, fromId, toId, (message) => console.log(message));
+}
+
+async function revert(args: string[]): Promise<void> {
+  const flags = args.filter((arg) => arg.startsWith("--"));
+  const positional = args.filter((arg) => !arg.startsWith("--"));
+  const unknownFlag = flags.find((flag) => flag !== "--yes");
+  const [fileArg, idArg, dirArg] = positional;
+  if (unknownFlag || !fileArg || !idArg || positional.length > 3) {
+    console.error(
+      "Usage: icloud-notes revert <file> <id> [directory] [--yes]\n" +
+        "  Without --yes, reports what would happen without writing anything - this is a real remote write.",
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  await runRevert(dirArg ?? ".", fileArg, idArg, {
+    confirmed: flags.includes("--yes"),
+    onLoginStatus: (message) => console.log(message),
+  });
+}
+
 const BUG_REPORT_USAGE =
   "Usage: icloud-notes bug-report --since <duration> [directory]\n" +
   '  <duration> is a number followed by "m" (minutes), "h" (hours), or "d" (days) - e.g. 30m, 6h, 2d.\n' +
@@ -210,6 +272,15 @@ async function main(): Promise<void> {
       case "restore":
         await restore(rest);
         return;
+      case "history":
+        await history(rest);
+        return;
+      case "diff":
+        await diff(rest);
+        return;
+      case "revert":
+        await revert(rest);
+        return;
       case "bug-report":
         await bugReport(rest);
         return;
@@ -220,8 +291,14 @@ async function main(): Promise<void> {
             "  clone <directory>     Fetch all Notes into a fresh local directory; signs in via a browser window " +
             "the first time a directory (or a new account) is used\n" +
             "  pull [directory]      Fetch changes since the last clone/pull (defaults to the current directory)\n" +
-            "  push [directory]      Upload locally edited notes (--dry-run to preview); conflicts are reported, never overwritten\n" +
+            "  push [directory]      Upload locally edited notes (--dry-run to preview); a note changed remotely is " +
+            "merged (conflict markers if needed) instead of overwritten\n" +
             "  restore <file> [directory]  Discard a tracked note's local edits, reverting it to the last synced copy\n" +
+            "  history <file> [directory]  List recorded version snapshots for a note (and its tables), newest first\n" +
+            "  diff <file> <ref> [directory]  Diff two snapshots, or one snapshot against the current remote copy - " +
+            "<ref> is a snapshot id or <from>..<to>\n" +
+            "  revert <file> <id> [directory] [--yes]  Write a historical snapshot back to the server (a real remote " +
+            "write - without --yes, reports what would happen)\n" +
             "  reauthenticate [directory]  Force a fresh sign-in for a directory's already-bound account (defaults to the current directory)\n" +
             "  verify-auth [directory]     Check whether a directory's bound account is authenticated (defaults to the current directory)\n" +
             "  bug-report --since <duration> [directory]  Bundle version info, the last error, local state, and " +

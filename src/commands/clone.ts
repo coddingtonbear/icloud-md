@@ -72,6 +72,7 @@ export async function runClone(
   };
   const notes: CloneState["notes"] = {};
   const attachments: NonNullable<CloneState["attachments"]> = {};
+  const tableAttachments: NonNullable<CloneState["tableAttachments"]> = {};
   const usedFileNames = new Set<string>();
   const usedAttachmentFileNames = new Set<string>();
   const sharedZoneSyncTokens: Record<string, string> = {};
@@ -120,12 +121,14 @@ export async function runClone(
             decoded.bodyText,
             decoded.attachments,
             attachments,
+            tableAttachments,
             usedAttachmentFileNames,
           );
           bodyText = resolved.bodyText;
           unpublishableReason = combineUnpublishableReasons(unpublishableReason, resolved.unpublishableReason);
           Object.assign(attachments, resolved.attachments);
           summary.attachmentsDownloaded += Object.keys(resolved.attachments).length;
+          Object.assign(tableAttachments, resolved.tableAttachments);
         }
 
         const fileName = uniqueFileName(noteFileName(decoded.title), usedFileNames);
@@ -167,6 +170,7 @@ export async function runClone(
     sharedZoneSyncTokens,
     notes,
     attachments,
+    tableAttachments,
   });
 
   return summary;

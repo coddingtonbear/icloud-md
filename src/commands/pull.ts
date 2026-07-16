@@ -2,7 +2,12 @@ import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveFolderAccount } from "../auth/folderAuth.js";
 import { fetchAllNoteRecords, fetchSharedNoteRecords, type CloudKitRecord } from "../cloudkit/databaseClient.js";
-import { removeAttachmentsForNote, resolveNoteAttachments, type AttachmentAuth } from "../notes/attachmentSync.js";
+import {
+  removeAttachmentsForNote,
+  removeTableAttachmentsForNote,
+  resolveNoteAttachments,
+  type AttachmentAuth,
+} from "../notes/attachmentSync.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { isEnoent } from "../fsUtil.js";
@@ -13,6 +18,7 @@ import { localFileState } from "../notes/localFileState.js";
 import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { combineUnpublishableReasons } from "../notes/unknownContent.js";
+import { recordVersion } from "../notes/versionHistory.js";
 import type { SyncProgress } from "../progress.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
@@ -73,6 +79,7 @@ export async function runPull(
 
   const notes: CloneState["notes"] = { ...state.notes };
   const attachments: NonNullable<CloneState["attachments"]> = { ...state.attachments };
+  const tableAttachments: NonNullable<CloneState["tableAttachments"]> = { ...state.tableAttachments };
   const usedFileNames = new Set(Object.values(state.notes).map((entry) => entry.file));
   const usedAttachmentFileNames = new Set(Object.values(attachments).map((entry) => path.basename(entry.file)));
   const attachmentAuth: AttachmentAuth = { session: auth.session, ckdatabasewsUrl: auth.ckdatabasewsUrl, dsid: auth.dsid };
@@ -116,7 +123,7 @@ export async function runPull(
           if (!existing) {
             continue;
           }
-          await handleRemoteDeletion(targetDir, record, existing, notes, attachments, summary);
+          await handleRemoteDeletion(targetDir, record, existing, notes, attachments, tableAttachments, summary);
           continue;
         }
 
@@ -125,11 +132,22 @@ export async function runPull(
             summary.skippedNewUnsyncable += 1;
             continue;
           }
-          await dropUnsyncableNote(targetDir, record, existing, notes, attachments, summary, decoded.reason);
+          await dropUnsyncableNote(targetDir, record, existing, notes, attachments, tableAttachments, summary, decoded.reason);
           continue;
         }
 
         // decoded.status === "ok"
+        const textValue = record.fields.TextDataEncrypted?.value;
+        if (typeof textValue === "string") {
+          await recordVersion(targetDir, {
+            recordName: record.recordName,
+            recordType: "Note",
+            field: "TextDataEncrypted",
+            recordChangeTag: record.recordChangeTag ?? "",
+            valueBase64: textValue,
+          });
+        }
+
         let bodyText = decoded.bodyText;
         let unpublishableReason = decoded.unpublishableReason;
         if (decoded.attachments.length > 0) {
@@ -145,6 +163,7 @@ export async function runPull(
             decoded.bodyText,
             decoded.attachments,
             attachments,
+            tableAttachments,
             usedAttachmentFileNames,
           );
           bodyText = resolved.bodyText;
@@ -158,6 +177,20 @@ export async function runPull(
           }
           Object.assign(attachments, resolved.attachments);
           summary.attachmentsDownloaded += Object.keys(resolved.attachments).length;
+          for (const stale of resolved.staleTableAttachmentRecordNames) {
+            delete tableAttachments[stale];
+          }
+          Object.assign(tableAttachments, resolved.tableAttachments);
+          for (const tableSnapshot of resolved.tableAttachmentSnapshots) {
+            await recordVersion(targetDir, {
+              recordName: tableSnapshot.recordName,
+              recordType: "Attachment",
+              field: "MergeableDataEncrypted",
+              recordChangeTag: tableSnapshot.recordChangeTag,
+              valueBase64: tableSnapshot.valueBase64,
+              noteRecordName: tableSnapshot.noteRecordName,
+            });
+          }
         }
         if (unpublishableReason) {
           summary.unpublishable += 1;
@@ -231,9 +264,16 @@ export async function runPull(
 
   progress?.onProcessComplete?.();
 
-  await handleVanishedSharedZones(targetDir, sharedZones, notes, attachments, summary);
+  await handleVanishedSharedZones(targetDir, sharedZones, notes, attachments, tableAttachments, summary);
 
-  await writeCloneState(targetDir, { account: state.account, syncToken, sharedZoneSyncTokens, notes, attachments });
+  await writeCloneState(targetDir, {
+    account: state.account,
+    syncToken,
+    sharedZoneSyncTokens,
+    notes,
+    attachments,
+    tableAttachments,
+  });
 
   return summary;
 }
@@ -250,6 +290,7 @@ async function handleVanishedSharedZones(
   sharedZones: Array<{ zoneID: { ownerRecordName?: string | undefined } }>,
   notes: CloneState["notes"],
   attachments: NonNullable<CloneState["attachments"]>,
+  tableAttachments: NonNullable<CloneState["tableAttachments"]>,
   summary: PullSummary,
 ): Promise<void> {
   const liveOwners = new Set(
@@ -269,6 +310,9 @@ async function handleVanishedSharedZones(
     for (const removed of await removeAttachmentsForNote(targetDir, recordName, attachments)) {
       delete attachments[removed];
     }
+    for (const removed of removeTableAttachmentsForNote(recordName, tableAttachments)) {
+      delete tableAttachments[removed];
+    }
     summary.unsharedUntracked += 1;
   }
 }
@@ -279,6 +323,7 @@ async function handleRemoteDeletion(
   existing: CloneStateNoteEntry,
   notes: CloneState["notes"],
   attachments: NonNullable<CloneState["attachments"]>,
+  tableAttachments: NonNullable<CloneState["tableAttachments"]>,
   summary: PullSummary,
 ): Promise<void> {
   const local = await localFileState(targetDir, existing, record.recordName);
@@ -292,6 +337,9 @@ async function handleRemoteDeletion(
     await removeBaseCopy(targetDir, record.recordName);
     for (const removed of await removeAttachmentsForNote(targetDir, record.recordName, attachments)) {
       delete attachments[removed];
+    }
+    for (const removed of removeTableAttachmentsForNote(record.recordName, tableAttachments)) {
+      delete tableAttachments[removed];
     }
     summary.removed += 1;
     return;
@@ -325,6 +373,7 @@ async function dropUnsyncableNote(
   existing: CloneStateNoteEntry,
   notes: CloneState["notes"],
   attachments: NonNullable<CloneState["attachments"]>,
+  tableAttachments: NonNullable<CloneState["tableAttachments"]>,
   summary: PullSummary,
   reason: string,
 ): Promise<void> {
@@ -346,6 +395,9 @@ async function dropUnsyncableNote(
   await removeBaseCopy(targetDir, record.recordName);
   for (const removed of await removeAttachmentsForNote(targetDir, record.recordName, attachments)) {
     delete attachments[removed];
+  }
+  for (const removed of removeTableAttachmentsForNote(record.recordName, tableAttachments)) {
+    delete tableAttachments[removed];
   }
 }
 

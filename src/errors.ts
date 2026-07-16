@@ -165,3 +165,26 @@ export class CloudKitRequestFailedError extends IcloudNotesSyncError {
     });
   }
 }
+
+/** A `history`/`diff`/`revert` snapshot id that doesn't match any recorded
+ * version for the given file - either mistyped, or from a different file's
+ * history. */
+export class UnknownVersionSnapshotError extends IcloudNotesSyncError {
+  constructor(id: string, fileName: string) {
+    super(`No version snapshot with id "${id}" found for "${fileName}".`, {
+      hint: `Run "icloud-notes history ${fileName}" to see available snapshot ids.`,
+    });
+  }
+}
+
+/** `diff`/`revert` couldn't read the content needed on one side of the
+ * comparison (or write-back) - the target record vanished remotely, is no
+ * longer in a readable state, or a historical snapshot no longer decodes
+ * cleanly against the current model. */
+export class VersionContentUnavailableError extends IcloudNotesSyncError {
+  constructor(reason: string) {
+    super(`Can't complete this operation: ${reason}.`, {
+      hint: 'Run "icloud-notes pull" to refresh local state, then try again.',
+    });
+  }
+}
