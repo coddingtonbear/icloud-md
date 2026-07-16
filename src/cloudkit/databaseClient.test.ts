@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   firstZone,
   mergeLookedUpRecords,
+  parseNoteDeleteResponse,
   parseNoteUpdateResponse,
   parseRecordUpdateResponse,
   parseSharedZoneList,
@@ -147,6 +148,38 @@ test("parseNoteUpdateResponse surfaces per-record server errors as typed refusal
 
 test("parseNoteUpdateResponse rejects bodies without a records array", () => {
   assert.throws(() => parseNoteUpdateResponse({}), /missing records array/);
+});
+
+test("parseNoteDeleteResponse succeeds on a real forceDelete response - no recordType/fields, unlike an update", () => {
+  // Captured live 2026-07-16 - a successful forceDelete echoes back only
+  // recordName + deleted:true, not the full record shape an `update`
+  // response has (see the dev note this bug produced).
+  const body = { records: [{ recordName: "1341629E-A0AA-46BC-A9B7-E7FF64DF5CAA", deleted: true }] };
+  const result = parseNoteDeleteResponse(body);
+  assert.equal(result.ok, true);
+});
+
+test("parseNoteDeleteResponse surfaces per-record server errors as typed refusals", () => {
+  const body = {
+    records: [
+      {
+        recordName: "F90C80BA-2D47-4CB1-B000-000000000000",
+        reason: "record to update already exists with a different change tag",
+        serverErrorCode: "CONFLICT",
+      },
+    ],
+  };
+
+  const result = parseNoteDeleteResponse(body);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.serverErrorCode, "CONFLICT");
+    assert.match(result.reason ?? "", /change tag/);
+  }
+});
+
+test("parseNoteDeleteResponse rejects bodies without a records array", () => {
+  assert.throws(() => parseNoteDeleteResponse({}), /missing records array/);
 });
 
 test("parseRecordUpdateResponse returns one result per record, in order, mixing success and failure", () => {

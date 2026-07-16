@@ -5,6 +5,7 @@ import ora from "ora";
 import { reauthenticateFolder, resolveFolderAccount } from "./auth/folderAuth.js";
 import { parseSinceDuration, runBugReport } from "./commands/bugReport.js";
 import { runClone, type CloneSummary } from "./commands/clone.js";
+import { runDelete } from "./commands/delete.js";
 import { runDiff } from "./commands/diff.js";
 import { runHistory } from "./commands/history.js";
 import { runPull, type PullSummary } from "./commands/pull.js";
@@ -152,6 +153,16 @@ async function restore(args: string[]): Promise<void> {
   await runRestore(dirArg ?? ".", fileArg);
 }
 
+async function deleteNote(args: string[]): Promise<void> {
+  const [fileArg, dirArg] = args;
+  if (!fileArg) {
+    console.error("Usage: icloud-notes delete <file> [directory]");
+    process.exitCode = 1;
+    return;
+  }
+  await runDelete(dirArg ?? ".", fileArg, { onLoginStatus: (message) => console.log(message) });
+}
+
 async function history(args: string[]): Promise<void> {
   const [fileArg, dirArg] = args;
   if (!fileArg) {
@@ -272,6 +283,9 @@ async function main(): Promise<void> {
       case "restore":
         await restore(rest);
         return;
+      case "delete":
+        await deleteNote(rest);
+        return;
       case "history":
         await history(rest);
         return;
@@ -294,6 +308,8 @@ async function main(): Promise<void> {
             "  push [directory]      Upload locally edited notes (--dry-run to preview); a note changed remotely is " +
             "merged (conflict markers if needed) instead of overwritten\n" +
             "  restore <file> [directory]  Discard a tracked note's local edits, reverting it to the last synced copy\n" +
+            "  delete <file> [directory]  Delete a tracked note from iCloud (a real remote write, no confirmation prompt) " +
+            "and stop tracking it locally; a locally-edited copy is kept on disk (untracked) rather than discarded\n" +
             "  history <file> [directory]  List recorded version snapshots for a note (and its tables), newest first\n" +
             "  diff <file> <ref> [directory]  Diff two snapshots, or one snapshot against the current remote copy - " +
             "<ref> is a snapshot id or <from>..<to>\n" +

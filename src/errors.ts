@@ -177,6 +177,19 @@ export class UnknownVersionSnapshotError extends IcloudNotesSyncError {
   }
 }
 
+/** `delete` fetched a fresh recordChangeTag immediately before writing, so a
+ * rejection here means something changed the note in that narrow window
+ * (or a genuine CloudKit-side problem) rather than the stale-tag conflict
+ * `push` routinely expects. */
+export class NoteDeleteRejectedError extends IcloudNotesSyncError {
+  constructor(fileName: string, serverErrorCode: string, reason: string | undefined) {
+    const detail = reason ? ` (${reason})` : "";
+    super(`Can't delete "${fileName}": the server rejected it: ${serverErrorCode}${detail}.`, {
+      hint: 'Run "icloud-notes pull" to refresh local state, then try again.',
+    });
+  }
+}
+
 /** `diff`/`revert` couldn't read the content needed on one side of the
  * comparison (or write-back) - the target record vanished remotely, is no
  * longer in a readable state, or a historical snapshot no longer decodes

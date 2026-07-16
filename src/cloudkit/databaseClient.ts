@@ -429,6 +429,73 @@ export function parseNoteUpdateResponse(body: unknown): NoteUpdateResult {
   return { ok: true, record: parseRecord(entry) };
 }
 
+export type NoteDeleteResult =
+  | { ok: true }
+  | { ok: false; serverErrorCode: string; reason: string | undefined };
+
+/**
+ * Deletes one note via `records/modify`, using the same `forceDelete`
+ * operation type the real web/mobile clients use (confirmed against a
+ * working reference implementation - see the "Delete a note from iCloud"
+ * investigation in the project notes). Per Apple's own client behavior this
+ * is a server-managed soft delete (the note lands in "Recently Deleted"),
+ * not a hard wipe.
+ */
+export async function deleteNoteRecord(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  zoneID: CloudKitZoneID,
+  recordName: string,
+  recordChangeTag: string,
+): Promise<NoteDeleteResult> {
+  const body = await postDatabase(
+    "deleteNoteRecord:records/modify",
+    session,
+    ckDatabaseHost,
+    dsid,
+    "private",
+    "records/modify",
+    {
+      operations: [
+        { operationType: "forceDelete", record: { recordName, recordType: "Note", recordChangeTag } },
+      ],
+      zoneID,
+    },
+  );
+  return parseNoteDeleteResponse(body);
+}
+
+/**
+ * A successful `forceDelete` response record entry looks nothing like an
+ * `update` one - confirmed live 2026-07-16: `{"recordName": "...",
+ * "deleted": true}`, with no `recordType`/`fields`/`recordChangeTag` at
+ * all. `parseNoteUpdateResponse`'s `parseRecord` call requires those, so it
+ * throws on a genuinely successful delete - this is a dedicated parser
+ * instead of a shared one, since there's no full record to hand back to a
+ * delete caller anyway (there's nothing left to describe).
+ */
+export function parseNoteDeleteResponse(body: unknown): NoteDeleteResult {
+  if (!isRecord(body) || !Array.isArray(body.records) || body.records.length === 0) {
+    throw new Error("Unexpected response shape from records/modify (missing records array)");
+  }
+  const entry: unknown = body.records[0];
+  if (!isRecord(entry)) {
+    throw new Error("Unexpected response shape from records/modify (record entry is not an object)");
+  }
+  if (typeof entry.serverErrorCode === "string") {
+    return {
+      ok: false,
+      serverErrorCode: entry.serverErrorCode,
+      reason: typeof entry.reason === "string" ? entry.reason : undefined,
+    };
+  }
+  if (typeof entry.recordName !== "string") {
+    throw new Error("Unexpected response shape from records/modify (record entry has no recordName)");
+  }
+  return { ok: true };
+}
+
 export interface RecordUpdate {
   recordName: string;
   /** Unlike the single-record `updateNoteRecord`, not hardcoded to "Note" -
