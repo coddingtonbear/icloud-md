@@ -47,6 +47,18 @@ export type TableAttachmentUpdateResult =
  * exactly the intended grid before it's trusted to push. `changed: false`
  * means the diff resolved to a no-op (surrounding prose changed but this
  * particular table didn't) - the caller should skip sending this record.
+ *
+ * Structural edits (row/column insert/delete) are refused below, not just
+ * `unsupported` ones - a live incident (2026-07-15) showed the minimal-diff
+ * `applyTableEdit`/`compactPool` machinery those plan kinds drive can
+ * corrupt a real table in a way this project's own round-trip/decode
+ * verification doesn't catch, because it's a real Apple client, not our own
+ * decoder, that chokes on it. Cell-only edits reuse the same tombstone/
+ * splice pattern the plain-text note path has trusted since 2026-07-13, so
+ * they stay enabled. See the Obsidian dev log's "Table write engine
+ * rewrite: wholesale rebuild instead of minimal-diff/patch" entry for the
+ * planned fix - re-enable structural edits only once that lands and passes
+ * its own staged live verification, not just once it's implemented.
  */
 export function prepareTableAttachmentUpdate(record: CloudKitRecord, desiredGrid: string[][]): TableAttachmentUpdateResult {
   const field = record.fields.MergeableDataEncrypted;
@@ -67,6 +79,14 @@ export function prepareTableAttachmentUpdate(record: CloudKitRecord, desiredGrid
     }
     if (plan.kind === "noop") {
       return { ok: true, changed: false, mergeableDataBase64: field.value };
+    }
+    if (plan.kind !== "cellEdits") {
+      return {
+        ok: false,
+        reason:
+          "inserting or deleting table rows/columns is temporarily disabled after a live incident corrupted a table - " +
+          "only cell text edits are supported right now",
+      };
     }
 
     applyTableEdit(doc, plan);

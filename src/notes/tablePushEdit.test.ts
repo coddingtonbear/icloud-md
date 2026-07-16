@@ -79,12 +79,56 @@ test("prepareTableAttachmentUpdate: a cell edit produces a new document that dec
   }
 });
 
-test("prepareTableAttachmentUpdate: a row insertion produces a document with the new row", () => {
+test("prepareTableAttachmentUpdate: refuses a row insertion - structural edits are disabled after the 2026-07-15 incident", () => {
   const record = noteRecordName();
   const desiredGrid = [
     ["A0", "B0"],
     ["", ""],
     ["NEW", "ROW"],
+  ];
+  const result = prepareTableAttachmentUpdate(record, desiredGrid);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.match(result.reason, /temporarily disabled/);
+  }
+});
+
+test("prepareTableAttachmentUpdate: refuses a row deletion - structural edits are disabled after the 2026-07-15 incident", () => {
+  const record = noteRecordName();
+  const result = prepareTableAttachmentUpdate(record, [["A0", "B0"]]);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.match(result.reason, /temporarily disabled/);
+  }
+});
+
+test("prepareTableAttachmentUpdate: refuses a column insertion - structural edits are disabled after the 2026-07-15 incident", () => {
+  const record = noteRecordName();
+  const desiredGrid = [
+    ["A0", "B0", "NEW"],
+    ["", "", "COL"],
+  ];
+  const result = prepareTableAttachmentUpdate(record, desiredGrid);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.match(result.reason, /temporarily disabled/);
+  }
+});
+
+test("prepareTableAttachmentUpdate: refuses a column deletion - structural edits are disabled after the 2026-07-15 incident", () => {
+  const record = noteRecordName();
+  const result = prepareTableAttachmentUpdate(record, [["A0"], [""]]);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.match(result.reason, /temporarily disabled/);
+  }
+});
+
+test("prepareTableAttachmentUpdate: cell text edits still work - structural-edit gate doesn't affect them", () => {
+  const record = noteRecordName();
+  const desiredGrid = [
+    ["A0-edited", "B0"],
+    ["", ""],
   ];
   const result = prepareTableAttachmentUpdate(record, desiredGrid);
   assert.equal(result.ok, true);
