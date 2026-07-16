@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { firstZone, mergeLookedUpRecords, parseNoteUpdateResponse, parseSharedZoneList, type CloudKitRecord } from "./databaseClient.js";
+import {
+  firstZone,
+  mergeLookedUpRecords,
+  parseNoteUpdateResponse,
+  parseRecordUpdateResponse,
+  parseSharedZoneList,
+  type CloudKitRecord,
+} from "./databaseClient.js";
 
 test("parseSharedZoneList extracts zoneName and ownerRecordName per zone", () => {
   // Shape observed from a real `shared/changes/database` response.
@@ -140,4 +147,41 @@ test("parseNoteUpdateResponse surfaces per-record server errors as typed refusal
 
 test("parseNoteUpdateResponse rejects bodies without a records array", () => {
   assert.throws(() => parseNoteUpdateResponse({}), /missing records array/);
+});
+
+test("parseRecordUpdateResponse returns one result per record, in order, mixing success and failure", () => {
+  const body = {
+    records: [
+      {
+        recordName: "note-1",
+        recordType: "Note",
+        recordChangeTag: "25d",
+        fields: { TextDataEncrypted: { value: "eJw=", type: "ENCRYPTED_BYTES" } },
+      },
+      {
+        recordName: "attachment-1",
+        reason: "record to update already exists with a different change tag",
+        serverErrorCode: "CONFLICT",
+      },
+    ],
+  };
+
+  const results = parseRecordUpdateResponse(body);
+  assert.equal(results.length, 2);
+  assert.equal(results[0]?.ok, true);
+  if (results[0]?.ok) {
+    assert.equal(results[0].record.recordName, "note-1");
+  }
+  assert.equal(results[1]?.ok, false);
+  if (results[1] && !results[1].ok) {
+    assert.equal(results[1].serverErrorCode, "CONFLICT");
+  }
+});
+
+test("parseRecordUpdateResponse returns an empty array for an empty records array, unlike the single-record parser", () => {
+  assert.deepEqual(parseRecordUpdateResponse({ records: [] }), []);
+});
+
+test("parseRecordUpdateResponse rejects bodies without a records array", () => {
+  assert.throws(() => parseRecordUpdateResponse({}), /missing records array/);
 });

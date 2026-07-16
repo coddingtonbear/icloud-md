@@ -2,17 +2,20 @@ import { randomBytes } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { resolveFolderAccount } from "../auth/folderAuth.js";
-import { lookupRecords, updateNoteRecord, type CloudKitRecord } from "../cloudkit/databaseClient.js";
+import type { IcloudSession } from "../session.js";
+import { lookupRecords, updateRecords, type CloudKitRecord, type RecordUpdate } from "../cloudkit/databaseClient.js";
 import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState, writeCloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
-import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
+import { classifyNoteRecord, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
-import { hasAttachmentReference } from "../notes/noteAttachments.js";
+import { findMarkdownTableBlocks } from "../notes/decodeTableRecord.js";
+import { hasAttachmentReference, isTableUti } from "../notes/noteAttachments.js";
 import { hasUnknownContentMarker } from "../notes/unknownContent.js";
 import { localFileState } from "../notes/localFileState.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { compressNoteDocument, decodeNoteBodyText, decompressNoteDocument } from "../notes/noteText.js";
+import { prepareTableAttachmentUpdate, reconstructBodyTextWithPlaceholders } from "../notes/tablePushEdit.js";
 import {
   applyTextEdit,
   encodeNoteDocument,
@@ -41,6 +44,17 @@ interface PushSummary {
   refused: string[];
 }
 
+type OkNoteRecordResult = Extract<NoteDecodeResult, { status: "ok" }>;
+
+/** What one candidate resolves to before any network write: the record
+ * update(s) to submit atomically, plus which of them is the Note record's
+ * own text (if any) - needed after a successful push to update local
+ * state/file-time metadata the same way the plain-text-only path always did. */
+interface PreparedCandidate {
+  updates: RecordUpdate[];
+  noteTextUpdated: boolean;
+}
+
 /**
  * Uploads locally edited notes back to iCloud, guarded three ways (per the
  * README's Phase 3 plan):
@@ -48,12 +62,17 @@ interface PushSummary {
  *  1. Staleness: a note whose remote recordChangeTag moved past the last
  *     clone/pull baseline is reported as a conflict, never overwritten -
  *     run `pull` (which merges) first. The server enforces the same check
- *     again at write time via the tag we send.
+ *     again at write time via the tag we send. A table attachment record
+ *     has no stored baseline changeTag to pre-check (tables aren't tracked
+ *     in state.attachments - see `attachmentSync.ts`), so it's fetched
+ *     fresh and submitted with that same fresh tag, letting the server's
+ *     own optimistic-concurrency check catch a real conflict at write time.
  *  2. Round-trip: the current remote document must re-encode byte-for-byte
  *     from our parsed model before we trust ourselves to edit it; anything
- *     we don't fully understand stays read-only.
+ *     we don't fully understand stays read-only. Applies separately to the
+ *     Note record's text and to each table attachment's own document.
  *  3. Verification: the rebuilt document is decoded again and must yield
- *     exactly the local file's text before it's uploaded.
+ *     exactly the intended content before it's uploaded.
  */
 export async function runPush(targetDir: string, options: PushOptions = {}): Promise<void> {
   const dryRun = options.dryRun === true;
@@ -96,7 +115,10 @@ export async function runPush(targetDir: string, options: PushOptions = {}): Pro
     // upload behind it, so pushing it as literal text would silently
     // "succeed" while doing something other than what it looks like. A note
     // that *does* already have a tracked attachment is caught more
-    // specifically below, once we have the remote record to point at.
+    // specifically below, once we have the remote record to point at. Table
+    // attachments aren't tracked in state.attachments at all (see
+    // `attachmentSync.ts`), so this check never fires for them - a table's
+    // own markdown never matches the "attachments/..." link/embed pattern.
     const notePreviouslyHadAttachments = Object.values(state.attachments ?? {}).some(
       (attachment) => attachment.noteRecordName === recordName,
     );
@@ -153,14 +175,36 @@ export async function runPush(targetDir: string, options: PushOptions = {}): Pro
       continue;
     }
 
-    const prepared = prepareUpdate(record, entry, localText, replicaIdBytes, summary);
+    const fileStat = await stat(path.join(targetDir, entry.file));
+    const modificationDateMs = Math.round(fileStat.mtimeMs);
+
+    const prepared = await prepareUpdate(
+      auth.session,
+      auth.ckdatabasewsUrl,
+      auth.dsid,
+      record,
+      entry,
+      localText,
+      replicaIdBytes,
+      modificationDateMs,
+      summary,
+    );
     if (!prepared) {
       continue;
     }
-
-    const fileStat = await stat(path.join(targetDir, entry.file));
-    const modificationDateMs = Math.round(fileStat.mtimeMs);
-    const fields = buildNoteUpdateFields(record, prepared, localText, modificationDateMs);
+    if (prepared.updates.length === 0) {
+      // The table write path resolved every table's diff to a no-op and the
+      // surrounding prose didn't change either - `localFileState` saw a
+      // byte-level difference (e.g. cosmetic markdown formatting) but
+      // there's nothing to actually send. Bring the base copy back in sync
+      // so this doesn't keep re-triggering "modified" on every future push,
+      // without claiming a server write happened.
+      if (!dryRun) {
+        await writeBaseCopy(targetDir, recordName, localText);
+      }
+      console.log(`${entry.file}: no server-side change needed`);
+      continue;
+    }
 
     if (dryRun) {
       console.log(`Would push ${entry.file} (${localText.length} chars)`);
@@ -168,30 +212,38 @@ export async function runPush(targetDir: string, options: PushOptions = {}): Pro
       continue;
     }
 
-    const result = await updateNoteRecord(auth.session, auth.ckdatabasewsUrl, auth.dsid, PRIVATE_NOTES_ZONE, {
-      recordName,
-      recordChangeTag: entry.recordChangeTag,
-      fields,
-      parentRecordName: record.parentRecordName,
-    });
-
-    if (!result.ok) {
-      const detail = result.reason ? ` (${result.reason})` : "";
-      if (result.serverErrorCode === "CONFLICT") {
+    const results = await updateRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, PRIVATE_NOTES_ZONE, prepared.updates);
+    const failure = results.find((result) => !result.ok);
+    if (failure && !failure.ok) {
+      const detail = failure.reason ? ` (${failure.reason})` : "";
+      if (failure.serverErrorCode === "CONFLICT") {
         summary.conflicts.push(`${entry.file}: rejected by the server as a conflicting change${detail} - run "pull" first`);
       } else {
-        summary.refused.push(`${entry.file}: server rejected the update: ${result.serverErrorCode}${detail}`);
+        summary.refused.push(`${entry.file}: server rejected the update: ${failure.serverErrorCode}${detail}`);
       }
       continue;
     }
 
-    state.notes[recordName] = {
-      ...entry,
-      recordChangeTag: result.record.recordChangeTag ?? "",
-      modificationDate: modificationDateOf(result.record) || modificationDateMs,
-    };
+    if (prepared.noteTextUpdated) {
+      // `updates[0]` (and so `results[0]`, assuming the server preserves
+      // request order in its response - unverified against a real
+      // multi-operation records/modify call, see dev notes) is always the
+      // Note record's own update when noteTextUpdated is true; the
+      // recordName check is a defensive fallback in case that assumption
+      // ever doesn't hold - the server-side write already happened either
+      // way, this only guards *local* state bookkeeping from picking up
+      // the wrong record's result.
+      const noteResult = results[0];
+      if (noteResult?.ok && noteResult.record.recordName === recordName) {
+        state.notes[recordName] = {
+          ...entry,
+          recordChangeTag: noteResult.record.recordChangeTag ?? "",
+          modificationDate: modificationDateOf(noteResult.record) || modificationDateMs,
+        };
+        await applyNoteFileTimes(path.join(targetDir, entry.file), noteResult.record);
+      }
+    }
     await writeBaseCopy(targetDir, recordName, localText);
-    await applyNoteFileTimes(path.join(targetDir, entry.file), result.record);
     summary.pushed += 1;
     console.log(`Pushed ${entry.file}`);
   }
@@ -205,17 +257,23 @@ export async function runPush(targetDir: string, options: PushOptions = {}): Pro
 }
 
 /**
- * Builds and verifies the new TextDataEncrypted payload for one note,
- * returning it base64-encoded, or undefined (with the reason recorded in
- * `summary`) if any safety gate refuses.
+ * Builds and verifies every record update one candidate needs (the Note
+ * record's own text, any table attachments, or both), or undefined (with
+ * the reason recorded in `summary`) if any safety gate refuses. When a Note
+ * text update is included, it's always `updates[0]` - `runPush` relies on
+ * that to know which result in the batch is the Note record's.
  */
-function prepareUpdate(
+async function prepareUpdate(
+  session: IcloudSession,
+  ckdatabasewsUrl: string,
+  dsid: string,
   record: CloudKitRecord,
   entry: CloneStateNoteEntry,
   localText: string,
   replicaId: Uint8Array,
+  modificationDateMs: number,
   summary: PushSummary,
-): string | undefined {
+): Promise<PreparedCandidate | undefined> {
   const classified = classifyNoteRecord(record);
   if (classified.status !== "ok") {
     const reason = classified.status === "unsyncable" ? classified.reason : classified.status;
@@ -229,14 +287,157 @@ function prepareUpdate(
     );
     return undefined;
   }
+
   if (classified.attachments.length > 0) {
+    if (!classified.attachments.every((ref) => isTableUti(ref.typeUti))) {
+      summary.refused.push(
+        `${entry.file}: this note has an attachment - it can't be safely edited through this tool and will stay ` +
+          `read-only. Run "icloud-notes restore ${entry.file}" to discard your local edit and match the synced copy.`,
+      );
+      return undefined;
+    }
+    return prepareTableCandidate(
+      session,
+      ckdatabasewsUrl,
+      dsid,
+      record,
+      classified,
+      entry,
+      localText,
+      replicaId,
+      modificationDateMs,
+      summary,
+    );
+  }
+
+  const textUpdate = prepareNoteTextUpdate(record, classified.bodyText, localText, replicaId, entry, summary);
+  if (!textUpdate) {
+    return undefined;
+  }
+  const fields = buildNoteUpdateFields(record, textUpdate, localText, modificationDateMs);
+  return {
+    updates: [noteRecordUpdate(record, entry, fields)],
+    noteTextUpdated: true,
+  };
+}
+
+/**
+ * The table write path (plan step 4): loosens the blanket attachment
+ * refusal above for the "every attachment is a table" case. Locates each
+ * table's rendered markdown block in the local text (by document order,
+ * matching how `resolveNoteAttachments` substituted them on read - see
+ * `findMarkdownTableBlocks`), diffs and applies each one that actually
+ * changed, and - only if the surrounding prose changed too - also updates
+ * the Note record's own text, all as one atomic `records/modify` batch.
+ */
+async function prepareTableCandidate(
+  session: IcloudSession,
+  ckdatabasewsUrl: string,
+  dsid: string,
+  record: CloudKitRecord,
+  classified: OkNoteRecordResult,
+  entry: CloneStateNoteEntry,
+  localText: string,
+  replicaId: Uint8Array,
+  modificationDateMs: number,
+  summary: PushSummary,
+): Promise<PreparedCandidate | undefined> {
+  const blocks = findMarkdownTableBlocks(localText);
+  if (blocks.length !== classified.attachments.length) {
     summary.refused.push(
-      `${entry.file}: this note has an attachment - it can't be safely edited through this tool and will stay ` +
-        `read-only. Run "icloud-notes restore ${entry.file}" to discard your local edit and match the synced copy.`,
+      `${entry.file}: can't tell which table(s) changed (found ${blocks.length} table-shaped block(s) locally, ` +
+        `expected ${classified.attachments.length}) - run "icloud-notes restore ${entry.file}" to discard the edit.`,
     );
     return undefined;
   }
 
+  const attachmentRecords = await lookupRecords(
+    session,
+    ckdatabasewsUrl,
+    dsid,
+    "private",
+    PRIVATE_NOTES_ZONE,
+    classified.attachments.map((ref) => ref.attachmentIdentifier),
+  );
+  const attachmentByName = new Map(attachmentRecords.map((r) => [r.recordName, r]));
+
+  const updates: RecordUpdate[] = [];
+  for (let i = 0; i < classified.attachments.length; i += 1) {
+    const ref = classified.attachments[i];
+    const block = blocks[i];
+    if (!ref || !block) {
+      continue;
+    }
+    const attachmentRecord = attachmentByName.get(ref.attachmentIdentifier);
+    if (!attachmentRecord || attachmentRecord.deleted === true) {
+      summary.conflicts.push(`${entry.file}: a table in this note no longer exists remotely - run "pull" to reconcile`);
+      return undefined;
+    }
+    const result = prepareTableAttachmentUpdate(attachmentRecord, block.grid);
+    if (!result.ok) {
+      summary.refused.push(
+        `${entry.file}: ${result.reason}. Run "icloud-notes restore ${entry.file}" to discard your local edit.`,
+      );
+      return undefined;
+    }
+    if (result.changed) {
+      updates.push({
+        recordName: attachmentRecord.recordName,
+        recordType: "Attachment",
+        recordChangeTag: attachmentRecord.recordChangeTag ?? "",
+        fields: { MergeableDataEncrypted: { value: result.mergeableDataBase64 } },
+        parentRecordName: attachmentRecord.parentRecordName,
+      });
+    }
+  }
+
+  const reconstructedBodyText = reconstructBodyTextWithPlaceholders(localText, blocks);
+  let noteTextUpdated = false;
+  if (reconstructedBodyText !== classified.bodyText) {
+    const textUpdate = prepareNoteTextUpdate(record, classified.bodyText, reconstructedBodyText, replicaId, entry, summary);
+    if (!textUpdate) {
+      return undefined;
+    }
+    const fields = buildNoteUpdateFields(record, textUpdate, reconstructedBodyText, modificationDateMs);
+    updates.unshift(noteRecordUpdate(record, entry, fields));
+    noteTextUpdated = true;
+  }
+
+  if (updates.length === 0) {
+    // Every table's diff resolved to a no-op and the surrounding prose
+    // didn't change either - `localFileState` said "modified", but nothing
+    // about the note's actual content differs from the last sync.
+    return { updates: [], noteTextUpdated: false };
+  }
+  return { updates, noteTextUpdated };
+}
+
+function noteRecordUpdate(record: CloudKitRecord, entry: CloneStateNoteEntry, fields: Record<string, { value: unknown }>): RecordUpdate {
+  return {
+    recordName: record.recordName,
+    recordType: "Note",
+    recordChangeTag: entry.recordChangeTag,
+    fields,
+    parentRecordName: record.parentRecordName,
+  };
+}
+
+/**
+ * Builds and verifies the new TextDataEncrypted payload for a note's own
+ * text, returning it base64-encoded, or undefined (with the reason recorded
+ * in `summary`) if any safety gate refuses. `currentBodyText` is what the
+ * remote document is expected to currently decode to (the plain-text path
+ * passes the remote's own text; the table path passes the same, since only
+ * the *desired* text differs when prose around a table changed too).
+ */
+function prepareNoteTextUpdate(
+  record: CloudKitRecord,
+  currentBodyText: string,
+  desiredBodyText: string,
+  replicaId: Uint8Array,
+  entry: CloneStateNoteEntry,
+  summary: PushSummary,
+): string | undefined {
   const textField = record.fields.TextDataEncrypted;
   if (!textField || typeof textField.value !== "string") {
     summary.refused.push(`${entry.file}: remote note has no readable text data`);
@@ -259,13 +460,13 @@ function prepareUpdate(
 
   try {
     const doc = parseNoteDocument(raw);
-    if (doc.text !== classified.bodyText) {
+    if (doc.text !== currentBodyText) {
       summary.refused.push(`${entry.file}: decoder disagreement on the note's current text - refusing to edit`);
       return undefined;
     }
-    applyTextEdit(doc, localText, { replicaId });
+    applyTextEdit(doc, desiredBodyText, { replicaId });
     const compressed = compressNoteDocument(encodeNoteDocument(doc));
-    if (decodeNoteBodyText(compressed) !== localText) {
+    if (decodeNoteBodyText(compressed) !== desiredBodyText) {
       summary.refused.push(`${entry.file}: rebuilt document failed decode verification - refusing to push`);
       return undefined;
     }

@@ -245,7 +245,9 @@ function renumberSequences(doc: NoteDocument): void {
 
 // --- parsing ---------------------------------------------------------------
 
-function parseTextRun(run: GenTextRun): TextRun {
+/** Exported for `tableCellEdit.ts`: a cell's `.note` field (field 10) reuses
+ * this exact `TextRun` message shape for its own CRDT run history. */
+export function parseTextRun(run: GenTextRun): TextRun {
   const coord = run.coord;
   const anchor = run.anchor;
   if (!coord || !anchor) {
@@ -276,7 +278,8 @@ function parseReplicaEntry(entry: GenReplicaEntry): ReplicaEntry {
 
 // --- encoding --------------------------------------------------------------
 
-function encodeTextRun(run: TextRun): GenTextRun {
+/** Exported for `tableCellEdit.ts`; see `parseTextRun`. */
+export function encodeTextRun(run: TextRun): GenTextRun {
   return create(TextRunSchema, {
     coord: create(CoordSchema, run.coord),
     length: run.length,
@@ -581,13 +584,14 @@ export function validateDocumentInvariants(doc: NoteDocument): void {
   }
 }
 
-function isSentinel(run: TextRun): boolean {
+/** Exported for `tableCellEdit.ts`; see `parseTextRun`. */
+export function isSentinel(run: TextRun): boolean {
   return run.coord.clock === SENTINEL_CLOCK;
 }
 
 // --- small shared helpers ---------------------------------------------------
 
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+export function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) {
     return false;
   }

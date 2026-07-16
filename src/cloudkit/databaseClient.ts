@@ -404,26 +404,11 @@ export async function updateNoteRecord(
   zoneID: CloudKitZoneID,
   update: NoteUpdate,
 ): Promise<NoteUpdateResult> {
-  const record: Record<string, unknown> = {
-    recordName: update.recordName,
-    recordType: "Note",
-    recordChangeTag: update.recordChangeTag,
-    fields: update.fields,
-  };
-  if (update.parentRecordName !== undefined) {
-    record.parent = { recordName: update.parentRecordName };
+  const [result] = await updateRecords(session, ckDatabaseHost, dsid, zoneID, [{ ...update, recordType: "Note" }]);
+  if (!result) {
+    throw new Error("Unexpected response shape from records/modify (missing records array)");
   }
-
-  const body = await postDatabase(
-    "updateNoteRecord:records/modify",
-    session,
-    ckDatabaseHost,
-    dsid,
-    "private",
-    "records/modify",
-    { operations: [{ operationType: "update", record }], zoneID },
-  );
-  return parseNoteUpdateResponse(body);
+  return result;
 }
 
 export function parseNoteUpdateResponse(body: unknown): NoteUpdateResult {
@@ -442,6 +427,84 @@ export function parseNoteUpdateResponse(body: unknown): NoteUpdateResult {
     };
   }
   return { ok: true, record: parseRecord(entry) };
+}
+
+export interface RecordUpdate {
+  recordName: string;
+  /** Unlike the single-record `updateNoteRecord`, not hardcoded to "Note" -
+   * a table write needs to update a Note record and an Attachment record
+   * (the table's own `MergeableDataEncrypted`) atomically in one call. */
+  recordType: string;
+  /** Optimistic-concurrency token; see `NoteUpdate`. */
+  recordChangeTag: string;
+  fields: Record<string, { value: unknown }>;
+  parentRecordName?: string | undefined;
+}
+
+export type RecordUpdateResult = NoteUpdateResult;
+
+/**
+ * Updates any number of records in one zone via a single `records/modify`
+ * call with one `update` operation per record - the real CloudKit endpoint
+ * already accepts multiple operations atomically per zone; `updateNoteRecord`
+ * used to hardcode a single-element operations array as a self-imposed
+ * limitation, not a server one. Results come back in the same order as
+ * `updates`, each independently `ok`/refused (a changeTag conflict on one
+ * record doesn't fail the others) - though a caller relying on the *write*
+ * being atomic (e.g. a note's text and its table changing together) should
+ * still treat any non-`ok` result as "nothing in this batch should be
+ * trusted as applied", since CloudKit only guarantees atomicity of the
+ * write itself, not of how per-record failures are reported back.
+ */
+export async function updateRecords(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  zoneID: CloudKitZoneID,
+  updates: RecordUpdate[],
+): Promise<RecordUpdateResult[]> {
+  const operations = updates.map((update) => {
+    const record: Record<string, unknown> = {
+      recordName: update.recordName,
+      recordType: update.recordType,
+      recordChangeTag: update.recordChangeTag,
+      fields: update.fields,
+    };
+    if (update.parentRecordName !== undefined) {
+      record.parent = { recordName: update.parentRecordName };
+    }
+    return { operationType: "update", record };
+  });
+
+  const body = await postDatabase(
+    "updateRecords:records/modify",
+    session,
+    ckDatabaseHost,
+    dsid,
+    "private",
+    "records/modify",
+    { operations, zoneID },
+  );
+  return parseRecordUpdateResponse(body);
+}
+
+export function parseRecordUpdateResponse(body: unknown): RecordUpdateResult[] {
+  if (!isRecord(body) || !Array.isArray(body.records)) {
+    throw new Error("Unexpected response shape from records/modify (missing records array)");
+  }
+  return body.records.map((entry: unknown) => {
+    if (!isRecord(entry)) {
+      throw new Error("Unexpected response shape from records/modify (record entry is not an object)");
+    }
+    if (typeof entry.serverErrorCode === "string") {
+      return {
+        ok: false,
+        serverErrorCode: entry.serverErrorCode,
+        reason: typeof entry.reason === "string" ? entry.reason : undefined,
+      };
+    }
+    return { ok: true, record: parseRecord(entry) };
+  });
 }
 
 interface ParsedZone {

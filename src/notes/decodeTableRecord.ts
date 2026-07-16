@@ -1,14 +1,16 @@
 /**
- * Decodes a table's `MergeableDataEncrypted` payload (an `Attachment` record
- * whose `UTI` is `com.apple.notes.table`) into a GitHub-flavored-Markdown
- * pipe table, for the read path only (`clone`/`pull`).
+ * Reads and writes a table's `MergeableDataEncrypted` payload (an
+ * `Attachment` record whose `UTI` is `com.apple.notes.table`) - a
+ * GitHub-flavored-Markdown pipe table on one side, the object-pool CRDT
+ * structure Apple's client uses on the other.
  *
  * The structure was reverse-engineered from real captures and cross-checked
  * against threeplanetssoftware/apple_cloud_notes_parser's
  * `AppleNotesEmbeddedTable.rb` (MIT licensed) - see the project dev notes,
  * "Consolidated reference: the complete `com.apple.notes.table`
- * MergeableData structure" (2026-07-14T14:46), and `proto/notestore.proto`
- * for the generated-schema field names used below.
+ * MergeableData structure" (2026-07-14T14:46) and "Table write path planned
+ * end-to-end" (2026-07-15T14:51), and `proto/notestore.proto` for the
+ * generated-schema field names used below.
  *
  * Shape, once decompressed the same way `decompressNoteDocument` does:
  *
@@ -25,129 +27,293 @@
  * key-name table.
  *
  * `crRows`/`crColumns` are `OrderedSet` objects (field 16): `.ordering.array`
- * is the true visual-order list - `.contents` (of `OrderedSetOrderingArray`)
- * is CRDT run-tracking metadata for the list's own edit history (not needed
- * for a read-only decode) and `.attachment[]` is the ordered `{index
- * (redundant, ignored), uuid}` entries, list position = visual position.
+ * is the true visual-order list - `.ordering.array.attachment[]` is the
+ * ordered `{index (redundant, ignored on read), uuid}` entries, list
+ * position = visual position; `.ordering.array.contents` is a hidden
+ * per-character CRDT mirror of that same list (one U+FFFC per entry) that
+ * Apple's own client apparently uses for concurrent-insert merge resolution -
+ * this project's editing operations deliberately don't maintain it (see
+ * `insertRowAt`/`insertColumnAt`/`deleteRowAt`/`deleteColumnAt` in
+ * `tableEdit.ts`): our own decode never reads it, so it has no effect on our
+ * round-trip guarantee, only a theoretical effect on how gracefully a real
+ * Apple client would later merge concurrent edits against a row/column this
+ * tool added or removed - flagged as a known limitation for the live-push
+ * verification the write path still needs (dev notes, 2026-07-15T14:51).
  * `.ordering.contents` (of `OrderedSetOrdering`) is a translation/redirect
  * `Dictionary` resolving stale/duplicate identities from concurrent edits
- * onto their canonical counterpart - not an order signal itself.
+ * onto their canonical counterpart - not an order signal itself, and never
+ * populated for rows/columns this tool creates (see `tableEdit.ts`).
+ * `.elements` (of `OrderedSet` itself) is a `Dictionary` of trivial
+ * `{key: ref, value: ref}` self-pairs, one per live `array.attachment`
+ * entry (confirmed via real captures) - bookkeeping this project's decode
+ * never reads either, but cheap enough to keep in sync on every structural
+ * edit, so `tableEdit.ts` does.
  *
- * A row/column identity object is a `customMap` with exactly one entry, key
- * `UUIDIndex`, value a plain inline number (`ObjectID.unsignedIntegerValue`)
- * - the index into the document-level UUID table. This value, not the
- * object's own pool position, is the join key used everywhere below.
+ * A row/column identity object is a `customMap` (`type` 2, confirmed via
+ * real captures) with exactly one entry, key `UUIDIndex`, value a plain
+ * inline number (`ObjectID.unsignedIntegerValue`) - the index into the
+ * document-level UUID table. This value, not the object's own pool position,
+ * is the join key used everywhere below. Real captures pair each row/column
+ * with a second, otherwise-identical identity object plus a redirect entry
+ * in `.ordering.contents` (never both referenced by the same live position -
+ * apparently residue from Apple's own concurrent-edit history); this
+ * project's own inserts create a single identity object and no redirect,
+ * which decodes identically and needs no such pairing to be self-consistent
+ * (see `tableEdit.ts` and the file's write-path dev note for why: the bar is
+ * our own round-trip, not byte-identity with Apple's encoder).
  *
  * `cellColumns` is a `dictionary` (field 6), repeated `DictionaryElement
  * {key: ref to a column identity object, value: ref to that column's
  * row-map object}`. A row-map object has the identical shape: `{key: ref to
  * a row identity object, value: ref to a cell-text object}`. A cell-text
- * object is a `note` (field 10) whose `noteText` is the literal cell text.
+ * object is a `note` (field 10) whose `noteText` is the literal cell text -
+ * the ground truth this project's decode reads directly, rather than
+ * reconstructing visible text from `text_run` history the way the top-level
+ * note body's decode does (see `tableCellEdit.ts` for why edits still have
+ * to maintain that history correctly regardless).
  *
- * Deliberately not covered here (open questions, see dev notes): the
- * tombstone/deletion marker, and whether a header row is structurally
- * distinguished from a data row or purely conventional - the first row is
- * rendered as a GFM header row purely because GFM pipe tables require one
- * syntactically, not because Apple's format marks it as such.
+ * Row 0 is not structurally special: deleting the header row goes through
+ * the exact same mechanism as any other row (confirmed via a real capture,
+ * dev notes 2026-07-15T14:51) - it's rendered as a GFM header row purely
+ * because GFM pipe tables require one syntactically.
  */
 
-import { fromBinary, isFieldSet } from "@bufbuild/protobuf";
-import { decompressNoteDocument } from "./noteText.js";
+import { fromBinary, isFieldSet, toBinary } from "@bufbuild/protobuf";
+import { compressNoteDocument, decompressNoteDocument } from "./noteText.js";
 import {
   MergableDataProtoSchema,
   ObjectIDSchema,
+  type MergableDataProto,
   type MergeableDataObjectEntry,
   type ObjectID,
   type OrderedSet as OrderedSetMessage,
 } from "./gen/notestore_pb.js";
 
-const OBJECT_INDEX_FIELD = ObjectIDSchema.fields.find((f) => f.localName === "objectIndex")!;
-const UNSIGNED_INTEGER_VALUE_FIELD = ObjectIDSchema.fields.find((f) => f.localName === "unsignedIntegerValue")!;
+export const OBJECT_INDEX_FIELD = ObjectIDSchema.fields.find((f) => f.localName === "objectIndex")!;
+export const UNSIGNED_INTEGER_VALUE_FIELD = ObjectIDSchema.fields.find((f) => f.localName === "unsignedIntegerValue")!;
 const STRING_VALUE_FIELD = ObjectIDSchema.fields.find((f) => f.localName === "stringValue")!;
 
-interface TablePool {
-  /** Pool objects, addressed by index ("ref N" throughout). */
+/** A row/column identity object's `customMap.type` (confirmed via real captures). */
+export const IDENTITY_OBJECT_TYPE = 2;
+
+export interface TablePool {
+  /** Pool objects, addressed by index ("ref N" throughout). Same array
+   * reference as `TableDocument.message`'s - mutating this in place (never
+   * reassigning it) is what keeps `TableDocument.message` and `.objects`
+   * consistent through structural edits. */
   objects: MergeableDataObjectEntry[];
   keyNames: string[];
+  /** Same array-identity note as `objects` above. */
   uuidTable: Uint8Array[];
 }
 
-interface OrderedSet {
-  /** Document-UUID-table indexes, in true visual order. */
-  arrayUuidIndexes: number[];
-  /** Stale-identity redirects: value's position should mirror key's. */
-  contents: Array<{ keyRef: number; valueRef: number }>;
+/** A parsed, editable table document: the full protobuf message (mutable in
+ * place via `@bufbuild/protobuf`'s `create`), plus the three top-level pool
+ * refs every table-editing operation needs. Deliberately does *not* cache a
+ * resolved rows/columns/cells snapshot as document fields - those go stale
+ * the moment a structural edit runs, which is every edit `tableEdit.ts`
+ * makes; `resolveTable` below computes a fresh one on demand instead. */
+export interface TableDocument extends TablePool {
+  message: MergableDataProto;
+  crRowsRef: number;
+  crColumnsRef: number;
+  cellColumnsRef: number;
+}
+
+export interface TableRowColumn {
+  /** Pool index of this row/column's identity object. */
+  identityRef: number;
+  /** Index into the document UUID table - the join key used everywhere else. */
+  uuidIndex: number;
+}
+
+export interface TableCell {
+  /** Pool index of the cell-text object (a `note`, field 10). */
+  textRef: number;
+  text: string;
+}
+
+export interface ResolvedTable {
+  /** Rows/columns, in true visual order. */
+  rows: TableRowColumn[];
+  columns: TableRowColumn[];
+  /** Keyed `${rowUuidIndex},${columnUuidIndex}`. */
+  cells: Map<string, TableCell>;
 }
 
 const TABLE_OBJECT_INDEX = 0;
 const LEFT_TO_RIGHT_DIRECTION = "CRTableColumnDirectionLeftToRight";
 
 export function decodeTableMarkdown(compressedMergeableData: Buffer): string {
-  const pool = loadPool(compressedMergeableData);
-  assertLeftToRight(pool);
-  const tableObject = pool.objects[TABLE_OBJECT_INDEX];
-  if (!tableObject) {
-    throw new Error("Table object pool is empty");
-  }
-  const table = parseDictByName(pool, tableObject, "table object");
+  const doc = parseTableDocument(compressedMergeableData);
+  return renderMarkdownTable(gridFromTableDocument(doc));
+}
 
-  const crRowsRef = resolveRef(requireEntry(table, "crRows"), "crRows");
-  const crColumnsRef = resolveRef(requireEntry(table, "crColumns"), "crColumns");
-  const cellColumnsRef = resolveRef(requireEntry(table, "cellColumns"), "cellColumns");
-
-  const rows = parseOrderedSet(pool, crRowsRef);
-  const columns = parseOrderedSet(pool, crColumnsRef);
-  const rowPositions = computePositions(pool, rows);
-  const columnPositions = computePositions(pool, columns);
-
-  const numRows = rows.arrayUuidIndexes.length;
-  const numCols = columns.arrayUuidIndexes.length;
+export function gridFromTableDocument(doc: TableDocument): string[][] {
+  const resolved = resolveTable(doc);
+  const numRows = resolved.rows.length;
+  const numCols = resolved.columns.length;
   if (numCols === 0) {
     throw new Error("Table has no columns - refusing to guess at its structure");
   }
   const grid: string[][] = Array.from({ length: numRows }, () => Array(numCols).fill(""));
-
-  for (const { a: columnRef, b: rowMapRef } of parseRefPairList(pool, cellColumnsRef, "cellColumns")) {
-    const col = columnPositions.get(uuidIndexOfRef(pool, resolveRef(columnRef, "cellColumns entry column ref")));
-    if (col === undefined) {
-      throw new Error("Table column reference does not resolve to a known column position");
-    }
-    for (const { a: rowRef, b: cellTextRef } of parseRefPairList(
-      pool,
-      resolveRef(rowMapRef, "cellColumns entry row-map ref"),
-      "column row-map",
-    )) {
-      const row = rowPositions.get(uuidIndexOfRef(pool, resolveRef(rowRef, "row-map entry row ref")));
-      if (row === undefined) {
-        throw new Error("Table row reference does not resolve to a known row position");
+  resolved.rows.forEach((_row, rowPos) => {
+    resolved.columns.forEach((_col, colPos) => {
+      const cell = resolved.cells.get(cellKey(rowPos, colPos));
+      if (cell) {
+        const rowCells = grid[rowPos];
+        if (rowCells) {
+          rowCells[colPos] = cell.text;
+        }
       }
-      const rowCells = grid[row];
-      if (!rowCells) {
-        throw new Error("Table row position is out of range");
-      }
-      rowCells[col] = resolveCellText(pool, resolveRef(cellTextRef, "row-map entry cell-text ref"));
-    }
-  }
-
-  return renderMarkdownTable(grid);
+    });
+  });
+  return grid;
 }
 
-// --- object pool -------------------------------------------------------
+/** Keys `ResolvedTable.cells` by *position* (index into `ResolvedTable.rows`/
+ * `.columns`), not by UUID-table index - real captures occasionally have a
+ * row/column identity referenced by `cellColumns` that differs from the one
+ * referenced by `crRows`/`crColumns`' own `OrderedSet.array` for the exact
+ * same visual row/column (see `decodeTableRecord.ts`'s file header on
+ * identity-pair residue), reconciled only via `computePositions`' redirect
+ * following - so position, not raw identity, is the only key that's
+ * guaranteed consistent between `resolveTable`'s two passes. */
+export function cellKey(rowPosition: number, columnPosition: number): string {
+  return `${rowPosition},${columnPosition}`;
+}
 
-function loadPool(compressedMergeableData: Buffer): TablePool {
+// --- parse / encode / round-trip ------------------------------------------
+
+export function parseTableDocument(compressedMergeableData: Buffer): TableDocument {
   const raw = decompressNoteDocument(compressedMergeableData);
   const message = fromBinary(MergableDataProtoSchema, raw);
+  const pool = poolFromMessage(message);
+  assertLeftToRight(pool);
+  const refs = resolveTableRefs(pool);
+  return { ...pool, message, ...refs };
+}
 
+/** `parseTableDocument` + `toBinary`/compress - always reflects `doc.message`
+ * as currently mutated, since `doc.objects`/`.keyNames`/`.uuidTable` are the
+ * same array references embedded in it. */
+export function encodeTableDocument(doc: TableDocument): Buffer {
+  const raw = toBinary(MergableDataProtoSchema, doc.message);
+  return compressNoteDocument(raw);
+}
+
+/** The byte-for-byte round-trip gate over the *decompressed* bytes, same
+ * discipline as `noteDocumentRoundTrips` - the compressed container isn't
+ * compared, since re-deflating isn't guaranteed byte-stable and isn't what
+ * we're actually verifying (whether our model captured everything). */
+export function tableDocumentRoundTrips(compressedMergeableData: Buffer): boolean {
+  let raw: Buffer;
+  try {
+    raw = decompressNoteDocument(compressedMergeableData);
+  } catch {
+    return false;
+  }
+  try {
+    const message = fromBinary(MergableDataProtoSchema, raw);
+    const pool = poolFromMessage(message);
+    assertLeftToRight(pool);
+    resolveTableRefs(pool);
+    const reencoded = toBinary(MergableDataProtoSchema, message);
+    return bytesEqual(raw, reencoded);
+  } catch {
+    return false;
+  }
+}
+
+function poolFromMessage(message: MergableDataProto): TablePool {
   const data = message.mergableDataObject?.mergeableDataObjectData;
   if (!data) {
     throw new Error("Table MergeableData missing the object data field");
   }
-
   return {
     objects: data.mergeableDataObjectEntry,
     keyNames: data.mergeableDataObjectKeyItem,
     uuidTable: data.mergeableDataObjectUuidItem,
   };
+}
+
+function resolveTableRefs(pool: TablePool): { crRowsRef: number; crColumnsRef: number; cellColumnsRef: number } {
+  const tableObject = pool.objects[TABLE_OBJECT_INDEX];
+  if (!tableObject) {
+    throw new Error("Table object pool is empty");
+  }
+  const table = parseDictByName(pool, tableObject, "table object");
+  return {
+    crRowsRef: resolveRef(requireEntry(table, "crRows"), "crRows"),
+    crColumnsRef: resolveRef(requireEntry(table, "crColumns"), "crColumns"),
+    cellColumnsRef: resolveRef(requireEntry(table, "cellColumns"), "cellColumns"),
+  };
+}
+
+// --- resolving rows/columns/cells ------------------------------------------
+
+export function resolveTable(doc: TableDocument): ResolvedTable {
+  const rowSet = parseOrderedSet(doc, doc.crRowsRef);
+  const columnSet = parseOrderedSet(doc, doc.crColumnsRef);
+  const rowPositions = computePositions(doc, rowSet);
+  const columnPositions = computePositions(doc, columnSet);
+
+  const rows = rowSet.arrayUuidIndexes.map((uuidIndex) => identityOf(doc, uuidIndex));
+  const columns = columnSet.arrayUuidIndexes.map((uuidIndex) => identityOf(doc, uuidIndex));
+
+  const cells = new Map<string, TableCell>();
+  for (const { a: columnRef, b: rowMapRef } of parseRefPairList(doc, doc.cellColumnsRef, "cellColumns")) {
+    const columnPosition = columnPositions.get(uuidIndexOfRef(doc, resolveRef(columnRef, "cellColumns entry column ref")));
+    if (columnPosition === undefined) {
+      throw new Error("Table column reference does not resolve to a known column position");
+    }
+    for (const { a: rowRef, b: cellTextRef } of parseRefPairList(
+      doc,
+      resolveRef(rowMapRef, "cellColumns entry row-map ref"),
+      "column row-map",
+    )) {
+      const rowPosition = rowPositions.get(uuidIndexOfRef(doc, resolveRef(rowRef, "row-map entry row ref")));
+      if (rowPosition === undefined) {
+        throw new Error("Table row reference does not resolve to a known row position");
+      }
+      const textRef = resolveRef(cellTextRef, "row-map entry cell-text ref");
+      cells.set(cellKey(rowPosition, columnPosition), { textRef, text: resolveCellText(doc, textRef) });
+    }
+  }
+
+  return { rows, columns, cells };
+}
+
+/** Finds a row/column's identity object by UUID-table index. Every entry in
+ * an `OrderedSet.array` is guaranteed to resolve (that's how
+ * `computePositions`/`uuidIndexOfRef` establish the position map in the
+ * first place), so this re-scans the pool once per row/column - fine at
+ * table sizes this project has ever seen. Exported for `tableEdit.ts`: real
+ * captures occasionally have more than one identity object sharing the same
+ * UUID-table index (apparently residue from Apple's own concurrent-edit
+ * history - see the file header); this always returns the *first* match,
+ * but every caller here and in `tableEdit.ts` treats row/column identity by
+ * UUID-table index throughout, never by raw pool ref, so which specific
+ * duplicate this resolves to never matters. */
+export function identityOf(pool: TablePool, uuidIndex: number): TableRowColumn {
+  const uuidIndexKeyIndex = pool.keyNames.indexOf("UUIDIndex");
+  for (let ref = 0; ref < pool.objects.length; ref += 1) {
+    const entry = pool.objects[ref];
+    if (!entry?.customMap || entry.customMap.mapEntry.length !== 1) {
+      continue;
+    }
+    const [mapEntry] = entry.customMap.mapEntry;
+    if (
+      mapEntry &&
+      mapEntry.key === uuidIndexKeyIndex &&
+      mapEntry.value &&
+      isFieldSet(mapEntry.value, UNSIGNED_INTEGER_VALUE_FIELD) &&
+      Number(mapEntry.value.unsignedIntegerValue) === uuidIndex
+    ) {
+      return { identityRef: ref, uuidIndex };
+    }
+  }
+  throw new Error(`Table array entry's UUID-table index ${uuidIndex} has no matching identity object in the pool`);
 }
 
 /**
@@ -221,7 +387,7 @@ function requireEntry(dict: Map<string, ObjectID>, key: string): ObjectID {
 }
 
 /** Resolves an `ObjectID` known to be a pool reference (`objectIndex`). */
-function resolveRef(objectId: ObjectID, label: string): number {
+export function resolveRef(objectId: ObjectID, label: string): number {
   if (!isFieldSet(objectId, OBJECT_INDEX_FIELD)) {
     throw new Error(`Expected ${label} to be a pool reference`);
   }
@@ -236,8 +402,9 @@ function resolveNumber(objectId: ObjectID, label: string): number {
   return Number(objectId.unsignedIntegerValue);
 }
 
-/** A row/column identity object: a one-entry dict, key `UUIDIndex`. */
-function uuidIndexOfRef(pool: TablePool, poolRef: number): number {
+/** A row/column identity object: a one-entry dict, key `UUIDIndex`. Exported
+ * for `tableEdit.ts`. */
+export function uuidIndexOfRef(pool: TablePool, poolRef: number): number {
   const entry = pool.objects[poolRef];
   if (!entry) {
     throw new Error(`Table pool reference ${poolRef} is out of range`);
@@ -256,7 +423,14 @@ function findUuidTableIndex(pool: TablePool, uuidBytes: Uint8Array): number {
 
 // --- OrderedSet (crRows / crColumns) ------------------------------------
 
-function parseOrderedSet(pool: TablePool, poolRef: number): OrderedSet {
+export interface ParsedOrderedSet {
+  /** Document-UUID-table indexes, in true visual order. */
+  arrayUuidIndexes: number[];
+  /** Stale-identity redirects: value's position should mirror key's. */
+  contents: Array<{ keyRef: number; valueRef: number }>;
+}
+
+export function parseOrderedSet(pool: TablePool, poolRef: number): ParsedOrderedSet {
   const entry = pool.objects[poolRef];
   if (!entry) {
     throw new Error(`Table pool reference ${poolRef} is out of range`);
@@ -276,7 +450,7 @@ function parseOrderedSet(pool: TablePool, poolRef: number): OrderedSet {
 
   const arrayUuidIndexes = array.attachment.map((attachment) => findUuidTableIndex(pool, attachment.uuid));
 
-  const contents: OrderedSet["contents"] = [];
+  const contents: ParsedOrderedSet["contents"] = [];
   if (ordering.contents) {
     for (const pair of ordering.contents.element) {
       if (!pair.key || !pair.value) {
@@ -292,7 +466,7 @@ function parseOrderedSet(pool: TablePool, poolRef: number): OrderedSet {
   return { arrayUuidIndexes, contents };
 }
 
-function computePositions(pool: TablePool, orderedSet: OrderedSet): Map<number, number> {
+export function computePositions(pool: TablePool, orderedSet: ParsedOrderedSet): Map<number, number> {
   const positions = new Map<number, number>();
   orderedSet.arrayUuidIndexes.forEach((uuidIndex, position) => positions.set(uuidIndex, position));
   for (const { keyRef, valueRef } of orderedSet.contents) {
@@ -308,7 +482,7 @@ function computePositions(pool: TablePool, orderedSet: OrderedSet): Map<number, 
 
 /** `cellColumns` and each column's row-map share the same `dictionary`
  * (field 6), repeated `DictionaryElement {key: ref, value: ref}` shape. */
-function parseRefPairList(pool: TablePool, poolRef: number, label: string): Array<{ a: ObjectID; b: ObjectID }> {
+export function parseRefPairList(pool: TablePool, poolRef: number, label: string): Array<{ a: ObjectID; b: ObjectID }> {
   const entry = pool.objects[poolRef];
   if (!entry) {
     throw new Error(`Table pool reference ${poolRef} is out of range`);
@@ -326,7 +500,7 @@ function parseRefPairList(pool: TablePool, poolRef: number, label: string): Arra
   });
 }
 
-function resolveCellText(pool: TablePool, poolRef: number): string {
+export function resolveCellText(pool: TablePool, poolRef: number): string {
   const entry = pool.objects[poolRef];
   if (!entry) {
     throw new Error(`Table pool reference ${poolRef} is out of range`);
@@ -338,9 +512,9 @@ function resolveCellText(pool: TablePool, poolRef: number): string {
   return note.noteText;
 }
 
-// --- markdown rendering --------------------------------------------------
+// --- markdown rendering / parsing ------------------------------------------
 
-function renderMarkdownTable(grid: readonly string[][]): string {
+export function renderMarkdownTable(grid: readonly string[][]): string {
   const header = grid[0];
   if (!header) {
     throw new Error("Table has no rows - refusing to guess at its structure");
@@ -360,9 +534,147 @@ function escapeCell(text: string): string {
   return text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>");
 }
 
+/**
+ * Inverse of `renderMarkdownTable`/`formatRow`/`escapeCell` - parses a GFM
+ * pipe table (the exact shape this project's own decode produces) back into
+ * a grid, for `push` to diff the locally-edited markdown against the
+ * table's current state. Deliberately narrow: only understands the literal
+ * output shape of `renderMarkdownTable` (a leading `| ... |` header row, a
+ * `| --- | ... |` separator, then zero or more `| ... |` data rows, one
+ * table per block with no surrounding blank-line requirements beyond what
+ * splitting on newlines already gives us) - anything else throws, which
+ * `push` treats as "can't safely apply this edit" rather than guessing.
+ */
+export function parseMarkdownTable(markdown: string): string[][] {
+  const lines = markdown.split("\n").filter((line) => line.length > 0);
+  const [headerLine, separatorLine, ...dataLines] = lines;
+  if (!headerLine || !separatorLine) {
+    throw new Error("Markdown table is missing its header or separator row");
+  }
+  const header = parseRow(headerLine);
+  if (!isGfmSeparatorRow(separatorLine)) {
+    throw new Error("Markdown table's second row is not a GFM header separator");
+  }
+  const separatorCells = parseRow(separatorLine).length;
+  if (separatorCells !== header.length) {
+    throw new Error("Markdown table's separator row has a different column count than its header");
+  }
+  const grid = [header, ...dataLines.map(parseRow)];
+  for (const row of grid) {
+    if (row.length !== header.length) {
+      throw new Error("Markdown table has a row with a different column count than its header - refusing to guess");
+    }
+  }
+  return grid;
+}
+
+export interface MarkdownTableBlock {
+  /** Line index (0-based) of the block's header row. */
+  startLine: number;
+  /** Line index one past the block's last row. */
+  endLine: number;
+  grid: string[][];
+}
+
+/**
+ * Scans `text` line-by-line for GFM-pipe-table-shaped blocks (the same
+ * shape `renderMarkdownTable` produces), in document order - used by `push`
+ * to find which part of a locally-edited note's text corresponds to which
+ * table attachment, since a table's rendered markdown is spliced directly
+ * into the note's body text at read time (`resolveNoteAttachments`) with no
+ * other marker separating it from surrounding prose. A block that looks
+ * like it starts a table but has a malformed separator or a data row with
+ * the wrong column count ends the block at the point of the mismatch rather
+ * than failing outright - `push` is expected to cross-check the resulting
+ * block count against how many table attachments the note actually has and
+ * refuse if they don't match, rather than trust a possibly-spurious match.
+ */
+export function findMarkdownTableBlocks(text: string): MarkdownTableBlock[] {
+  const lines = text.split("\n");
+  const blocks: MarkdownTableBlock[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const header = lines[i];
+    const separator = lines[i + 1];
+    if (header === undefined || separator === undefined || !isGfmSeparatorRow(separator)) {
+      i += 1;
+      continue;
+    }
+    let headerCells: string[];
+    try {
+      headerCells = parseRow(header);
+    } catch {
+      i += 1;
+      continue;
+    }
+    if (parseRow(separator).length !== headerCells.length) {
+      i += 1;
+      continue;
+    }
+
+    const grid = [headerCells];
+    let j = i + 2;
+    while (j < lines.length) {
+      const line = lines[j];
+      if (line === undefined) {
+        break;
+      }
+      let row: string[];
+      try {
+        row = parseRow(line);
+      } catch {
+        break;
+      }
+      if (row.length !== headerCells.length) {
+        break;
+      }
+      grid.push(row);
+      j += 1;
+    }
+
+    blocks.push({ startLine: i, endLine: j, grid });
+    i = j;
+  }
+  return blocks;
+}
+
+function isGfmSeparatorRow(line: string): boolean {
+  return /^\|(?:\s*:?-+:?\s*\|)+$/.test(line.trim());
+}
+
+function parseRow(line: string): string[] {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) {
+    throw new Error(`Markdown table row is not pipe-delimited: ${line}`);
+  }
+  const inner = trimmed.slice(1, -1);
+  const cells: string[] = [];
+  let current = "";
+  for (let i = 0; i < inner.length; i += 1) {
+    const char = inner[i];
+    if (char === "\\" && i + 1 < inner.length) {
+      current += inner[i + 1];
+      i += 1;
+      continue;
+    }
+    if (char === "|") {
+      cells.push(unescapeCell(current.trim()));
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  cells.push(unescapeCell(current.trim()));
+  return cells;
+}
+
+function unescapeCell(text: string): string {
+  return text.replace(/<br>/g, "\n");
+}
+
 // --- small shared helpers -------------------------------------------------
 
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+export function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) {
     return false;
   }
