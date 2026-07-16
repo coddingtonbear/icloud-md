@@ -6,7 +6,8 @@
       "mcp__obsidian__vault_patch",
       "Bash(git check-ignore *)",
       "mcp__obsidian__vault_append",
-      "Bash(date -Iseconds)"
+      "Bash(date -Iseconds)",
+      "Bash(git -C /home/acoddington/Documents/Projects/icloud-notes-sync remote -v)"
     ]
   }
 }
