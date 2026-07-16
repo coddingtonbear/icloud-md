@@ -227,7 +227,13 @@ would corrupt other devices' ability to merge. So push:
 
 1. fetches the note's *current* document from the server,
 2. requires it to re-encode **byte-for-byte** from our parsed model (any
-   structure we don't fully understand → the note stays read-only),
+   structure we don't fully understand → the note stays read-only) — the
+   encoder here is [`@bufbuild/protobuf`](https://github.com/bufbuild/protobuf-es)
+   (protobuf-es), generated from this project's own reverse-engineered
+   `.proto` schema (`proto/notestore.proto`) and configured for proto2
+   explicit field presence, not a hand-written byte-exact ordered-token
+   encoder as in earlier versions of this tool — validated against real
+   captures before the switch (see the dev notes),
 3. applies the local file's change as a minimal splice — tombstoning
    removed text and inserting new text under this vault's own stable
    replica id (persisted in `state.json`), the same way the web client's

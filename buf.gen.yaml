@@ -1,0 +1,7 @@
+version: v2
+plugins:
+  - local: protoc-gen-es
+    out: src/notes/gen
+    opt:
+      - target=ts
+      - import_extension=js

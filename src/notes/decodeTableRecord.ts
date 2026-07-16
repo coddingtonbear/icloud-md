@@ -7,41 +7,42 @@
  * against threeplanetssoftware/apple_cloud_notes_parser's
  * `AppleNotesEmbeddedTable.rb` (MIT licensed) - see the project dev notes,
  * "Consolidated reference: the complete `com.apple.notes.table`
- * MergeableData structure" (2026-07-14T14:46), which this is a direct port
- * of. Field paths below use this project's own field-number convention.
+ * MergeableData structure" (2026-07-14T14:46), and `proto/notestore.proto`
+ * for the generated-schema field names used below.
  *
  * Shape, once decompressed the same way `decompressNoteDocument` does:
  *
- *   root.2                 the real document (Document wrapper)
- *     .3                     "body"
- *       .3[]                   object pool, addressed by index everywhere
- *                               else via a `{6: N}` value ("ref N" below)
- *       .4[]                   key-name table (strings)
- *       .6[]                   UUID table (16-byte UUIDs, plain-index addressed)
+ *   MergableDataProto.mergableDataObject.mergeableDataObjectData
+ *     .mergeableDataObjectEntry[]      object pool, addressed by index
+ *                                      everywhere else via an ObjectID's
+ *                                      `objectIndex` ("ref N" below)
+ *     .mergeableDataObjectKeyItem[]    key-name table (strings)
+ *     .mergeableDataObjectUuidItem[]   UUID table (16-byte UUIDs, plain-index addressed)
  *
- * `pool[0]` is the table object: a dict (field-13 wrapper, repeated
- * `{1: key-table-index, 2: value}` pairs under `.13.3`) with keys `crRows`,
- * `crColumns`, `cellColumns` (each a ref) resolved via the key-name table.
+ * `pool[0]` is the table object: a `customMap` (field 13), repeated
+ * `MapEntry { key: key-table-index, value: ObjectID }` pairs, with keys
+ * `crRows`, `crColumns`, `cellColumns` (each a ref) resolved via the
+ * key-name table.
  *
- * `crRows`/`crColumns` are `OrderedSet` objects (field-16 wrapper):
- * `.16.1.1` is the true visual-order list - `.1` is CRDT run-tracking
- * metadata for the list's own edit history (not needed for a read-only
- * decode) and `.2[]` is the ordered `{1: index (redundant, ignored), 2:
- * 16-byte UUID}` entries, list position = visual position. `.16.1.2` is a
- * translation/redirect dictionary (`.1[]` repeated `{1: key ref, 2: value
- * ref, 3: ignored}`) resolving stale/duplicate identities from concurrent
- * edits onto their canonical counterpart - not an order signal itself.
+ * `crRows`/`crColumns` are `OrderedSet` objects (field 16): `.ordering.array`
+ * is the true visual-order list - `.contents` (of `OrderedSetOrderingArray`)
+ * is CRDT run-tracking metadata for the list's own edit history (not needed
+ * for a read-only decode) and `.attachment[]` is the ordered `{index
+ * (redundant, ignored), uuid}` entries, list position = visual position.
+ * `.ordering.contents` (of `OrderedSetOrdering`) is a translation/redirect
+ * `Dictionary` resolving stale/duplicate identities from concurrent edits
+ * onto their canonical counterpart - not an order signal itself.
  *
- * A row/column identity object is a dict with exactly one entry, key
- * `UUIDIndex`, value a plain inline number - the index into the
- * document-level UUID table. This value, not the object's own pool
- * position, is the join key used everywhere below.
+ * A row/column identity object is a `customMap` with exactly one entry, key
+ * `UUIDIndex`, value a plain inline number (`ObjectID.unsignedIntegerValue`)
+ * - the index into the document-level UUID table. This value, not the
+ * object's own pool position, is the join key used everywhere below.
  *
- * `cellColumns` is a field-6 wrapper, repeated `{1: ref to a column
- * identity object, 2: ref to that column's row-map object, 3: ignored}`.
- * A row-map object has the identical shape: `{1: ref to a row identity
- * object, 2: ref to a cell-text object, 3: ignored}`. A cell-text object is
- * a field-10 wrapper whose `.2` is the literal UTF-8 cell text.
+ * `cellColumns` is a `dictionary` (field 6), repeated `DictionaryElement
+ * {key: ref to a column identity object, value: ref to that column's
+ * row-map object}`. A row-map object has the identical shape: `{key: ref to
+ * a row identity object, value: ref to a cell-text object}`. A cell-text
+ * object is a `note` (field 10) whose `noteText` is the literal cell text.
  *
  * Deliberately not covered here (open questions, see dev notes): the
  * tombstone/deletion marker, and whether a header row is structurally
@@ -50,12 +51,23 @@
  * syntactically, not because Apple's format marks it as such.
  */
 
+import { fromBinary, isFieldSet } from "@bufbuild/protobuf";
 import { decompressNoteDocument } from "./noteText.js";
-import { getLastBytesField, getLastVarintField, readProtoFields, type ProtoValue } from "./protobuf.js";
+import {
+  MergableDataProtoSchema,
+  ObjectIDSchema,
+  type MergeableDataObjectEntry,
+  type ObjectID,
+  type OrderedSet as OrderedSetMessage,
+} from "./gen/notestore_pb.js";
+
+const OBJECT_INDEX_FIELD = ObjectIDSchema.fields.find((f) => f.localName === "objectIndex")!;
+const UNSIGNED_INTEGER_VALUE_FIELD = ObjectIDSchema.fields.find((f) => f.localName === "unsignedIntegerValue")!;
+const STRING_VALUE_FIELD = ObjectIDSchema.fields.find((f) => f.localName === "stringValue")!;
 
 interface TablePool {
   /** Pool objects, addressed by index ("ref N" throughout). */
-  objects: Uint8Array[];
+  objects: MergeableDataObjectEntry[];
   keyNames: string[];
   uuidTable: Uint8Array[];
 }
@@ -95,13 +107,17 @@ export function decodeTableMarkdown(compressedMergeableData: Buffer): string {
   }
   const grid: string[][] = Array.from({ length: numRows }, () => Array(numCols).fill(""));
 
-  for (const { aRef: columnRef, bRef: rowMapRef } of parseRefPairList(pool, cellColumnsRef, "cellColumns")) {
-    const col = columnPositions.get(uuidIndexOfRef(pool, columnRef));
+  for (const { a: columnRef, b: rowMapRef } of parseRefPairList(pool, cellColumnsRef, "cellColumns")) {
+    const col = columnPositions.get(uuidIndexOfRef(pool, resolveRef(columnRef, "cellColumns entry column ref")));
     if (col === undefined) {
       throw new Error("Table column reference does not resolve to a known column position");
     }
-    for (const { aRef: rowRef, bRef: cellTextRef } of parseRefPairList(pool, rowMapRef, "column row-map")) {
-      const row = rowPositions.get(uuidIndexOfRef(pool, rowRef));
+    for (const { a: rowRef, b: cellTextRef } of parseRefPairList(
+      pool,
+      resolveRef(rowMapRef, "cellColumns entry row-map ref"),
+      "column row-map",
+    )) {
+      const row = rowPositions.get(uuidIndexOfRef(pool, resolveRef(rowRef, "row-map entry row ref")));
       if (row === undefined) {
         throw new Error("Table row reference does not resolve to a known row position");
       }
@@ -109,7 +125,7 @@ export function decodeTableMarkdown(compressedMergeableData: Buffer): string {
       if (!rowCells) {
         throw new Error("Table row position is out of range");
       }
-      rowCells[col] = resolveCellText(pool, cellTextRef);
+      rowCells[col] = resolveCellText(pool, resolveRef(cellTextRef, "row-map entry cell-text ref"));
     }
   }
 
@@ -120,25 +136,18 @@ export function decodeTableMarkdown(compressedMergeableData: Buffer): string {
 
 function loadPool(compressedMergeableData: Buffer): TablePool {
   const raw = decompressNoteDocument(compressedMergeableData);
-  const root = readProtoFields(raw);
+  const message = fromBinary(MergableDataProtoSchema, raw);
 
-  const documentBytes = getLastBytesField(root, 2);
-  if (!documentBytes) {
-    throw new Error("Table MergeableData missing the document field (root field 2)");
+  const data = message.mergableDataObject?.mergeableDataObjectData;
+  if (!data) {
+    throw new Error("Table MergeableData missing the object data field");
   }
-  const document = readProtoFields(documentBytes);
 
-  const bodyBytes = getLastBytesField(document, 3);
-  if (!bodyBytes) {
-    throw new Error("Table MergeableData missing the body field (document field 3)");
-  }
-  const body = readProtoFields(bodyBytes);
-
-  const objects = (body.get(3) ?? []).map((value) => expectBytesValue(value, "object pool entry"));
-  const keyNames = (body.get(4) ?? []).map((value) => decodeUtf8(expectBytesValue(value, "key-name table entry")));
-  const uuidTable = (body.get(6) ?? []).map((value) => expectBytesValue(value, "UUID table entry"));
-
-  return { objects, keyNames, uuidTable };
+  return {
+    objects: data.mergeableDataObjectEntry,
+    keyNames: data.mergeableDataObjectKeyItem,
+    uuidTable: data.mergeableDataObjectUuidItem,
+  };
 }
 
 /**
@@ -162,7 +171,7 @@ function assertLeftToRight(pool: TablePool): void {
   }
 
   for (const object of pool.objects) {
-    let dict: Map<string, Uint8Array>;
+    let dict: Map<string, ObjectID>;
     try {
       dict = parseDictByName(pool, object, "direction candidate");
     } catch {
@@ -171,15 +180,11 @@ function assertLeftToRight(pool: TablePool): void {
     if (dict.size !== 1) {
       continue;
     }
-    const valueBytes = dict.get(directionKeyName);
-    if (!valueBytes) {
+    const value = dict.get(directionKeyName);
+    if (!value || !isFieldSet(value, STRING_VALUE_FIELD)) {
       continue;
     }
-    const stringBytes = getLastBytesField(readProtoFields(valueBytes), 4);
-    if (!stringBytes) {
-      continue;
-    }
-    const direction = decodeUtf8(stringBytes);
+    const direction = value.stringValue;
     if (direction !== LEFT_TO_RIGHT_DIRECTION) {
       throw new Error(`Table has unsupported column direction "${direction}" - refusing to guess at column order`);
     }
@@ -191,32 +196,23 @@ function assertLeftToRight(pool: TablePool): void {
   throw new Error("Table is missing its column-direction marker");
 }
 
-/** Resolves a dict object (field-13 wrapper) into its key-name -> raw value-bytes pairs. */
-function parseDictByName(pool: TablePool, objectBytes: Uint8Array, label: string): Map<string, Uint8Array> {
-  const wrapper = readProtoFields(objectBytes);
-  const dictBytes = getLastBytesField(wrapper, 13);
-  if (!dictBytes) {
+/** Resolves a `customMap` object (field 13) into its key-name -> ObjectID pairs. */
+function parseDictByName(pool: TablePool, entry: MergeableDataObjectEntry, label: string): Map<string, ObjectID> {
+  const customMap = entry.customMap;
+  if (!customMap) {
     throw new Error(`Expected ${label} to be a dict (field 13)`);
   }
-  const dict = readProtoFields(dictBytes);
-
-  const result = new Map<string, Uint8Array>();
-  for (const pair of dict.get(3) ?? []) {
-    const pairFields = readProtoFields(expectBytesValue(pair, `${label} dict pair`));
-    const keyIndex = getLastVarintField(pairFields, 1);
-    const valueBytes = getLastBytesField(pairFields, 2);
-    if (keyIndex === undefined || valueBytes === undefined) {
-      continue;
-    }
-    const keyName = pool.keyNames[Number(keyIndex)];
-    if (keyName !== undefined) {
-      result.set(keyName, valueBytes);
+  const result = new Map<string, ObjectID>();
+  for (const pair of customMap.mapEntry) {
+    const keyName = pool.keyNames[pair.key];
+    if (keyName !== undefined && pair.value) {
+      result.set(keyName, pair.value);
     }
   }
   return result;
 }
 
-function requireEntry(dict: Map<string, Uint8Array>, key: string): Uint8Array {
+function requireEntry(dict: Map<string, ObjectID>, key: string): ObjectID {
   const value = dict.get(key);
   if (!value) {
     throw new Error(`Table object is missing expected key "${key}"`);
@@ -224,33 +220,29 @@ function requireEntry(dict: Map<string, Uint8Array>, key: string): Uint8Array {
   return value;
 }
 
-/** Resolves a dict-pair value known to be a pool reference (`{6: N}`). */
-function resolveRef(valueBytes: Uint8Array, label: string): number {
-  const fields = readProtoFields(valueBytes);
-  const ref = getLastVarintField(fields, 6);
-  if (ref === undefined) {
+/** Resolves an `ObjectID` known to be a pool reference (`objectIndex`). */
+function resolveRef(objectId: ObjectID, label: string): number {
+  if (!isFieldSet(objectId, OBJECT_INDEX_FIELD)) {
     throw new Error(`Expected ${label} to be a pool reference`);
   }
-  return Number(ref);
+  return objectId.objectIndex;
 }
 
-/** Resolves a dict-pair value known to be an inline number (`{2: N}`). */
-function resolveNumber(valueBytes: Uint8Array, label: string): number {
-  const fields = readProtoFields(valueBytes);
-  const num = getLastVarintField(fields, 2);
-  if (num === undefined) {
+/** Resolves an `ObjectID` known to be an inline number (`unsignedIntegerValue`). */
+function resolveNumber(objectId: ObjectID, label: string): number {
+  if (!isFieldSet(objectId, UNSIGNED_INTEGER_VALUE_FIELD)) {
     throw new Error(`Expected ${label} to be an inline number`);
   }
-  return Number(num);
+  return Number(objectId.unsignedIntegerValue);
 }
 
 /** A row/column identity object: a one-entry dict, key `UUIDIndex`. */
 function uuidIndexOfRef(pool: TablePool, poolRef: number): number {
-  const object = pool.objects[poolRef];
-  if (!object) {
+  const entry = pool.objects[poolRef];
+  if (!entry) {
     throw new Error(`Table pool reference ${poolRef} is out of range`);
   }
-  const dict = parseDictByName(pool, object, `pool[${poolRef}] identity object`);
+  const dict = parseDictByName(pool, entry, `pool[${poolRef}] identity object`);
   return resolveNumber(requireEntry(dict, "UUIDIndex"), `pool[${poolRef}] UUIDIndex`);
 }
 
@@ -265,48 +257,35 @@ function findUuidTableIndex(pool: TablePool, uuidBytes: Uint8Array): number {
 // --- OrderedSet (crRows / crColumns) ------------------------------------
 
 function parseOrderedSet(pool: TablePool, poolRef: number): OrderedSet {
-  const object = pool.objects[poolRef];
-  if (!object) {
+  const entry = pool.objects[poolRef];
+  if (!entry) {
     throw new Error(`Table pool reference ${poolRef} is out of range`);
   }
-  const objectFields = readProtoFields(object);
-  const orderingWrapperBytes = getLastBytesField(objectFields, 16);
-  if (!orderingWrapperBytes) {
+  const orderedSet: OrderedSetMessage | undefined = entry.orderedSet;
+  if (!orderedSet) {
     throw new Error(`Expected pool[${poolRef}] to be an OrderedSet (field 16)`);
   }
-  const orderingWrapper = readProtoFields(orderingWrapperBytes);
-  const orderingBytes = getLastBytesField(orderingWrapper, 1);
-  if (!orderingBytes) {
+  const ordering = orderedSet.ordering;
+  if (!ordering) {
     throw new Error("OrderedSet is missing its ordering field");
   }
-  const ordering = readProtoFields(orderingBytes);
-
-  const arrayBytes = getLastBytesField(ordering, 1);
-  if (!arrayBytes) {
+  const array = ordering.array;
+  if (!array) {
     throw new Error("OrderedSet ordering is missing its array field");
   }
-  const arrayFields = readProtoFields(arrayBytes);
-  const arrayUuidIndexes = (arrayFields.get(2) ?? []).map((entryValue) => {
-    const entry = readProtoFields(expectBytesValue(entryValue, "OrderedSet array entry"));
-    const uuidBytes = getLastBytesField(entry, 2);
-    if (!uuidBytes) {
-      throw new Error("OrderedSet array entry is missing its UUID");
-    }
-    return findUuidTableIndex(pool, uuidBytes);
-  });
+
+  const arrayUuidIndexes = array.attachment.map((attachment) => findUuidTableIndex(pool, attachment.uuid));
 
   const contents: OrderedSet["contents"] = [];
-  const contentsBytes = getLastBytesField(ordering, 2);
-  if (contentsBytes) {
-    const contentsFields = readProtoFields(contentsBytes);
-    for (const pairValue of contentsFields.get(1) ?? []) {
-      const pairFields = readProtoFields(expectBytesValue(pairValue, "OrderedSet contents pair"));
-      const keyBytes = getLastBytesField(pairFields, 1);
-      const valueBytes = getLastBytesField(pairFields, 2);
-      if (!keyBytes || !valueBytes) {
+  if (ordering.contents) {
+    for (const pair of ordering.contents.element) {
+      if (!pair.key || !pair.value) {
         throw new Error("OrderedSet contents pair is missing its key or value");
       }
-      contents.push({ keyRef: resolveRef(keyBytes, "contents key"), valueRef: resolveRef(valueBytes, "contents value") });
+      contents.push({
+        keyRef: resolveRef(pair.key, "contents key"),
+        valueRef: resolveRef(pair.value, "contents value"),
+      });
     }
   }
 
@@ -327,44 +306,36 @@ function computePositions(pool: TablePool, orderedSet: OrderedSet): Map<number, 
 
 // --- cellColumns / row-map / cell text ----------------------------------
 
-/** `cellColumns` and each column's row-map share the same field-6 wrapper,
- * repeated `{1: ref, 2: ref, 3: ignored}` shape. */
-function parseRefPairList(pool: TablePool, poolRef: number, label: string): Array<{ aRef: number; bRef: number }> {
-  const object = pool.objects[poolRef];
-  if (!object) {
+/** `cellColumns` and each column's row-map share the same `dictionary`
+ * (field 6), repeated `DictionaryElement {key: ref, value: ref}` shape. */
+function parseRefPairList(pool: TablePool, poolRef: number, label: string): Array<{ a: ObjectID; b: ObjectID }> {
+  const entry = pool.objects[poolRef];
+  if (!entry) {
     throw new Error(`Table pool reference ${poolRef} is out of range`);
   }
-  const objectFields = readProtoFields(object);
-  const innerBytes = getLastBytesField(objectFields, 6);
-  if (!innerBytes) {
-    throw new Error(`Expected ${label} (pool[${poolRef}]) to be a field-6 wrapper`);
+  const dictionary = entry.dictionary;
+  if (!dictionary) {
+    throw new Error(`Expected ${label} (pool[${poolRef}]) to be a dictionary (field 6)`);
   }
-  const inner = readProtoFields(innerBytes);
 
-  return (inner.get(1) ?? []).map((entryValue) => {
-    const fields = readProtoFields(expectBytesValue(entryValue, `${label} entry`));
-    const aBytes = getLastBytesField(fields, 1);
-    const bBytes = getLastBytesField(fields, 2);
-    if (!aBytes || !bBytes) {
+  return dictionary.element.map((element) => {
+    if (!element.key || !element.value) {
       throw new Error(`${label} entry is missing one of its two references`);
     }
-    return { aRef: resolveRef(aBytes, `${label} entry ref 1`), bRef: resolveRef(bBytes, `${label} entry ref 2`) };
+    return { a: element.key, b: element.value };
   });
 }
 
 function resolveCellText(pool: TablePool, poolRef: number): string {
-  const object = pool.objects[poolRef];
-  if (!object) {
+  const entry = pool.objects[poolRef];
+  if (!entry) {
     throw new Error(`Table pool reference ${poolRef} is out of range`);
   }
-  const objectFields = readProtoFields(object);
-  const cellBytes = getLastBytesField(objectFields, 10);
-  if (!cellBytes) {
+  const note = entry.note;
+  if (!note) {
     throw new Error(`Expected pool[${poolRef}] to be a cell-text object (field 10)`);
   }
-  const cellFields = readProtoFields(cellBytes);
-  const textBytes = getLastBytesField(cellFields, 2);
-  return textBytes ? decodeUtf8(textBytes) : "";
+  return note.noteText;
 }
 
 // --- markdown rendering --------------------------------------------------
@@ -390,17 +361,6 @@ function escapeCell(text: string): string {
 }
 
 // --- small shared helpers -------------------------------------------------
-
-function expectBytesValue(value: ProtoValue, label: string): Uint8Array {
-  if (value.wireType !== 2) {
-    throw new Error(`${label} is not a length-delimited field`);
-  }
-  return value.bytes;
-}
-
-function decodeUtf8(bytes: Uint8Array): string {
-  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-}
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) {

@@ -1,5 +1,6 @@
 import { deflateSync, gunzipSync, inflateSync } from "node:zlib";
-import { getLastBytesField, readProtoFields } from "./protobuf.js";
+import { fromBinary } from "@bufbuild/protobuf";
+import { NoteStoreProtoSchema } from "./gen/notestore_pb.js";
 
 /**
  * Decodes the plain-text body of a note from its TextDataEncrypted field, as
@@ -16,33 +17,22 @@ import { getLastBytesField, readProtoFields } from "./protobuf.js";
  * `changes/zone` endpoint for different records). Both are tried.
  *
  * This only extracts the plain note_text string (title + body, no
- * formatting) via root -> field 2 (Document) -> field 3 (Note) -> field 2
- * (note_text), verified against real captured notes. Attribute runs
+ * formatting) via `NoteStoreProto.document.note.note_text`, verified against
+ * real captured notes (see `proto/notestore.proto`). Attribute runs
  * (formatting, checklists, links, attachments) are intentionally not parsed
  * yet - out of scope until round-trip write support needs them.
  */
 export function decodeNoteBodyText(compressedProtobuf: Buffer): string {
   const raw = decompressNoteDocument(compressedProtobuf);
-  const root = readProtoFields(raw);
+  const message = fromBinary(NoteStoreProtoSchema, raw);
 
-  const documentBytes = getLastBytesField(root, 2);
-  if (!documentBytes) {
+  if (!message.document) {
     throw new Error("Note protobuf missing Document field (root field 2)");
   }
-  const document = readProtoFields(documentBytes);
-
-  const noteBytes = getLastBytesField(document, 3);
-  if (!noteBytes) {
+  if (!message.document.note) {
     throw new Error("Note protobuf missing Note field (Document field 3)");
   }
-  const note = readProtoFields(noteBytes);
-
-  const noteTextBytes = getLastBytesField(note, 2);
-  if (!noteTextBytes) {
-    throw new Error("Note protobuf missing note_text field (Note field 2)");
-  }
-
-  return new TextDecoder("utf-8", { fatal: true }).decode(noteTextBytes);
+  return message.document.note.noteText;
 }
 
 export function decompressNoteDocument(buf: Buffer): Buffer {

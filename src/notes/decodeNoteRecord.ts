@@ -43,8 +43,9 @@ export function classifyNoteRecord(record: CloudKitRecord): NoteDecodeResult {
   const placeholderCount = countOccurrences(bodyText, OBJECT_REPLACEMENT_CHARACTER);
   const title = decodeTitleField(record.fields.TitleEncrypted);
   if (placeholderCount !== attachments.length) {
-    // Some embedded object we don't understand (a table, drawing, ...) also
-    // uses this placeholder, or our attachment-run parse missed one - either
+    // Some embedded object we don't understand (a drawing, scanned document,
+    // ...) also uses this placeholder, or our attachment-run parse missed
+    // one - either
     // way we can't trust a positional correlation between the two, so we
     // can't localize *which* placeholder is the problem. Per the Safety
     // Guarantee Audit: still fetch the note (banner up top, since we can't

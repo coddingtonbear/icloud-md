@@ -1,7 +1,11 @@
 import path from "node:path";
+import { fromBinary, isFieldSet } from "@bufbuild/protobuf";
 import type { CloudKitFieldValue } from "../cloudkit/databaseClient.js";
 import { decompressNoteDocument } from "./noteText.js";
-import { getLastBytesField, readProtoFields } from "./protobuf.js";
+import { AttachmentInfoSchema, NoteStoreProtoSchema } from "./gen/notestore_pb.js";
+
+const ATTACHMENT_IDENTIFIER_FIELD = AttachmentInfoSchema.fields.find((f) => f.localName === "attachmentIdentifier")!;
+const TYPE_UTI_FIELD = AttachmentInfoSchema.fields.find((f) => f.localName === "typeUti")!;
 
 /** One embedded attachment reference found in a note's body, in document order. */
 export interface AttachmentReference {
@@ -13,53 +17,28 @@ export interface AttachmentReference {
 
 /**
  * Extracts, in document order, every embedded attachment reference from a
- * note's protobuf body: root -> Document (field 2) -> Note (field 3) ->
- * AttributeRun (field 5, repeated) -> AttachmentInfo (field 12), when
- * present. Each occurrence corresponds 1:1, in the same order, with one
- * U+FFFC placeholder character in the plain note_text (Note field 2) - both
- * walk the same document left-to-right. Verified against real captured
+ * note's protobuf body: `NoteStoreProto.document.note.attribute_run[].
+ * attachment_info`, when present. Each occurrence corresponds 1:1, in the
+ * same order, with one U+FFFC placeholder character in the plain note_text -
+ * both walk the same document left-to-right. Verified against real captured
  * audio- and image-attachment notes (dev notes, 2026-07-13/14).
  */
 export function decodeNoteAttachmentRefs(compressedProtobuf: Buffer): AttachmentReference[] {
   const raw = decompressNoteDocument(compressedProtobuf);
-  const root = readProtoFields(raw);
-
-  const documentBytes = getLastBytesField(root, 2);
-  if (!documentBytes) {
+  const message = fromBinary(NoteStoreProtoSchema, raw);
+  const note = message.document?.note;
+  if (!note) {
     return [];
   }
-  const document = readProtoFields(documentBytes);
 
-  const noteBytes = getLastBytesField(document, 3);
-  if (!noteBytes) {
-    return [];
-  }
-  const note = readProtoFields(noteBytes);
-
-  const attributeRuns = note.get(5) ?? [];
   const refs: AttachmentReference[] = [];
-
-  for (const run of attributeRuns) {
-    if (run.wireType !== 2) {
+  for (const run of note.attributeRun) {
+    const info = run.attachmentInfo;
+    if (!info || !isFieldSet(info, ATTACHMENT_IDENTIFIER_FIELD) || !isFieldSet(info, TYPE_UTI_FIELD)) {
       continue;
     }
-    const runFields = readProtoFields(run.bytes);
-    const infoBytes = getLastBytesField(runFields, 12);
-    if (!infoBytes) {
-      continue;
-    }
-    const info = readProtoFields(infoBytes);
-    const identifierBytes = getLastBytesField(info, 1);
-    const typeUtiBytes = getLastBytesField(info, 2);
-    if (!identifierBytes || !typeUtiBytes) {
-      continue;
-    }
-    refs.push({
-      attachmentIdentifier: new TextDecoder("utf-8").decode(identifierBytes),
-      typeUti: new TextDecoder("utf-8").decode(typeUtiBytes),
-    });
+    refs.push({ attachmentIdentifier: info.attachmentIdentifier, typeUti: info.typeUti });
   }
-
   return refs;
 }
 

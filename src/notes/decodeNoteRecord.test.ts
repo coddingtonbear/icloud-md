@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { create, toBinary } from "@bufbuild/protobuf";
 import { classifyNoteRecord } from "./decodeNoteRecord.js";
 import { compressNoteDocument } from "./noteText.js";
-import { bytesToken, encodeProtoTokens } from "./protobuf.js";
+import { DocumentSchema, NoteSchema, NoteStoreProtoSchema } from "./gen/notestore_pb.js";
 import { UNKNOWN_CONTENT_BANNER } from "./unknownContent.js";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 
@@ -11,10 +12,10 @@ function makeRecord(fields: CloudKitRecord["fields"]): CloudKitRecord {
 }
 
 function encodeTextField(text: string): CloudKitRecord["fields"][string] {
-  const noteBytes = encodeProtoTokens([bytesToken(2, new TextEncoder().encode(text))]);
-  const documentBytes = encodeProtoTokens([bytesToken(3, noteBytes)]);
-  const rootBytes = encodeProtoTokens([bytesToken(2, documentBytes)]);
-  const compressed = compressNoteDocument(rootBytes);
+  const message = create(NoteStoreProtoSchema, {
+    document: create(DocumentSchema, { version: 0, note: create(NoteSchema, { noteText: text }) }),
+  });
+  const compressed = compressNoteDocument(toBinary(NoteStoreProtoSchema, message));
   return { value: Buffer.from(compressed).toString("base64"), type: "ENCRYPTED_BYTES" };
 }
 

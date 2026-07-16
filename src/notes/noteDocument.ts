@@ -3,6 +3,17 @@
  * - the same protobuf `noteText.ts` reads note_text out of, but parsed
  * strictly enough to be *edited and re-encoded*, which is what `push` needs.
  *
+ * Built on the generated `proto/notestore.proto` schema (protobuf-es). This
+ * project's own `NoteDocument`/`TextRun`/`ReplicaEntry` stay plain domain
+ * types, decoupled from the generated message shapes, so editing logic below
+ * doesn't need to think in wire-format terms. `AttributeRun` is the one
+ * exception: it's a direct alias for the generated message type rather than
+ * a separate wrapper, since Apple's formatting fields are numerous, still
+ * mostly unused by this project (rendering them is out of scope until a
+ * follow-on plan), and protobuf-es's own unknown-field retention already
+ * makes preserving whatever we don't understand "nearly free" - see
+ * `proto/notestore.proto` and the dev notes, 2026-07-15 (Step 1 spike).
+ *
  * The shape here was derived empirically from real `records/modify` bodies
  * captured from www.icloud.com (see the project dev notes, 2026-07-13 "push
  * groundwork" entry), cross-checked against every note in those captures:
@@ -19,7 +30,9 @@
  *              2: length
  *              3: Coord (anchor; semantics not fully understood, preserved)
  *              4: tombstone flag (1 = deleted text, retained for merging)
- *              5: sequence number
+ *              5: sequence number(s) - genuinely `repeated`: a real capture
+ *                 (2026-07-15) had two occurrences in one run; see
+ *                 `proto/notestore.proto`'s `TextRun.sequence` comment.
  *
  * Invariants verified against every captured note:
  *  - run lengths and clocks count UTF-16 code units;
@@ -33,10 +46,35 @@
  * and `push` treats that note as read-only. On top of that, callers must
  * verify `encodeNoteDocument(parseNoteDocument(raw))` reproduces `raw`
  * byte-for-byte before trusting an edit - the round-trip gate from the
- * project README's Phase 3 plan.
+ * project README's Phase 3 plan. Unlike the pre-migration hand-rolled codec,
+ * that gate is no longer just "did we understand every field" - protobuf-es
+ * sorts declared fields by number and appends undeclared ones at the end on
+ * encode, so it also silently catches "declared, but positioned somewhere
+ * the schema doesn't yet account for" the same way it always caught
+ * "not declared at all". A genuinely unrecognized field in the Note message
+ * is therefore no longer rejected up front the way it used to be - it's
+ * tolerated (preserved via protobuf-es's own unknown-field retention) and
+ * only refused if the round-trip actually fails, which is strictly more
+ * permissive without weakening the guarantee.
  */
 
-import { bytesToken, encodeProtoTokens, readProtoTokens, varintToken, type ProtoToken } from "./protobuf.js";
+import { clone, create, fromBinary, isFieldSet, toBinary } from "@bufbuild/protobuf";
+import {
+  AttributeRunSchema,
+  CoordSchema,
+  DocumentSchema,
+  NoteSchema,
+  NoteStoreProtoSchema,
+  ReplicaCounterSchema,
+  ReplicaEntrySchema,
+  ReplicaTableSchema,
+  TextRunSchema,
+  type AttributeRun as GenAttributeRun,
+  type ReplicaEntry as GenReplicaEntry,
+  type TextRun as GenTextRun,
+} from "./gen/notestore_pb.js";
+
+const TOMBSTONE_FIELD = TextRunSchema.fields.find((f) => f.localName === "tombstone")!;
 
 export interface RunCoord {
   replica: number;
@@ -48,7 +86,10 @@ export interface TextRun {
   length: number;
   anchor: RunCoord;
   tombstone: boolean;
-  sequence: number | undefined;
+  /** Almost always one entry; occasionally more in real captures - see
+   * `proto/notestore.proto`'s `TextRun.sequence` comment. Empty for a
+   * brand-new run pending `applyTextEdit`'s renumbering pass. */
+  sequence: number[];
 }
 
 export interface ReplicaEntry {
@@ -58,58 +99,68 @@ export interface ReplicaEntry {
   counters: number[];
 }
 
-export interface AttributeRun {
-  length: number;
-  /** Everything but the length (paragraph style, fonts, ...) - opaque,
-   * preserved in original order. */
-  rest: ProtoToken[];
-}
+/** Apple's formatting fields (paragraph style, fonts, colors, ...) - opaque
+ * to this project's editing logic, which only ever reads/writes `.length`.
+ * A direct alias for the generated message rather than a separate wrapper;
+ * see file header. */
+export type AttributeRun = GenAttributeRun;
 
 export interface NoteDocument {
-  /** root-level tokens; the Document token's position is preserved. */
-  rootTokens: ProtoToken[];
-  /** Document-level tokens; the Note token's position is preserved. */
-  documentTokens: ProtoToken[];
+  /** Root-level field 1; always observed 0 so far, preserved verbatim. */
+  rootUnknownField1: number;
+  /** Document-level field 1; always observed 0 so far, preserved verbatim. */
+  documentUnknownField1: number;
+  documentVersion: number;
   text: string;
   runs: TextRun[];
   replicas: ReplicaEntry[];
   attributeRuns: AttributeRun[];
 }
 
-const ROOT_DOCUMENT_FIELD = 2;
-const DOCUMENT_NOTE_FIELD = 3;
-const NOTE_TEXT_FIELD = 2;
-const NOTE_RUN_FIELD = 3;
-const NOTE_REPLICA_TABLE_FIELD = 4;
-const NOTE_ATTRIBUTE_RUN_FIELD = 5;
 const SENTINEL_CLOCK = 0xffffffff;
 
 export function parseNoteDocument(raw: Uint8Array): NoteDocument {
-  const rootTokens = readProtoTokens(raw);
-  const documentToken = singleBytesToken(rootTokens, ROOT_DOCUMENT_FIELD, "root Document");
+  const message = fromBinary(NoteStoreProtoSchema, raw);
+  const document = message.document;
+  if (!document) {
+    throw new Error("Note document missing Document field (root field 2)");
+  }
+  const note = document.note;
+  if (!note) {
+    throw new Error("Note document missing Note field (Document field 3)");
+  }
+  if (!note.replicaTable) {
+    throw new Error("Note document is missing its replica table (Note field 4)");
+  }
 
-  const documentTokens = readProtoTokens(documentToken.bytes);
-  const noteToken = singleBytesToken(documentTokens, DOCUMENT_NOTE_FIELD, "Document Note");
-
-  const note = parseNote(readProtoTokens(noteToken.bytes));
-  return { rootTokens, documentTokens, ...note };
+  return {
+    rootUnknownField1: message.unknownField1,
+    documentUnknownField1: document.unknownField1,
+    documentVersion: document.version,
+    text: note.noteText,
+    runs: note.textRun.map(parseTextRun),
+    replicas: note.replicaTable.entry.map(parseReplicaEntry),
+    attributeRuns: note.attributeRun,
+  };
 }
 
 export function encodeNoteDocument(doc: NoteDocument): Uint8Array {
-  const noteTokens: ProtoToken[] = [bytesToken(NOTE_TEXT_FIELD, new TextEncoder().encode(doc.text))];
-  for (const run of doc.runs) {
-    noteTokens.push(bytesToken(NOTE_RUN_FIELD, encodeRun(run)));
-  }
-  noteTokens.push(bytesToken(NOTE_REPLICA_TABLE_FIELD, encodeReplicaTable(doc.replicas)));
-  for (const attributeRun of doc.attributeRuns) {
-    noteTokens.push(
-      bytesToken(NOTE_ATTRIBUTE_RUN_FIELD, encodeProtoTokens([varintToken(1, attributeRun.length), ...attributeRun.rest])),
-    );
-  }
-
-  const documentTokens = replaceBytesToken(doc.documentTokens, DOCUMENT_NOTE_FIELD, encodeProtoTokens(noteTokens));
-  const rootTokens = replaceBytesToken(doc.rootTokens, ROOT_DOCUMENT_FIELD, encodeProtoTokens(documentTokens));
-  return encodeProtoTokens(rootTokens);
+  const note = create(NoteSchema, {
+    noteText: doc.text,
+    textRun: doc.runs.map(encodeTextRun),
+    replicaTable: create(ReplicaTableSchema, { entry: doc.replicas.map(encodeReplicaEntry) }),
+    attributeRun: doc.attributeRuns,
+  });
+  const document = create(DocumentSchema, {
+    unknownField1: doc.documentUnknownField1,
+    version: doc.documentVersion,
+    note,
+  });
+  const message = create(NoteStoreProtoSchema, {
+    unknownField1: doc.rootUnknownField1,
+    document,
+  });
+  return toBinary(NoteStoreProtoSchema, message);
 }
 
 /** The byte-for-byte round-trip gate: true only if we can reproduce `raw`
@@ -171,7 +222,9 @@ export function applyTextEdit(doc: NoteDocument, newText: string, options: Apply
   }
 
   // Sequence numbers are not stable identifiers: every captured save has
-  // them renumbered 1..N in list (= document) order, so do the same.
+  // them renumbered 1..N in list (= document) order, so do the same -
+  // collapsing any multi-value sequence (see TextRun.sequence) back down to
+  // one, matching what a real save always does.
   renumberSequences(doc);
 
   doc.text = newText;
@@ -185,167 +238,62 @@ function renumberSequences(doc: NoteDocument): void {
     if (isSentinel(run)) {
       continue;
     }
-    run.sequence = sequence;
+    run.sequence = [sequence];
     sequence += 1;
   }
 }
 
 // --- parsing ---------------------------------------------------------------
 
-function parseNote(tokens: ProtoToken[]): Pick<NoteDocument, "text" | "runs" | "replicas" | "attributeRuns"> {
-  // Strict field ordering: text, runs, replica table, attribute runs. Every
-  // captured note matches this; anything else fails the round-trip gate
-  // anyway (we re-encode in this order), so reject it up front.
-  const kinds = tokens.map((token) => token.fieldNumber);
-  const expected = [...kinds].sort((a, b) => a - b);
-  if (!kinds.every((kind, i) => kind === expected[i])) {
-    throw new Error("Note document fields are not in canonical order");
-  }
-
-  const textToken = singleBytesToken(tokens, NOTE_TEXT_FIELD, "note_text");
-  const text = new TextDecoder("utf-8", { fatal: true }).decode(textToken.bytes);
-
-  const runs = tokens
-    .filter((t) => t.fieldNumber === NOTE_RUN_FIELD)
-    .map((t) => parseRun(expectBytes(t, "TextRun").bytes));
-  const replicaTable = singleBytesToken(tokens, NOTE_REPLICA_TABLE_FIELD, "replica table");
-  const replicas = parseReplicaTable(replicaTable.bytes);
-  const attributeRuns = tokens
-    .filter((t) => t.fieldNumber === NOTE_ATTRIBUTE_RUN_FIELD)
-    .map((t) => parseAttributeRun(expectBytes(t, "AttributeRun").bytes));
-
-  const known = new Set([NOTE_TEXT_FIELD, NOTE_RUN_FIELD, NOTE_REPLICA_TABLE_FIELD, NOTE_ATTRIBUTE_RUN_FIELD]);
-  const unknown = tokens.find((t) => !known.has(t.fieldNumber));
-  if (unknown) {
-    throw new Error(`Note document has unrecognized field ${unknown.fieldNumber}`);
-  }
-
-  return { text, runs, replicas, attributeRuns };
-}
-
-function parseRun(bytes: Uint8Array): TextRun {
-  const tokens = readProtoTokens(bytes);
-  let coord: RunCoord | undefined;
-  let length: number | undefined;
-  let anchor: RunCoord | undefined;
-  let tombstone = false;
-  let sequence: number | undefined;
-
-  for (const token of tokens) {
-    switch (token.fieldNumber) {
-      case 1:
-        if (coord !== undefined) throw new Error("TextRun has repeated coord");
-        coord = parseCoord(expectBytes(token, "TextRun coord").bytes);
-        break;
-      case 2:
-        length = Number(expectVarint(token, "TextRun length").varint);
-        break;
-      case 3:
-        if (anchor !== undefined) throw new Error("TextRun has repeated anchor");
-        anchor = parseCoord(expectBytes(token, "TextRun anchor").bytes);
-        break;
-      case 4: {
-        const flag = expectVarint(token, "TextRun tombstone flag").varint;
-        if (flag !== 1n) throw new Error(`TextRun tombstone flag has unexpected value ${flag}`);
-        tombstone = true;
-        break;
-      }
-      case 5:
-        sequence = Number(expectVarint(token, "TextRun sequence").varint);
-        break;
-      default:
-        throw new Error(`TextRun has unrecognized field ${token.fieldNumber}`);
-    }
-  }
-
-  if (!coord || length === undefined || !anchor) {
+function parseTextRun(run: GenTextRun): TextRun {
+  const coord = run.coord;
+  const anchor = run.anchor;
+  if (!coord || !anchor) {
     throw new Error("TextRun is missing coord, length, or anchor");
   }
-  return { coord, length, anchor, tombstone, sequence };
-}
-
-function parseCoord(bytes: Uint8Array): RunCoord {
-  const tokens = readProtoTokens(bytes);
-  if (tokens.length !== 2 || tokens[0]?.fieldNumber !== 1 || tokens[1]?.fieldNumber !== 2) {
-    throw new Error("Run coordinate does not have the expected {replica, clock} shape");
+  let tombstone = false;
+  if (isFieldSet(run, TOMBSTONE_FIELD)) {
+    if (run.tombstone !== 1) {
+      throw new Error(`TextRun tombstone flag has unexpected value ${run.tombstone}`);
+    }
+    tombstone = true;
   }
   return {
-    replica: Number(expectVarint(tokens[0], "coord replica").varint),
-    clock: Number(expectVarint(tokens[1], "coord clock").varint),
+    coord: { replica: coord.replica, clock: coord.clock },
+    length: run.length,
+    anchor: { replica: anchor.replica, clock: anchor.clock },
+    tombstone,
+    sequence: run.sequence,
   };
 }
 
-function parseReplicaTable(bytes: Uint8Array): ReplicaEntry[] {
-  return readProtoTokens(bytes).map((token) => {
-    if (token.fieldNumber !== 1) {
-      throw new Error(`Replica table has unrecognized field ${token.fieldNumber}`);
-    }
-    const entryTokens = readProtoTokens(expectBytes(token, "replica entry").bytes);
-    const [idToken, ...counterTokens] = entryTokens;
-    if (!idToken || idToken.fieldNumber !== 1 || idToken.wireType !== 2 || idToken.bytes.length !== 16) {
-      throw new Error("Replica entry does not start with a 16-byte UUID");
-    }
-    const counters = counterTokens.map((counterToken) => {
-      if (counterToken.fieldNumber !== 2) {
-        throw new Error(`Replica entry has unrecognized field ${counterToken.fieldNumber}`);
-      }
-      const inner = readProtoTokens(expectBytes(counterToken, "replica counter").bytes);
-      if (inner.length !== 1 || inner[0]?.fieldNumber !== 1) {
-        throw new Error("Replica counter does not have the expected single-varint shape");
-      }
-      return Number(expectVarint(inner[0], "replica counter value").varint);
-    });
-    return { id: idToken.bytes, counters };
-  });
-}
-
-function parseAttributeRun(bytes: Uint8Array): AttributeRun {
-  const tokens = readProtoTokens(bytes);
-  const [lengthToken, ...rest] = tokens;
-  if (!lengthToken || lengthToken.fieldNumber !== 1 || lengthToken.wireType !== 0) {
-    throw new Error("AttributeRun does not start with a length");
+function parseReplicaEntry(entry: GenReplicaEntry): ReplicaEntry {
+  if (entry.uuid.length !== 16) {
+    throw new Error("Replica entry does not start with a 16-byte UUID");
   }
-  if (rest.some((token) => token.fieldNumber === 1)) {
-    throw new Error("AttributeRun has a repeated length field");
-  }
-  return { length: Number(lengthToken.varint), rest };
+  return { id: entry.uuid, counters: entry.counter.map((counter) => counter.value) };
 }
 
 // --- encoding --------------------------------------------------------------
 
-function encodeRun(run: TextRun): Uint8Array {
-  const tokens: ProtoToken[] = [
-    bytesToken(1, encodeCoord(run.coord)),
-    varintToken(2, run.length),
-    bytesToken(3, encodeCoord(run.anchor)),
-  ];
-  if (run.tombstone) {
-    tokens.push(varintToken(4, 1));
-  }
-  if (run.sequence !== undefined) {
-    tokens.push(varintToken(5, run.sequence));
-  }
-  return encodeProtoTokens(tokens);
+function encodeTextRun(run: TextRun): GenTextRun {
+  return create(TextRunSchema, {
+    coord: create(CoordSchema, run.coord),
+    length: run.length,
+    anchor: create(CoordSchema, run.anchor),
+    // Zero/absent values are encoded explicitly (Apple's encoder does the
+    // same, and the round-trip gate depends on matching it) - so tombstone
+    // is only ever set (to literal 1) when true, left absent otherwise.
+    ...(run.tombstone ? { tombstone: 1 } : {}),
+    sequence: run.sequence,
+  });
 }
 
-function encodeCoord(coord: RunCoord): Uint8Array {
-  // Zero values are encoded explicitly (Apple's encoder does the same, and
-  // the round-trip gate depends on matching it).
-  return encodeProtoTokens([varintToken(1, coord.replica), varintToken(2, coord.clock)]);
-}
-
-function encodeReplicaTable(replicas: readonly ReplicaEntry[]): Uint8Array {
-  return encodeProtoTokens(
-    replicas.map((replica) =>
-      bytesToken(
-        1,
-        encodeProtoTokens([
-          bytesToken(1, replica.id),
-          ...replica.counters.map((counter) => bytesToken(2, encodeProtoTokens([varintToken(1, counter)]))),
-        ]),
-      ),
-    ),
-  );
+function encodeReplicaEntry(entry: ReplicaEntry): GenReplicaEntry {
+  return create(ReplicaEntrySchema, {
+    uuid: entry.id,
+    counter: entry.counters.map((value) => create(ReplicaCounterSchema, { value })),
+  });
 }
 
 // --- editing ---------------------------------------------------------------
@@ -433,7 +381,9 @@ function tombstoneVisibleRange(doc: NoteDocument, start: number, length: number)
   doc.runs = out;
 }
 
-/** A sub-range of `run` as its own run, with fresh coord/anchor objects. */
+/** A sub-range of `run` as its own run, with fresh coord/anchor objects.
+ * `sequence` is copied by reference - harmless, since `applyTextEdit` always
+ * finishes with `renumberSequences`, which replaces it outright. */
 function pieceOf(run: TextRun, offset: number, length: number, tombstone: boolean): TextRun {
   return {
     coord: { replica: run.coord.replica, clock: run.coord.clock + offset },
@@ -513,7 +463,7 @@ function insertVisibleText(doc: NoteDocument, start: number, text: string, repli
     // the caller's renumbering pass.
     anchor: { replica: replicaIndex, clock: 0 },
     tombstone: false,
-    sequence: undefined,
+    sequence: [],
   });
   replica.counters[0] = clock + text.length;
   return true;
@@ -557,7 +507,9 @@ function adjustAttributeRuns(doc: NoteDocument, start: number, deleteLength: num
     visible = runEnd;
     const overlap = Math.max(0, Math.min(end, runEnd) - Math.max(start, runStart));
     if (run.length - overlap > 0) {
-      out.push({ length: run.length - overlap, rest: run.rest });
+      const piece = clone(AttributeRunSchema, run);
+      piece.length = run.length - overlap;
+      out.push(piece);
     }
   }
   if (visible < end) {
@@ -586,7 +538,7 @@ function adjustAttributeRuns(doc: NoteDocument, start: number, deleteLength: num
       } else {
         // Every attribute run was consumed by the deletion (the note was
         // fully replaced): keep a single plain run covering the new text.
-        out.push({ length: insertLength, rest: [] });
+        out.push(create(AttributeRunSchema, { length: insertLength }));
       }
     }
   }
@@ -634,32 +586,6 @@ function isSentinel(run: TextRun): boolean {
 }
 
 // --- small shared helpers ---------------------------------------------------
-
-function singleBytesToken(tokens: ProtoToken[], fieldNumber: number, label: string): { bytes: Uint8Array } {
-  const matches = tokens.filter((token) => token.fieldNumber === fieldNumber);
-  if (matches.length !== 1) {
-    throw new Error(`Expected exactly one ${label} field, found ${matches.length}`);
-  }
-  return expectBytes(matches[0] as ProtoToken, label);
-}
-
-function replaceBytesToken(tokens: ProtoToken[], fieldNumber: number, bytes: Uint8Array): ProtoToken[] {
-  return tokens.map((token) => (token.fieldNumber === fieldNumber ? bytesToken(fieldNumber, bytes) : token));
-}
-
-function expectBytes(token: ProtoToken, label: string): { bytes: Uint8Array } {
-  if (token.wireType !== 2) {
-    throw new Error(`${label} is not a length-delimited field`);
-  }
-  return token;
-}
-
-function expectVarint(token: ProtoToken, label: string): { varint: bigint } {
-  if (token.wireType !== 0) {
-    throw new Error(`${label} is not a varint field`);
-  }
-  return token;
-}
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) {

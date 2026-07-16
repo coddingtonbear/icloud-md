@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { create, toBinary } from "@bufbuild/protobuf";
 import {
   applyTextEdit,
   computeSplice,
@@ -10,7 +11,7 @@ import {
   type NoteDocument,
   type TextRun,
 } from "./noteDocument.js";
-import { bytesToken, varintToken } from "./protobuf.js";
+import { AttributeRunSchema, DocumentSchema, NoteSchema, NoteStoreProtoSchema } from "./gen/notestore_pb.js";
 import { decodeNoteBodyText, compressNoteDocument } from "./noteText.js";
 
 const REPLICA_A = new Uint8Array(16).fill(0xaa);
@@ -20,7 +21,7 @@ const SENTINEL: TextRun = {
   length: 0,
   anchor: { replica: 0, clock: 0xffffffff },
   tombstone: false,
-  sequence: undefined,
+  sequence: [],
 };
 
 /**
@@ -31,8 +32,9 @@ const SENTINEL: TextRun = {
  */
 function makeDocument(text: string, runs: TextRun[], replicaClocks: number[]): NoteDocument {
   const doc: NoteDocument = {
-    rootTokens: [varintToken(1, 0), bytesToken(2, new Uint8Array())],
-    documentTokens: [varintToken(1, 0), varintToken(2, 0), bytesToken(3, new Uint8Array())],
+    rootUnknownField1: 0,
+    documentUnknownField1: 0,
+    documentVersion: 0,
     text,
     runs: [
       {
@@ -40,13 +42,13 @@ function makeDocument(text: string, runs: TextRun[], replicaClocks: number[]): N
         length: 0,
         anchor: { replica: 0, clock: 0 },
         tombstone: false,
-        sequence: 1,
+        sequence: [1],
       },
       ...runs,
       SENTINEL,
     ],
     replicas: [{ id: REPLICA_A, counters: [replicaClocks[0] ?? 0, 1] }],
-    attributeRuns: [{ length: text.length, rest: [] }],
+    attributeRuns: [create(AttributeRunSchema, { length: text.length })],
   };
   for (const clock of replicaClocks.slice(1)) {
     doc.replicas.push({ id: REPLICA_B, counters: [clock, 1] });
@@ -63,7 +65,7 @@ function simpleDocument(text: string): NoteDocument {
         length: text.length,
         anchor: { replica: 1, clock: 0 },
         tombstone: false,
-        sequence: 2,
+        sequence: [2],
       },
     ],
     [text.length],
@@ -97,7 +99,8 @@ test("parse/encode round-trips a synthetic document byte-for-byte", () => {
   assert.equal(reparsed.text, "Grocery list\nEggs\n");
   assert.equal(reparsed.runs.length, 3);
   assert.equal(reparsed.replicas.length, 1);
-  assert.deepEqual(reparsed.attributeRuns, [{ length: 18, rest: [] }]);
+  assert.equal(reparsed.attributeRuns.length, 1);
+  assert.equal(reparsed.attributeRuns[0]?.length, 18);
 });
 
 test("parsed document decodes to the same text noteText.ts sees", () => {
@@ -118,7 +121,8 @@ test("appending with our own replica extends our trailing run without adding a r
   // A pure extension is not a new edit event (matches the captured
   // append, which left the second counter alone).
   assert.equal(doc.replicas[0]?.counters[1], 1);
-  assert.deepEqual(doc.attributeRuns, [{ length: 11, rest: [] }]);
+  assert.equal(doc.attributeRuns.length, 1);
+  assert.equal(doc.attributeRuns[0]?.length, 11);
   assert.equal(visibleText(doc), "Hello there");
   assert.equal(reencodeAndDecode(doc), "Hello there");
 });
@@ -183,9 +187,9 @@ test("deletion spanning multiple runs tombstones each covered piece", () => {
   const doc = makeDocument(
     "aaabbbccc",
     [
-      { coord: { replica: 1, clock: 0 }, length: 3, anchor: { replica: 1, clock: 0 }, tombstone: false, sequence: 2 },
-      { coord: { replica: 2, clock: 0 }, length: 3, anchor: { replica: 2, clock: 0 }, tombstone: false, sequence: 3 },
-      { coord: { replica: 1, clock: 3 }, length: 3, anchor: { replica: 1, clock: 0 }, tombstone: false, sequence: 4 },
+      { coord: { replica: 1, clock: 0 }, length: 3, anchor: { replica: 1, clock: 0 }, tombstone: false, sequence: [2] },
+      { coord: { replica: 2, clock: 0 }, length: 3, anchor: { replica: 2, clock: 0 }, tombstone: false, sequence: [3] },
+      { coord: { replica: 1, clock: 3 }, length: 3, anchor: { replica: 1, clock: 0 }, tombstone: false, sequence: [4] },
     ],
     [6, 3],
   );
@@ -245,16 +249,26 @@ test("consecutive pushes from the same replica keep extending the same run", () 
   validateDocumentInvariants(doc);
 });
 
-test("a document with unexpected note fields is refused", () => {
+test("a document missing its replica table is refused", () => {
+  const message = create(NoteStoreProtoSchema, {
+    document: create(DocumentSchema, {
+      version: 0,
+      note: create(NoteSchema, { noteText: "hi" }), // no replicaTable set
+    }),
+  });
+  const raw = toBinary(NoteStoreProtoSchema, message);
+  assert.throws(() => parseNoteDocument(raw), /missing its replica table/);
+  assert.equal(noteDocumentRoundTrips(raw), false);
+});
+
+test("a note carrying an unrecognized field only fails if the round-trip actually breaks", () => {
+  // protobuf-es tolerates fields it doesn't recognize (preserved via its own
+  // unknown-field retention) rather than rejecting them up front - the
+  // round-trip byte comparison is what actually guards against silent data
+  // loss now (see file header / dev notes, 2026-07-15). A well-formed
+  // synthetic document with only known fields must still round-trip cleanly.
   const doc = simpleDocument("hi");
-  const encoded = encodeNoteDocument(doc);
-  // Append an unknown field 9 inside the Note message by rebuilding by hand.
-  const parsed = parseNoteDocument(encoded);
-  const mutated = {
-    ...parsed,
-    attributeRuns: [{ length: 2, rest: [varintToken(1, 7)] }],
-  };
-  assert.throws(() => encodeNoteDocument(mutated) && parseNoteDocument(encodeNoteDocument(mutated)), /repeated length/);
+  assert.equal(noteDocumentRoundTrips(encodeNoteDocument(doc)), true);
 });
 
 test("invariant validation rejects run lengths that disagree with the text", () => {
@@ -278,7 +292,7 @@ test("sequence numbers are renumbered to list order after an edit, like every ca
   const sequences = doc.runs.filter((run) => run.coord.clock !== 0xffffffff).map((run) => run.sequence);
   assert.deepEqual(
     sequences,
-    sequences.map((_, i) => i + 1),
+    sequences.map((_, i) => [i + 1]),
   );
 });
 
@@ -290,7 +304,7 @@ test("structural edits advance the event counter; the sentinel run never gets a 
   applyTextEdit(doc, "Hello world", { replicaId: REPLICA_A });
   assert.equal(doc.replicas[0]?.counters[1], 2);
 
-  assert.equal(doc.runs[doc.runs.length - 1]?.sequence, undefined);
+  assert.deepEqual(doc.runs[doc.runs.length - 1]?.sequence, []);
 });
 
 test("computeSplice finds minimal edits", () => {
