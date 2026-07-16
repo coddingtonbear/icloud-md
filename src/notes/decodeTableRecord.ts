@@ -80,6 +80,7 @@
 
 import { fromBinary, isFieldSet, toBinary } from "@bufbuild/protobuf";
 import { compressNoteDocument, decompressNoteDocument } from "./noteText.js";
+import type { MergeableDataPool } from "./mergeableDataPool.js";
 import {
   MergableDataProtoSchema,
   ObjectIDSchema,
@@ -96,16 +97,13 @@ const STRING_VALUE_FIELD = ObjectIDSchema.fields.find((f) => f.localName === "st
 /** A row/column identity object's `customMap.type` (confirmed via real captures). */
 export const IDENTITY_OBJECT_TYPE = 2;
 
-export interface TablePool {
-  /** Pool objects, addressed by index ("ref N" throughout). Same array
-   * reference as `TableDocument.message`'s - mutating this in place (never
-   * reassigning it) is what keeps `TableDocument.message` and `.objects`
-   * consistent through structural edits. */
-  objects: MergeableDataObjectEntry[];
-  keyNames: string[];
-  /** Same array-identity note as `objects` above. */
-  uuidTable: Uint8Array[];
-}
+/** Same shape as `mergeableDataPool.ts`'s generic `MergeableDataPool` - kept
+ * as its own name here since most of this file's own history predates that
+ * module, but it's the same type, not a parallel one. Every array is the
+ * same reference as `TableDocument.message`'s own fields - mutating in
+ * place (never reassigning) is what keeps `TableDocument.message` and this
+ * pool consistent through edits. */
+export type TablePool = MergeableDataPool;
 
 /** A parsed, editable table document: the full protobuf message (mutable in
  * place via `@bufbuild/protobuf`'s `create`), plus the three top-level pool
@@ -234,6 +232,7 @@ function poolFromMessage(message: MergableDataProto): TablePool {
     objects: data.mergeableDataObjectEntry,
     keyNames: data.mergeableDataObjectKeyItem,
     uuidTable: data.mergeableDataObjectUuidItem,
+    generationStamps: data.unknownField1,
   };
 }
 
@@ -362,8 +361,10 @@ function assertLeftToRight(pool: TablePool): void {
   throw new Error("Table is missing its column-direction marker");
 }
 
-/** Resolves a `customMap` object (field 13) into its key-name -> ObjectID pairs. */
-function parseDictByName(pool: TablePool, entry: MergeableDataObjectEntry, label: string): Map<string, ObjectID> {
+/** Resolves a `customMap` object (field 13) into its key-name -> ObjectID
+ * pairs. Exported for `tableEdit.ts`: rebuilding pool[0] from scratch needs
+ * to read its current `identity`/`crTableColumnDirection` entries first. */
+export function parseDictByName(pool: TablePool, entry: MergeableDataObjectEntry, label: string): Map<string, ObjectID> {
   const customMap = entry.customMap;
   if (!customMap) {
     throw new Error(`Expected ${label} to be a dict (field 13)`);
@@ -378,7 +379,7 @@ function parseDictByName(pool: TablePool, entry: MergeableDataObjectEntry, label
   return result;
 }
 
-function requireEntry(dict: Map<string, ObjectID>, key: string): ObjectID {
+export function requireEntry(dict: Map<string, ObjectID>, key: string): ObjectID {
   const value = dict.get(key);
   if (!value) {
     throw new Error(`Table object is missing expected key "${key}"`);

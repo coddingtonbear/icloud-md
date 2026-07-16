@@ -8,13 +8,11 @@
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { OBJECT_REPLACEMENT_CHARACTER } from "./noteAttachments.js";
 import {
-  encodeTableDocument,
   gridFromTableDocument,
   parseTableDocument,
   tableDocumentRoundTrips,
   type MarkdownTableBlock,
 } from "./decodeTableRecord.js";
-import { applyTableEdit, diffTableGrid } from "./tableEdit.js";
 
 /**
  * Un-splices each located table block back out of a locally-edited note's
@@ -39,26 +37,15 @@ export type TableAttachmentUpdateResult =
   | { ok: false; reason: string };
 
 /**
- * Builds the new `MergeableDataEncrypted` payload for one table attachment
- * record, applying the same pre/post round-trip discipline `push.ts`'s
- * plain-text path already uses for the Note record: the current remote
- * document must round-trip byte-for-byte through our model before we trust
- * ourselves to edit it, and the rebuilt document must decode back to
- * exactly the intended grid before it's trusted to push. `changed: false`
- * means the diff resolved to a no-op (surrounding prose changed but this
- * particular table didn't) - the caller should skip sending this record.
- *
- * Structural edits (row/column insert/delete) are refused below, not just
- * `unsupported` ones - a live incident (2026-07-15) showed the minimal-diff
- * `applyTableEdit`/`compactPool` machinery those plan kinds drive can
- * corrupt a real table in a way this project's own round-trip/decode
- * verification doesn't catch, because it's a real Apple client, not our own
- * decoder, that chokes on it. Cell-only edits reuse the same tombstone/
- * splice pattern the plain-text note path has trusted since 2026-07-13, so
- * they stay enabled. See the Obsidian dev log's "Table write engine
- * rewrite: wholesale rebuild instead of minimal-diff/patch" entry for the
- * planned fix - re-enable structural edits only once that lands and passes
- * its own staged live verification, not just once it's implemented.
+ * Checks whether one table attachment record's grid matches what's wanted
+ * locally - and refuses if it doesn't, rather than writing it. Table writes
+ * (via `tableEdit.ts`'s `buildFreshTableDocument` rebuild) are known-unsafe:
+ * they corrupted a live note during their own verification pass. See the
+ * Obsidian dev log's "Table write engine rewrite" investigation (Additional
+ * Investigation) and its 2026-07-16 addendum for the open root cause. Tables
+ * stay readable (via `clone`/`pull`) but not writable until that's fixed -
+ * `changed: false` means the grid already matches, so there's nothing to
+ * refuse or push; a genuine local edit is a hard refusal, not an attempt.
  */
 export function prepareTableAttachmentUpdate(record: CloudKitRecord, desiredGrid: string[][]): TableAttachmentUpdateResult {
   const field = record.fields.MergeableDataEncrypted;
@@ -71,34 +58,15 @@ export function prepareTableAttachmentUpdate(record: CloudKitRecord, desiredGrid
   }
 
   try {
-    const doc = parseTableDocument(compressed);
-    const currentGrid = gridFromTableDocument(doc);
-    const plan = diffTableGrid(currentGrid, desiredGrid);
-    if (plan.kind === "unsupported") {
-      return { ok: false, reason: plan.reason };
-    }
-    if (plan.kind === "noop") {
+    const currentGrid = gridFromTableDocument(parseTableDocument(compressed));
+    if (gridsEqual(currentGrid, desiredGrid)) {
       return { ok: true, changed: false, mergeableDataBase64: field.value };
     }
-    if (plan.kind !== "cellEdits") {
-      return {
-        ok: false,
-        reason:
-          "inserting or deleting table rows/columns is temporarily disabled after a live incident corrupted a table - " +
-          "only cell text edits are supported right now",
-      };
-    }
-
-    applyTableEdit(doc, plan);
-    const encoded = encodeTableDocument(doc);
-    if (!tableDocumentRoundTrips(encoded)) {
-      return { ok: false, reason: "rebuilt table document failed round-trip verification - refusing to push" };
-    }
-    const resultGrid = gridFromTableDocument(parseTableDocument(encoded));
-    if (!gridsEqual(resultGrid, desiredGrid)) {
-      return { ok: false, reason: "rebuilt table document failed decode verification - refusing to push" };
-    }
-    return { ok: true, changed: true, mergeableDataBase64: encoded.toString("base64") };
+    return {
+      ok: false,
+      reason:
+        "this table was edited locally, but table writes aren't safe yet (see the open table write-engine investigation) - this tool can currently only read tables, not push changes to them",
+    };
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
     return { ok: false, reason: message };

@@ -190,6 +190,28 @@ message ObjectID {
 message DictionaryElement {
   required ObjectID key = 1;
   required ObjectID value = 2;
+  // Not part of the cross-checked schema; found by exhaustively scanning
+  // every pool object's raw unknown fields while planning the table write
+  // engine rewrite, 2026-07-15 - every DictionaryElement in a table's pool
+  // (cellColumns, every row-map, both OrderedSets' `elements` dicts) carries
+  // this field. Decodes to an 8-byte record - standard nested-protobuf
+  // framing, a length-delimited field 1 wrapping a 3-field varint
+  // submessage `{0, N, 0}` - where N cross-references MergeableDataObjectData's
+  // own unknown_field_1 (a `repeated bytes` field whose single entry, in
+  // every real capture, is these same 8-byte records concatenated back to
+  // back: a per-document, append-only registry of every such stamp ever
+  // created). N increases monotonically across saves (confirmed via a real
+  // column-insert capture: the registry's running maximum jumped by exactly
+  // 2 and the new column's own entries were stamped with that new maximum).
+  // See the project's Obsidian dev log, "Table write engine rewrite:
+  // extracted the from-scratch template, found an undocumented
+  // generation-stamp mechanism" (2026-07-15T20:04, with a correction note
+  // added after an initial byte-counting error surfaced during
+  // implementation), for the full evidence trail. Declared as opaque bytes
+  // rather than a typed submessage - same reasoning as
+  // MergeableDataObjectEntry.unknown_message below: as a submessage, leaving
+  // it undeclared risks a future field being misread as its continuation.
+  optional bytes generation_stamp = 3;
 }
 
 message Dictionary {
