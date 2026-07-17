@@ -7,7 +7,8 @@
 
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { OBJECT_REPLACEMENT_CHARACTER } from "./noteAttachments.js";
-import { gridFromTableDocument, parseTableDocument, tableDocumentRoundTrips } from "./decodeTableRecord.js";
+import { encodeTableDocument, gridFromTableDocument, parseTableDocument, tableDocumentRoundTrips } from "./decodeTableRecord.js";
+import { applyTableEdit } from "./tableEdit.js";
 import type { MarkdownTableBlock } from "./markdownTable.js";
 
 /**
@@ -33,17 +34,23 @@ export type TableAttachmentUpdateResult =
   | { ok: false; reason: string };
 
 /**
- * Checks whether one table attachment record's grid matches what's wanted
- * locally - and refuses if it doesn't, rather than writing it. Table writes
- * (via `tableEdit.ts`'s `buildFreshTableDocument` rebuild) are known-unsafe:
- * they corrupted a live note during their own verification pass. See the
- * Obsidian dev log's "Table write engine rewrite" investigation (Additional
- * Investigation) and its 2026-07-16 addendum for the open root cause. Tables
- * stay readable (via `clone`/`pull`) but not writable until that's fixed -
- * `changed: false` means the grid already matches, so there's nothing to
- * refuse or push; a genuine local edit is a hard refusal, not an attempt.
+ * Diffs one table attachment record's grid against what's wanted locally
+ * and, when they differ, applies the edit through `tableEdit.ts`'s
+ * incremental engine (the corrected design from the table write-engine
+ * investigation, dev log 2026-07-16T16:31) under the same per-clone replica
+ * identity note-body edits use. Every write is triple-gated: the incoming
+ * bytes must pass the byte-for-byte round-trip gate (we refuse to edit a
+ * document our model didn't capture completely), the edited document must
+ * pass the structural-invariant checks and decode to exactly the desired
+ * grid (`applyTableEdit` enforces both), and the re-encoded bytes must
+ * round-trip too. Unsupported edit shapes (both axes changed at once,
+ * reorders, ...) are refused with the engine's reason, never guessed at.
  */
-export function prepareTableAttachmentUpdate(record: CloudKitRecord, desiredGrid: string[][]): TableAttachmentUpdateResult {
+export function prepareTableAttachmentUpdate(
+  record: CloudKitRecord,
+  desiredGrid: string[][],
+  replicaId: Uint8Array,
+): TableAttachmentUpdateResult {
   const field = record.fields.MergeableDataEncrypted;
   if (!field || typeof field.value !== "string") {
     return { ok: false, reason: "table attachment has no readable data" };
@@ -54,25 +61,17 @@ export function prepareTableAttachmentUpdate(record: CloudKitRecord, desiredGrid
   }
 
   try {
-    const currentGrid = gridFromTableDocument(parseTableDocument(compressed));
-    if (gridsEqual(currentGrid, desiredGrid)) {
+    const doc = parseTableDocument(compressed);
+    if (!applyTableEdit(doc, desiredGrid, replicaId)) {
       return { ok: true, changed: false, mergeableDataBase64: field.value };
     }
-    return {
-      ok: false,
-      reason:
-        "this table was edited locally, but table writes aren't safe yet (see the open table write-engine investigation) - this tool can currently only read tables, not push changes to them",
-    };
+    const encoded = encodeTableDocument(doc);
+    if (!tableDocumentRoundTrips(encoded)) {
+      return { ok: false, reason: "the edited table failed its own round-trip gate - refusing to write it" };
+    }
+    return { ok: true, changed: true, mergeableDataBase64: encoded.toString("base64") };
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
     return { ok: false, reason: message };
   }
-}
-
-function gridsEqual(a: readonly string[][], b: readonly string[][]): boolean {
-  return a.length === b.length && a.every((row, i) => rowEqual(row, b[i] ?? []));
-}
-
-function rowEqual(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((cell, i) => cell === b[i]);
 }

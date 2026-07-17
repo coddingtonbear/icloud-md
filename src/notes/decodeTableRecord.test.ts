@@ -7,7 +7,6 @@ import {
   tableDocumentRoundTrips,
   gridFromTableDocument,
 } from "./decodeTableRecord.js";
-import { buildFreshTableDocument } from "./tableEdit.js";
 import {
   TABLE_FIRST_REVISION,
   TABLE_FINAL_REVISION,
@@ -89,33 +88,8 @@ test("real revision 2ai (final state after every mined edit) decodes to the expe
   ]);
 });
 
-/**
- * The core write-path claim, verified against every one of the 9 real
- * transitions mined above: parse revision N as the "current" document,
- * `buildFreshTableDocument` it toward revision N+1's own grid (a real
- * user's own edit, reproduced through our model - not a hand-picked grid),
- * and the rebuilt result must decode back to *exactly* revision N+1's grid.
- * Also checks the rebuilt document round-trips through our own model again
- * (parse -> encode -> parse), the same discipline `push` requires before
- * trusting a rebuilt document enough to upload it. Unlike the old
- * incremental-patch write path, every transition here - including the ones
- * that add/remove rows or columns - goes through the exact same rebuild
- * function; there's no "kind" of edit for this loop to classify first.
- */
-for (let i = 1; i < TABLE_WRITE_PATH_REVISIONS.length; i += 1) {
-  const before = TABLE_WRITE_PATH_REVISIONS[i - 1]!;
-  const after = TABLE_WRITE_PATH_REVISIONS[i]!;
-  test(`rebuilding the real ${before.tag} document toward revision ${after.tag}'s grid reproduces it exactly`, () => {
-    const afterGrid = gridFromTableDocument(parseTableDocument(Buffer.from(after.base64, "base64")));
-
-    const doc = parseTableDocument(Buffer.from(before.base64, "base64"));
-    buildFreshTableDocument(doc, afterGrid);
-
-    assert.deepEqual(gridFromTableDocument(doc), afterGrid);
-
-    const encoded = encodeTableDocument(doc);
-    assert.equal(tableDocumentRoundTrips(encoded), true);
-    assert.deepEqual(gridFromTableDocument(parseTableDocument(encoded)), afterGrid);
-  });
-}
+// The write-path replay claim - "applying revision N+1's own grid to
+// revision N reproduces it" - lives in tableEdit.test.ts now, run through
+// the incremental engine that actually ships (the old from-scratch-rebuild
+// replay this file carried is gone with the rebuild itself).
 

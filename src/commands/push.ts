@@ -780,7 +780,7 @@ async function prepareTableCandidate(
       summary.conflicts.push(`${entry.file}: a table in this note no longer exists remotely - run "pull" to reconcile`);
       return undefined;
     }
-    const result = prepareTableAttachmentUpdate(attachmentRecord, block.grid);
+    const result = prepareTableAttachmentUpdate(attachmentRecord, block.grid, replicaId);
     if (!result.ok) {
       summary.refused.push(
         `${entry.file}: ${result.reason}. Run "icloud-notes restore ${entry.file}" to discard your local edit.`,

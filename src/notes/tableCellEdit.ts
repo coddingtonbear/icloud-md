@@ -1,37 +1,26 @@
 /**
- * Per-cell, identity-preserving text edits for a table's cell-text objects
+ * Per-cell, identity-preserving text edits for a table's mergeable strings
  * (`Document.DocObject.string`, the same `topotext.String` message field 10
- * used elsewhere - see `decodeTableRecord.ts`'s file header).
+ * used elsewhere - see `decodeTableRecord.ts`'s file header). The same
+ * splice/tombstone primitives also maintain an `OrderedSet`'s hidden
+ * per-character U+FFFC ordering mirror (`tableEdit.ts`), which is the same
+ * message type with the same run discipline.
  *
  * A cell's CRDT run history follows the exact same tombstone/splice
  * discipline as the top-level note body (`noteDocument.ts`), with one
  * structural difference confirmed against real captures (dev notes,
- * 2026-07-15T14:51): the per-replica clock table (`String.timestamp`, field
- * 4) is always absent, so there's no stored `{replica UUID -> table index}`
- * mapping and no `replica.counters[0]` to read a "next available clock" from
- * the way `noteDocument.ts`'s `insertVisibleText` does.
- *
- * Real captures always use replica index 1 for cell edits (there's only
- * ever one editor in scope), with each brand-new cell's first insertion
- * starting from whatever clock that specific real capture session's replica
- * 1 had *globally* reached across every cell in the table at that point -
- * evidence a save's clock numbering for a given replica is shared
- * document-wide, not reset per cell. This project's own edits use a
- * simpler, self-consistent alternative instead: always replica index 1,
- * with "next available clock" derived per the plan ("scanning the cell's
- * own run list for the max `coord.clock + length`") - i.e. *per-cell*
- * local numbering, restarting at 0 for a cell we've never touched. This
- * decodes identically (this project's own decode reads `note_text`
- * directly - see `decodeTableRecord.ts`'s `resolveCellText` - never
- * reconstructing visible text from run/clock history) and never collides
- * with a run this tool itself already wrote, which is all the safety
- * property actually requires; it just means a clock this tool assigns
- * isn't necessarily unique against clocks a *different* real editor may
- * have used elsewhere in the same table under the same replica index 1 -
- * an acceptable gap given the project's explicit "own round-trip, not
- * byte-identity with Apple's client" bar (decodeTableRecord.ts's file
- * header, finding 6) and the write path's still-pending live-push
- * verification (dev notes, 2026-07-15T14:51).
+ * 2026-07-15T14:51 and 2026-07-16T16:31): the per-string clock table
+ * (`String.timestamp`, field 4) is always absent. Instead, every mergeable
+ * string in one table - every cell and both ordering mirrors - draws its
+ * `CharID` clocks from one *document-global* per-replica sequence stored in
+ * `CRDT.Document.ttTimestamp`, and `CharID.replicaID` is a 1-based index
+ * into that table's `clock` entries (0 is the origin/sentinel
+ * pseudo-replica). Callers therefore supply a `TopotextClockSource` wired to
+ * the document's own clock table (see `tableEdit.ts`'s write session);
+ * nothing in this module invents clock numbering of its own. (The previous
+ * revision of this module borrowed replica index 1 with per-cell local
+ * numbering - the exact workaround the 2026-07-16T16:31 evidence pass
+ * existed to replace.)
  */
 
 import { create } from "@bufbuild/protobuf";
@@ -46,9 +35,20 @@ import {
 } from "./noteDocument.js";
 import { AttributeRunSchema, StringSchema, type String as GenString } from "./gen/topotext_pb.js";
 
-/** The replica index every edit this tool makes to a cell uses; see file header. */
-const CELL_REPLICA_INDEX = 1;
 const SENTINEL_CLOCK = 0xffffffff;
+
+/**
+ * A table document's shared topotext clock, scoped to one replica: the
+ * writing replica's 1-based `CharID.replicaID` and its next-available-clock
+ * counter (total UTF-16 units this replica has ever inserted anywhere in
+ * the document). `take` returns the first clock of a fresh `units`-unit run
+ * and advances the counter - `tableEdit.ts` backs this with the document's
+ * own `ttTimestamp` entry so the advance persists into the encoded document.
+ */
+export interface TopotextClockSource {
+  readonly replicaIndex: number;
+  take(units: number): number;
+}
 
 export interface TableCellDocument {
   text: string;
@@ -72,12 +72,12 @@ export function encodeCellDocument(doc: TableCellDocument): GenString {
   });
 }
 
-/** A brand-new cell, matching the minimal shape observed for a freshly
- * inserted (initially empty) cell in real captures: an origin run, an end
- * sentinel, and nothing else - `applyCellTextEdit` then handles giving it
- * real text if `text` is non-empty. */
-export function newCellDocument(text: string): TableCellDocument {
-  const doc: TableCellDocument = {
+/** A brand-new empty cell, matching the exact shape every real capture has
+ * for a freshly inserted cell (2026-07-16T16:31: an origin run, an end
+ * sentinel, no attribute runs, nothing else); `applyCellTextEdit` gives it
+ * real text under the caller's clock if the edit calls for any. */
+export function newCellDocument(): TableCellDocument {
+  return {
     text: "",
     runs: [
       { coord: { replica: 0, clock: 0 }, length: 0, anchor: { replica: 0, clock: 0 }, tombstone: false, sequence: [1] },
@@ -91,19 +91,15 @@ export function newCellDocument(text: string): TableCellDocument {
     ],
     attributeRuns: [],
   };
-  if (text.length > 0) {
-    applyCellTextEdit(doc, text);
-  }
-  return doc;
 }
 
 /**
  * Applies a plain-text edit to a cell in place, adapting
- * `noteDocument.ts`'s `applyTextEdit` splice/tombstone discipline - see file
- * header for how clock derivation differs. Returns false if the text is
- * unchanged (nothing to do).
+ * `noteDocument.ts`'s `applyTextEdit` splice/tombstone discipline with
+ * clocks drawn from the document-global source - see file header. Returns
+ * false if the text is unchanged (nothing to do).
  */
-export function applyCellTextEdit(cell: TableCellDocument, newText: string): boolean {
+export function applyCellTextEdit(cell: TableCellDocument, newText: string, clock: TopotextClockSource): boolean {
   const oldText = cell.text;
   if (oldText === newText) {
     return false;
@@ -116,7 +112,7 @@ export function applyCellTextEdit(cell: TableCellDocument, newText: string): boo
     tombstoneVisibleRange(cell, start, deleteLength);
   }
   if (insertText.length > 0) {
-    insertVisibleText(cell, start, insertText);
+    insertVisibleText(cell, start, insertText, clock);
   }
   adjustAttributeRuns(cell, start, deleteLength, insertText.length);
   renumberSequences(cell);
@@ -126,21 +122,17 @@ export function applyCellTextEdit(cell: TableCellDocument, newText: string): boo
   return true;
 }
 
-function nextClockFor(runs: readonly TextRun[]): number {
-  let max = 0;
-  for (const run of runs) {
-    if (isSentinel(run) || run.coord.replica !== CELL_REPLICA_INDEX) {
-      continue;
-    }
-    max = Math.max(max, run.coord.clock + run.length);
-  }
-  return max;
-}
-
 /** Marks the visible range [start, start+length) as tombstoned, splitting
  * runs where the range boundaries fall inside one - identical algorithm to
- * `noteDocument.ts`'s `tombstoneVisibleRange`, operating on a cell instead. */
-function tombstoneVisibleRange(cell: TableCellDocument, start: number, length: number): void {
+ * `noteDocument.ts`'s `tombstoneVisibleRange`, operating on a cell instead.
+ * `anchorOverride`, when given, is written as each newly tombstoned piece's
+ * anchor (`Substring.timestamp`): real captures rewrite an ordering
+ * mirror's deletion tombstones to `{replica, deletion-counter}`
+ * (2026-07-16T16:31) - cell-text tombstones keep their original anchor, so
+ * cell callers just omit it. Exported for `tableEdit.ts`'s mirror
+ * maintenance; does not touch `text`/attribute runs (`applyCellTextEdit`
+ * owns that for cells, the mirror helper owns it there). */
+export function tombstoneVisibleRange(cell: TableCellDocument, start: number, length: number, anchorOverride?: RunCoord): void {
   const end = start + length;
   const out: TextRun[] = [];
   let visible = 0;
@@ -164,7 +156,11 @@ function tombstoneVisibleRange(cell: TableCellDocument, start: number, length: n
     if (overlapStart > runStart) {
       out.push(pieceOf(run, 0, overlapStart - runStart, false));
     }
-    out.push(pieceOf(run, overlapStart - runStart, overlapEnd - overlapStart, true));
+    const tombstoned = pieceOf(run, overlapStart - runStart, overlapEnd - overlapStart, true);
+    if (anchorOverride) {
+      tombstoned.anchor = { replica: anchorOverride.replica, clock: anchorOverride.clock };
+    }
+    out.push(tombstoned);
     if (runEnd > overlapEnd) {
       out.push(pieceOf(run, overlapEnd - runStart, runEnd - overlapEnd, false));
     }
@@ -186,11 +182,15 @@ function pieceOf(run: TextRun, offset: number, length: number, tombstone: boolea
   };
 }
 
-/** Inserts `text` at visible position `start` under `CELL_REPLICA_INDEX`,
- * always as a new run (a cell edit is one splice per call - there's no
- * cross-call "our own trailing run" state worth tracking the way the
- * top-level note body's `insertVisibleText` does for consecutive saves). */
-function insertVisibleText(cell: TableCellDocument, start: number, text: string): void {
+/** Inserts `text` at visible position `start` as a new run under the
+ * caller's replica, drawing its clock range from the document-global
+ * source (a cell edit is one splice per call - there's no cross-call "our
+ * own trailing run" state worth tracking the way the top-level note body's
+ * `insertVisibleText` does for consecutive saves). Fresh runs anchor at
+ * `{ownReplica, 0}`, matching every captured insert. Exported for
+ * `tableEdit.ts`'s mirror maintenance - same `text`/attribute-run caveat as
+ * `tombstoneVisibleRange`. */
+export function insertVisibleText(cell: TableCellDocument, start: number, text: string, clock: TopotextClockSource): void {
   if (start > visibleLength(cell.runs)) {
     throw new Error("Cell insertion point is past the end of its visible text - CRDT model out of sync");
   }
@@ -223,18 +223,17 @@ function insertVisibleText(cell: TableCellDocument, start: number, text: string)
     insertIndex = i + 1;
   }
 
-  const clock = nextClockFor(cell.runs);
-  const coord: RunCoord = { replica: CELL_REPLICA_INDEX, clock };
+  const coord: RunCoord = { replica: clock.replicaIndex, clock: clock.take(text.length) };
   cell.runs.splice(insertIndex, 0, {
     coord,
     length: text.length,
-    anchor: { replica: CELL_REPLICA_INDEX, clock: 0 },
+    anchor: { replica: clock.replicaIndex, clock: 0 },
     tombstone: false,
     sequence: [],
   });
 }
 
-function visibleLength(runs: readonly TextRun[]): number {
+export function visibleLength(runs: readonly TextRun[]): number {
   let total = 0;
   for (const run of runs) {
     if (!run.tombstone) {
@@ -244,7 +243,9 @@ function visibleLength(runs: readonly TextRun[]): number {
   return total;
 }
 
-/** Identical algorithm to `noteDocument.ts`'s `adjustAttributeRuns`. */
+/** Identical algorithm to `noteDocument.ts`'s `adjustAttributeRuns`. A
+ * previously-empty cell gains a single `{length}` attribute run, the exact
+ * shape Apple's own cell fills produce (2026-07-16T16:31 capture). */
 function adjustAttributeRuns(cell: TableCellDocument, start: number, deleteLength: number, insertLength: number): void {
   const end = start + deleteLength;
   const out: AttributeRun[] = [];
@@ -287,7 +288,10 @@ function adjustAttributeRuns(cell: TableCellDocument, start: number, deleteLengt
   cell.attributeRuns = out;
 }
 
-function renumberSequences(cell: TableCellDocument): void {
+/** Renumbers every non-sentinel run's `child` link 1..N in run order, the
+ * pattern every captured save shows after any splice. Exported for
+ * `tableEdit.ts`'s mirror maintenance. */
+export function renumberSequences(cell: TableCellDocument): void {
   let sequence = 1;
   for (const run of cell.runs) {
     if (isSentinel(run)) {

@@ -34,36 +34,36 @@
  * the ordered `{attachmentIndex (redundant, ignored on read), contents (a
  * 16-byte identity UUID)}` entries, list position = visual position; its
  * `.contents` is a hidden per-character CRDT mirror of that same list (one
- * U+FFFC per entry) that Apple's own client apparently uses for
- * concurrent-insert merge resolution - this project's editing operations
- * deliberately don't maintain it (see `tableEdit.ts`): our own decode never
- * reads it, so it has no effect on our round-trip guarantee, only a
- * theoretical effect on how gracefully a real Apple client would later merge
- * concurrent edits against a row/column this tool added or removed - flagged
- * as a known limitation for the live-push verification the write path still
- * needs (dev notes, 2026-07-15T14:51).
- * `.array.dictionary` is a translation/redirect `Dictionary` resolving
- * stale/duplicate identities from concurrent edits onto their canonical
- * counterpart - not an order signal itself, and never populated for
- * rows/columns this tool creates (see `tableEdit.ts`).
+ * U+FFFC per entry) that Apple's client uses for concurrent-insert merge
+ * resolution - our own decode never reads it (position comes from
+ * `attachments` order), but every edit `tableEdit.ts` makes maintains it by
+ * real topotext splice, because *not* maintaining it is exactly what
+ * corrupted a live table under the first write-path design (dev notes,
+ * 2026-07-15T21:54 and 2026-07-16T16:31).
+ * `.array.dictionary` is the identity-redirect `Dictionary` permanently
+ * joining each entry's *ordering* identity to its *content* identity (see
+ * the identity-pair paragraph below) - not an order signal itself, though
+ * `computePositions` follows it so stale references resolve.
  * `.set` (of `OrderedSet` itself) is a `Dictionary` of trivial
  * `{key: ref, value: ref}` self-pairs, one per live `attachments` entry
- * (confirmed via real captures) - bookkeeping this project's decode never
- * reads either, but cheap enough to keep in sync on every structural edit,
- * so `tableEdit.ts` does.
+ * (confirmed via real captures) - membership bookkeeping this project's
+ * decode never reads, kept in sync on every structural edit by
+ * `tableEdit.ts`.
  *
  * A row/column identity object is a `custom` object (`type` 2, confirmed via
  * real captures) with exactly one entry, key `UUIDIndex`, value a plain
  * inline number (`ObjectID.unsignedIntegerValue`) - the index into the
  * document-level UUID table. This value, not the object's own pool position,
- * is the join key used everywhere below. Real captures pair each row/column
- * with a second, otherwise-identical identity object plus a redirect entry
- * in `.array.dictionary` (never both referenced by the same live position -
- * apparently residue from Apple's own concurrent-edit history); this
- * project's own inserts create a single identity object and no redirect,
- * which decodes identically and needs no such pairing to be self-consistent
- * (see `tableEdit.ts` and the file's write-path dev note for why: the bar is
- * our own round-trip, not byte-identity with Apple's encoder).
+ * is the join key used everywhere below. Every row/column is born as an
+ * identity *pair* - an ordering identity (listed in `attachments`,
+ * self-paired in `set`) and a content identity (keying `cellColumns`/
+ * row-map entries), joined by a `.array.dictionary` redirect entry - a
+ * structural fact of the format from the literal first save, not
+ * concurrent-edit residue as this file's earlier revisions guessed (dev
+ * notes 2026-07-16T16:31); `tableEdit.ts`'s inserts mint real pairs
+ * accordingly. Deletion retains both identity objects and the redirect
+ * forever, which is why long-lived tables carry identities no live position
+ * references.
  *
  * `cellColumns` is a `dictionary` (field 6), repeated `Dictionary.Element
  * {key: ref to a column identity object, value: ref to that column's
@@ -99,8 +99,9 @@ export const OBJECT_INDEX_FIELD = ObjectIDSchema.fields.find((f) => f.localName 
 export const UNSIGNED_INTEGER_VALUE_FIELD = ObjectIDSchema.fields.find((f) => f.localName === "unsignedIntegerValue")!;
 const STRING_VALUE_FIELD = ObjectIDSchema.fields.find((f) => f.localName === "stringValue")!;
 
-/** A row/column identity object's `customMap.type` (confirmed via real captures). */
-export const IDENTITY_OBJECT_TYPE = 2;
+// (A row/column identity object's `custom.type` is `typeItem`'s
+// "com.apple.CRDT.NSUUID" entry - index 2 in every capture; `tableEdit.ts`
+// looks it up by name when minting identities.)
 
 /** Same shape as `mergeableDataPool.ts`'s generic `MergeableDataPool` - kept
  * as its own name here since most of this file's own history predates that
