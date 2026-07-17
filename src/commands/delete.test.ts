@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { writeBaseCopy } from "../notes/baseCopy.js";
 import { writeCloneState, type CloneState } from "../notes/cloneState.js";
-import { UntrackedFileError } from "../errors.js";
+import { NoteHasAttachmentsError, UntrackedFileError } from "../errors.js";
 import { applyLocalNoteDeletion, runDelete } from "./delete.js";
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
@@ -41,6 +41,25 @@ test("runDelete refuses a file that isn't a tracked note, without touching the n
   withTempDir(async (dir) => {
     await writeCloneState(dir, state());
     await assert.rejects(() => runDelete(dir, "Nonexistent.md"), UntrackedFileError);
+  }));
+
+// state() has no `account` - if either of these reached resolveFolderAccount
+// it would throw UnboundAccountError instead, proving CloudKit's
+// VALIDATING_REFERENCE_ERROR (confirmed live 2026-07-16: forceDelete refuses
+// a Note that still has an Attachment record pointing at it) is caught
+// locally, before any network round-trip.
+test("runDelete refuses locally when the note has a tracked (regular) attachment", () =>
+  withTempDir(async (dir) => {
+    await writeCloneState(dir, state());
+    await assert.rejects(() => runDelete(dir, "Test Note.md"), NoteHasAttachmentsError);
+  }));
+
+test("runDelete refuses locally when the note has a tracked table attachment", () =>
+  withTempDir(async (dir) => {
+    const s = state();
+    s.attachments = {};
+    await writeCloneState(dir, s);
+    await assert.rejects(() => runDelete(dir, "Test Note.md"), NoteHasAttachmentsError);
   }));
 
 test("applyLocalNoteDeletion removes a clean local file and drops all tracking for the note", () =>

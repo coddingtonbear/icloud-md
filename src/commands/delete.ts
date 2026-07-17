@@ -5,10 +5,10 @@ import { deleteNoteRecord, lookupRecords } from "../cloudkit/databaseClient.js";
 import { removeAttachmentsForNote, removeTableAttachmentsForNote } from "../notes/attachmentSync.js";
 import { removeBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
-import { NoteDeleteRejectedError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
+import { NoteDeleteRejectedError, NoteHasAttachmentsError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { isEnoent } from "../fsUtil.js";
 import { localFileState, type LocalFileState } from "../notes/localFileState.js";
-import { resolveTrackedNote } from "../notes/trackedFile.js";
+import { noteHasTrackedAttachments, resolveTrackedNote } from "../notes/trackedFile.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 
@@ -34,6 +34,9 @@ export async function runDelete(targetDir: string, fileArg: string, options: Del
   }
 
   const { recordName, entry } = resolveTrackedNote(state, fileArg, targetDir);
+  if (noteHasTrackedAttachments(state, recordName)) {
+    throw new NoteHasAttachmentsError(entry.file);
+  }
 
   const auth = await resolveFolderAccount(targetDir, state.account, { onStatus: options.onLoginStatus });
   if (!auth.ckdatabasewsUrl) {

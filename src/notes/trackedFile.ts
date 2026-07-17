@@ -30,6 +30,24 @@ export function historyRecordNames(state: CloneState, recordName: string): strin
   return [recordName, ...tableRecordNames];
 }
 
+/**
+ * Whether this note has at least one attachment (regular or table) tracked
+ * in local state - as of 2026-07-16, the signal `delete`/`push` use to
+ * refuse deleting a note locally rather than let CloudKit reject it with a
+ * raw `VALIDATING_REFERENCE_ERROR`: `forceDelete` on a Note record fails
+ * whenever an Attachment record still references it, table or otherwise
+ * (confirmed live against both cases).
+ */
+export function noteHasTrackedAttachments(state: CloneState, recordName: string): boolean {
+  const hasAttachment = Object.values(state.attachments ?? {}).some(
+    (attachment) => attachment.noteRecordName === recordName,
+  );
+  const hasTableAttachment = Object.values(state.tableAttachments ?? {}).some(
+    (attachment) => attachment.noteRecordName === recordName,
+  );
+  return hasAttachment || hasTableAttachment;
+}
+
 /** Finds a snapshot by id across a set of recordNames (a note's own history
  * plus its table attachments'), for `diff`/`revert`. Throws
  * `UnknownVersionSnapshotError` if no recorded snapshot matches - `fileArg`

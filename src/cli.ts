@@ -12,6 +12,7 @@ import { runPull, type PullSummary } from "./commands/pull.js";
 import { runPush } from "./commands/push.js";
 import { runRestore } from "./commands/restore.js";
 import { runRevert } from "./commands/revert.js";
+import { runStatus } from "./commands/status.js";
 import { IcloudNotesSyncError, NotClonedDirectoryError } from "./errors.js";
 import { recordLastError } from "./lastError.js";
 import { readCloneState } from "./notes/cloneState.js";
@@ -141,6 +142,15 @@ async function push(args: string[]): Promise<void> {
     dryRun: flags.includes("--dry-run"),
     onLoginStatus: (message) => console.log(message),
   });
+}
+
+async function status(args: string[]): Promise<void> {
+  if (args.length > 1) {
+    console.error("Usage: icloud-notes status [directory]");
+    process.exitCode = 1;
+    return;
+  }
+  await runStatus(args[0] ?? ".", { onLoginStatus: (message) => console.log(message) });
 }
 
 async function restore(args: string[]): Promise<void> {
@@ -287,6 +297,9 @@ async function main(): Promise<void> {
       case "push":
         await push(rest);
         return;
+      case "status":
+        await status(rest);
+        return;
       case "restore":
         await restore(rest);
         return;
@@ -312,8 +325,11 @@ async function main(): Promise<void> {
             "  clone <directory>     Fetch all Notes into a fresh local directory; signs in via a browser window " +
             "the first time a directory (or a new account) is used\n" +
             "  pull [directory]      Fetch changes since the last clone/pull (defaults to the current directory)\n" +
-            "  push [directory]      Upload locally edited notes (--dry-run to preview); a note changed remotely is " +
-            "merged (conflict markers if needed) instead of overwritten\n" +
+            "  push [directory]      Reconcile local disk state up to iCloud: uploads edited notes, deletes notes " +
+            "whose file was removed locally, and merges in remote changes to a note edited both places (--dry-run " +
+            'to preview). Run "status" first to see exactly what push will do, including anything it would refuse.\n' +
+            "  status [directory]    Preview exactly what the next push will do - creates, deletes, changes, and " +
+            "any refusals - using the same live check push --dry-run performs (requires signing in)\n" +
             "  restore <file> [directory]  Discard a tracked note's local edits, reverting it to the last synced copy\n" +
             "  delete <file> [directory]  Delete a tracked note from iCloud (a real remote write, no confirmation prompt) " +
             "and stop tracking it locally; a locally-edited copy is kept on disk (untracked) rather than discarded\n" +

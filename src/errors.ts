@@ -190,6 +190,23 @@ export class NoteDeleteRejectedError extends IcloudNotesSyncError {
   }
 }
 
+/**
+ * CloudKit refuses `forceDelete` on a Note record that still has an
+ * Attachment record referencing it (regular or table) - confirmed live
+ * 2026-07-16, `records/modify` rejects with `VALIDATING_REFERENCE_ERROR`
+ * citing the attachment's own recordName. Caught locally (from state.json's
+ * own attachment tracking) so the user sees this instead of that raw
+ * server error.
+ */
+export class NoteHasAttachmentsError extends IcloudNotesSyncError {
+  constructor(fileName: string) {
+    super(
+      `Can't delete "${fileName}": it still has an attachment, and CloudKit refuses to delete a note that does.`,
+      { hint: "Remove the attachment in Notes first, or delete the note directly there." },
+    );
+  }
+}
+
 /** `diff`/`revert` couldn't read the content needed on one side of the
  * comparison (or write-back) - the target record vanished remotely, is no
  * longer in a readable state, or a historical snapshot no longer decodes
