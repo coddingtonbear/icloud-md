@@ -1,7 +1,9 @@
 import chalk from "chalk";
 
-/** Which of the three ways a local file can differ from `state.json` this entry represents. */
-export type PlanEntryKind = "create" | "update" | "delete";
+/** Which of the ways a local file can differ from `state.json` this entry
+ * represents. "move" is a locally-relocated tracked note (detected by
+ * pairing a missing tracked file with an untracked one - see push.ts). */
+export type PlanEntryKind = "create" | "update" | "delete" | "move";
 
 /**
  * "noop" covers both a clean tracked file (nothing to do) and a "modified"
@@ -18,9 +20,12 @@ export interface PlanEntry {
   resolution: PlanResolution;
   /** Required for "refused"/"conflict"; ignored otherwise. */
   reason?: string;
+  /** kind "move" only: the vault-root-relative path the note was tracked
+   * at before the local move. */
+  previousFile?: string;
 }
 
-const LABELS: Record<PlanEntryKind, (file: string) => string> = {
+const LABELS: Record<Exclude<PlanEntryKind, "move">, (file: string) => string> = {
   create: (file) => chalk.green(`new file:   ${file}`),
   update: (file) => chalk.yellow(`modified:   ${file}`),
   delete: (file) => chalk.red(`deleted:    ${file}`),
@@ -51,11 +56,16 @@ export function renderPlan(entries: readonly PlanEntry[], formatPath: (file: str
   let toCreate = 0;
   let toUpdate = 0;
   let toDelete = 0;
+  let toMove = 0;
   let refused = 0;
   let conflicts = 0;
 
   for (const entry of visible) {
-    lines.push(LABELS[entry.kind](formatPath(entry.file)));
+    lines.push(
+      entry.kind === "move"
+        ? chalk.cyan(`moved:      ${formatPath(entry.previousFile ?? entry.file)} -> ${formatPath(entry.file)}`)
+        : LABELS[entry.kind](formatPath(entry.file)),
+    );
     if (entry.resolution === "refused" || entry.resolution === "conflict") {
       const reason = (entry.reason ?? "refused").split(entry.file).join(formatPath(entry.file));
       lines.push(chalk.magenta(`  ! ${reason}`));
@@ -70,12 +80,14 @@ export function renderPlan(entries: readonly PlanEntry[], formatPath: (file: str
       toCreate += 1;
     } else if (entry.kind === "update") {
       toUpdate += 1;
+    } else if (entry.kind === "move") {
+      toMove += 1;
     } else {
       toDelete += 1;
     }
   }
 
-  let summary = `${toCreate} to create, ${toUpdate} changed, ${toDelete} to delete.`;
+  let summary = `${toCreate} to create, ${toUpdate} changed, ${toDelete} to delete${toMove > 0 ? `, ${toMove} to move` : ""}.`;
   if (conflicts > 0 || refused > 0) {
     const parts: string[] = [];
     if (conflicts > 0) {

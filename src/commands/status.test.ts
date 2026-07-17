@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { writeCloneState } from "../notes/cloneState.js";
@@ -51,8 +51,13 @@ test("runStatus renders \"Nothing to push.\" for an already-clean, untracked-fil
 
 test("runStatus renders an untracked file's local refusal exactly like push --dry-run would, without needing a bound account", () =>
   withTempDir(async (dir) => {
-    await writeCloneState(dir, { syncToken: "token", notes: {} });
-    await writeFile(path.join(dir, "Empty Note.md"), "", "utf-8");
+    await writeCloneState(dir, {
+      syncToken: "token",
+      notes: {},
+      folders: { "DefaultFolder-CloudKit": { name: "Notes", dirName: "Notes" } },
+    });
+    await mkdir(path.join(dir, "Notes"), { recursive: true });
+    await writeFile(path.join(dir, "Notes", "Empty Note.md"), "", "utf-8");
 
     const { lines, restore } = captureLogs();
     try {
@@ -69,8 +74,13 @@ test("runStatus renders an untracked file's local refusal exactly like push --dr
 
 test("runStatus requires the same live check push does for a creatable untracked file - reaches the network and fails without a bound account", () =>
   withTempDir(async (dir) => {
-    await writeCloneState(dir, { syncToken: "token", notes: {} });
-    await writeFile(path.join(dir, "New Note.md"), "Hello", "utf-8");
+    await writeCloneState(dir, {
+      syncToken: "token",
+      notes: {},
+      folders: { "DefaultFolder-CloudKit": { name: "Notes", dirName: "Notes" } },
+    });
+    await mkdir(path.join(dir, "Notes"), { recursive: true });
+    await writeFile(path.join(dir, "Notes", "New Note.md"), "Hello", "utf-8");
 
     await assert.rejects(() => runStatus(dir), UnboundAccountError);
   }));

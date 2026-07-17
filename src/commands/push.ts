@@ -16,7 +16,8 @@ import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
 import { classifyNoteRecord, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
-import { buildNoteCreateFields, buildNoteTrashFields, buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
+import { buildNoteCreateFields, buildNoteMoveFields, buildNoteTrashFields, buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
+import { noteDirOf, stateDirIndex } from "../notes/folderLayout.js";
 import { findMarkdownTableBlocks } from "../notes/markdownTable.js";
 import { isEnoent } from "../fsUtil.js";
 import { mergeNoteVersions } from "../notes/mergeConflict.js";
@@ -110,49 +111,15 @@ export async function buildPushPlan(
   }
 
   const entries: ExecutablePlanEntry[] = [];
+  const dirIndex = stateDirIndex(state);
 
-  // An untracked file passes the same local refusal gates a modified one
-  // does - a brand-new file containing conflict markers or unparseable
-  // content is just as unsendable as an edited one containing them.
-  const createCandidates: { file: string; localText: string }[] = [];
-  for (const file of await listUntrackedTopLevelMarkdownFiles(targetDir, state)) {
-    const localText = await readFile(path.join(targetDir, file), "utf-8");
-    if (localText === "") {
-      entries.push({ kind: "create", file, resolution: "refused", reason: "the file is empty - nothing to create" });
-      continue;
-    }
-    if (hasConflictMarkers(localText)) {
-      entries.push({
-        kind: "create",
-        file,
-        resolution: "refused",
-        reason: "still contains diff3 conflict markers - resolve them before pushing",
-      });
-      continue;
-    }
-    if (hasUnknownContentMarker(localText)) {
-      entries.push({
-        kind: "create",
-        file,
-        resolution: "refused",
-        reason: "this file contains the unknown-content banner - remove it before pushing",
-      });
-      continue;
-    }
-    if (hasAttachmentReference(localText)) {
-      entries.push({
-        kind: "create",
-        file,
-        resolution: "refused",
-        reason: 'contains an "attachments/..." reference, but this tool can\'t upload new attachments - remove it first.',
-      });
-      continue;
-    }
-    createCandidates.push({ file, localText });
+  const untracked: { file: string; localText: string }[] = [];
+  for (const file of await listUntrackedMarkdownFiles(targetDir, state)) {
+    untracked.push({ file, localText: await readFile(path.join(targetDir, file), "utf-8") });
   }
 
   const updateCandidates: PushCandidate[] = [];
-  const deleteCandidates: { recordName: string; entry: CloneStateNoteEntry }[] = [];
+  const missingCandidates: { recordName: string; entry: CloneStateNoteEntry }[] = [];
 
   for (const [recordName, entry] of Object.entries(state.notes)) {
     const fileState = await localFileState(targetDir, entry, recordName);
@@ -160,7 +127,7 @@ export async function buildPushPlan(
       continue;
     }
     if (fileState === "missing") {
-      deleteCandidates.push({ recordName, entry });
+      missingCandidates.push({ recordName, entry });
       continue;
     }
 
@@ -228,7 +195,171 @@ export async function buildPushPlan(
     updateCandidates.push({ recordName, entry, localText });
   }
 
-  if (updateCandidates.length === 0 && deleteCandidates.length === 0 && createCandidates.length === 0) {
+  // --- Local-move pairing: a missing tracked file plus an untracked one
+  // may be the same note, moved by hand. Exact base-copy content equality
+  // is the strong signal (a moved-but-unedited note); a unique basename
+  // match catches a moved-and-edited one, but only when it's unambiguous
+  // on both sides. Everything paired here becomes a Folder-reference move
+  // instead of the delete + create the two halves would otherwise read as.
+  // Own notes only - shared notes' write path is refused anyway.
+  const movePairs: Array<{ recordName: string; entry: CloneStateNoteEntry; toFile: string }> = [];
+  const claimedByMove = new Set<string>();
+  {
+    const pairable = missingCandidates.filter((candidate) => candidate.entry.sharedZoneOwner === undefined);
+    for (const candidate of pairable) {
+      const base = await readBaseCopy(targetDir, candidate.recordName);
+      if (base === undefined) {
+        continue;
+      }
+      const match = untracked.find((file) => !claimedByMove.has(file.file) && file.localText === base);
+      if (match) {
+        movePairs.push({ recordName: candidate.recordName, entry: candidate.entry, toFile: match.file });
+        claimedByMove.add(match.file);
+      }
+    }
+    const unpaired = pairable.filter((candidate) => !movePairs.some((pair) => pair.recordName === candidate.recordName));
+    for (const candidate of unpaired) {
+      const baseName = path.posix.basename(candidate.entry.file);
+      const files = untracked.filter((file) => !claimedByMove.has(file.file) && path.posix.basename(file.file) === baseName);
+      const rivals = unpaired.filter((other) => path.posix.basename(other.entry.file) === baseName);
+      const file = files[0];
+      if (files.length === 1 && rivals.length === 1 && file) {
+        movePairs.push({ recordName: candidate.recordName, entry: candidate.entry, toFile: file.file });
+        claimedByMove.add(file.file);
+      }
+    }
+  }
+  const deleteCandidates = missingCandidates.filter(
+    (candidate) => !movePairs.some((pair) => pair.recordName === candidate.recordName),
+  );
+
+  // Classify each pair's target locally; only moves into a real own folder
+  // ever need the network. Everything else resolves to a refusal right
+  // here, so `status` can show it without a login.
+  const readyMovePairs: Array<{ recordName: string; entry: CloneStateNoteEntry; toFile: string; folderRecordName: string }> = [];
+  for (const pair of movePairs) {
+    const toDir = noteDirOf(pair.toFile);
+    const info = dirIndex.get(toDir);
+    const base: ExecutablePlanEntry = { kind: "move", file: pair.toFile, previousFile: pair.entry.file, resolution: "refused" };
+
+    if (toDir === "") {
+      entries.push({
+        ...base,
+        reason: "moved to the top level of the clone, but every note lives in a folder - move it into a folder directory",
+      });
+      continue;
+    }
+    if (!info) {
+      entries.push({
+        ...base,
+        reason:
+          `moved into "${toDir}/", which isn't one of the account's folders - creating folders isn't supported yet; ` +
+          "create the folder in Notes, pull, then move the file into it",
+      });
+      continue;
+    }
+    if (info.kind === "sharerHome" || info.sharedZoneOwner !== undefined) {
+      entries.push({ ...base, reason: "moved into a sharer's area - notes can't be moved into someone else's share" });
+      continue;
+    }
+    const hasTrackedAttachments = Object.values(state.attachments ?? {}).some(
+      (attachment) => attachment.noteRecordName === pair.recordName,
+    );
+    if (hasTrackedAttachments) {
+      entries.push({
+        ...base,
+        reason:
+          "this note has attachments, whose files can't be relocated safely yet - move it back " +
+          "(or move the note in Notes and pull instead)",
+      });
+      continue;
+    }
+    readyMovePairs.push({ ...pair, folderRecordName: info.folderRecordName as string });
+  }
+
+  // --- Classify the remaining untracked files by where they sit. Every
+  // note must live in a folder directory the account actually has; an
+  // untracked file passes the same local refusal gates a modified one does
+  // - a brand-new file containing conflict markers or unparseable content
+  // is just as unsendable as an edited one containing them.
+  const createCandidates: { file: string; localText: string; folderRecordName: string }[] = [];
+  for (const { file, localText } of untracked) {
+    if (claimedByMove.has(file)) {
+      continue;
+    }
+    const dir = noteDirOf(file);
+    const info = dirIndex.get(dir);
+    if (dir === "") {
+      entries.push({
+        kind: "create",
+        file,
+        resolution: "refused",
+        reason:
+          "sits at the top level of the clone, outside any folder - every note lives in a folder, " +
+          "so move it into one of the folder directories first",
+      });
+      continue;
+    }
+    if (!info) {
+      entries.push({
+        kind: "create",
+        file,
+        resolution: "refused",
+        reason:
+          `sits in "${dir}/", which isn't one of the account's folders - creating folders isn't supported yet; ` +
+          "create the folder in Notes, pull, then move the file into it",
+      });
+      continue;
+    }
+    if (info.kind === "sharerHome" || info.sharedZoneOwner !== undefined) {
+      entries.push({
+        kind: "create",
+        file,
+        resolution: "refused",
+        reason: "sits inside a sharer's area - creating notes in someone else's share isn't supported",
+      });
+      continue;
+    }
+    if (localText === "") {
+      entries.push({ kind: "create", file, resolution: "refused", reason: "the file is empty - nothing to create" });
+      continue;
+    }
+    if (hasConflictMarkers(localText)) {
+      entries.push({
+        kind: "create",
+        file,
+        resolution: "refused",
+        reason: "still contains diff3 conflict markers - resolve them before pushing",
+      });
+      continue;
+    }
+    if (hasUnknownContentMarker(localText)) {
+      entries.push({
+        kind: "create",
+        file,
+        resolution: "refused",
+        reason: "this file contains the unknown-content banner - remove it before pushing",
+      });
+      continue;
+    }
+    if (hasAttachmentReference(localText)) {
+      entries.push({
+        kind: "create",
+        file,
+        resolution: "refused",
+        reason: 'contains an "attachments/..." reference, but this tool can\'t upload new attachments - remove it first.',
+      });
+      continue;
+    }
+    createCandidates.push({ file, localText, folderRecordName: info.folderRecordName as string });
+  }
+
+  if (
+    updateCandidates.length === 0 &&
+    deleteCandidates.length === 0 &&
+    createCandidates.length === 0 &&
+    readyMovePairs.length === 0
+  ) {
     return { state, entries };
   }
 
@@ -245,8 +376,53 @@ export async function buildPushPlan(
   const records = await lookupRecords(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, [
     ...updateCandidates.map((candidate) => candidate.recordName),
     ...deleteCandidates.map((candidate) => candidate.recordName),
+    ...readyMovePairs.map((pair) => pair.recordName),
   ]);
   const recordsByName = new Map(records.map((record) => [record.recordName, record]));
+
+  // --- Local moves: push a Folder-reference update - the exact write shape
+  // trash-move deletion already uses live, pointed at a real folder.
+  for (const pair of readyMovePairs) {
+    const base: ExecutablePlanEntry = { kind: "move", file: pair.toFile, previousFile: pair.entry.file, resolution: "refused" };
+    const record = recordsByName.get(pair.recordName);
+    if (!record || record.deleted === true || isPurged(record) || isInTrash(record)) {
+      entries.push({ ...base, resolution: "conflict", reason: 'no longer exists remotely - run "pull" to reconcile' });
+      continue;
+    }
+    if ((record.recordChangeTag ?? "") !== pair.entry.recordChangeTag) {
+      entries.push({ ...base, resolution: "conflict", reason: 'changed remotely since the last pull - run "pull" first' });
+      continue;
+    }
+
+    const folderRecordName = pair.folderRecordName;
+    entries.push({
+      ...base,
+      resolution: "ready",
+      execute: async () => {
+        const result = await updateNoteRecord(session, ckdatabasewsUrl, dsid, PRIVATE_NOTES_ZONE, {
+          recordName: pair.recordName,
+          recordChangeTag: record.recordChangeTag ?? "",
+          fields: buildNoteMoveFields(record, folderRecordName, Date.now()),
+          parentRecordName: record.parentRecordName,
+        });
+        if (!result.ok) {
+          const detail = result.reason ? ` (${result.reason})` : "";
+          console.log(chalk.red(`${pair.toFile}: server rejected the move: ${result.serverErrorCode}${detail}`));
+          return false;
+        }
+        state.notes[pair.recordName] = {
+          ...pair.entry,
+          file: pair.toFile,
+          folderRecordName,
+          recordChangeTag: result.record.recordChangeTag ?? "",
+          modificationDate: modificationDateOf(result.record) || Date.now(),
+        };
+        await applyNoteFileTimes(path.join(targetDir, pair.toFile), result.record);
+        console.log(`Moved ${pair.entry.file} -> ${pair.toFile}`);
+        return true;
+      },
+    });
+  }
 
   for (const { recordName, entry } of deleteCandidates) {
     const record = recordsByName.get(recordName);
@@ -325,7 +501,7 @@ export async function buildPushPlan(
     throw new CorruptStateFileError("state.json has a malformed replicaId (expected 16 bytes, base64-encoded)");
   }
 
-  for (const { file, localText } of createCandidates) {
+  for (const { file, localText, folderRecordName } of createCandidates) {
     // The document is built and decode-verified during planning (not at
     // execute time) so `status` shows a build failure as a refusal, with
     // the same fidelity the update path's plan-time gates have.
@@ -365,7 +541,7 @@ export async function buildPushPlan(
           dsid,
           PRIVATE_NOTES_ZONE,
           recordName,
-          buildNoteCreateFields(payloadBase64, localText, modificationDateMs),
+          buildNoteCreateFields(payloadBase64, localText, modificationDateMs, folderRecordName),
         );
         if (!result.ok) {
           const detail = result.reason ? ` (${result.reason})` : "";
@@ -379,6 +555,7 @@ export async function buildPushPlan(
           file,
           recordChangeTag: result.record.recordChangeTag ?? "",
           modificationDate: modificationDateOf(result.record) || modificationDateMs,
+          folderRecordName,
         };
         await writeBaseCopy(targetDir, recordName, localText);
         await applyNoteFileTimes(path.join(targetDir, file), result.record);
@@ -621,25 +798,42 @@ export async function runPush(targetDir: string, options: PushOptions = {}): Pro
   }
 }
 
-/** Untracked `.md` files directly in `targetDir` (not a subdirectory) - the
- * "create" half of reconciliation. Excludes anything already tracked in
- * `state.notes`, matched by file name the same way every other lookup here
- * does. */
-async function listUntrackedTopLevelMarkdownFiles(targetDir: string, state: CloneState): Promise<string[]> {
+/** Untracked `.md` files anywhere in the vault, as vault-root-relative
+ * POSIX paths - the raw material for the create half, the local-move
+ * pairing, and the loose-file/unknown-folder refusals. Skips
+ * dot-directories (the state dir, .git) and the reserved per-folder
+ * `attachments/` directories. */
+async function listUntrackedMarkdownFiles(targetDir: string, state: CloneState): Promise<string[]> {
   const tracked = new Set(Object.values(state.notes).map((entry) => entry.file));
-  let dirents;
-  try {
-    dirents = await readdir(targetDir, { withFileTypes: true });
-  } catch (cause) {
-    if (isEnoent(cause)) {
-      return [];
+  const found: string[] = [];
+
+  const walk = async (dir: string): Promise<void> => {
+    let dirents;
+    try {
+      dirents = await readdir(path.join(targetDir, dir), { withFileTypes: true });
+    } catch (cause) {
+      if (isEnoent(cause)) {
+        return;
+      }
+      throw cause;
     }
-    throw cause;
-  }
-  return dirents
-    .filter((dirent) => dirent.isFile() && dirent.name.endsWith(".md") && !tracked.has(dirent.name))
-    .map((dirent) => dirent.name)
-    .sort();
+    for (const dirent of dirents) {
+      if (dirent.name.startsWith(".")) {
+        continue;
+      }
+      const relative = dir === "" ? dirent.name : `${dir}/${dirent.name}`;
+      if (dirent.isDirectory()) {
+        if (dirent.name.toLowerCase() !== "attachments") {
+          await walk(relative);
+        }
+      } else if (dirent.isFile() && dirent.name.endsWith(".md") && !tracked.has(relative)) {
+        found.push(relative);
+      }
+    }
+  };
+
+  await walk("");
+  return found.sort();
 }
 
 /**

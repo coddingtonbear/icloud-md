@@ -218,13 +218,24 @@ export function expectedNoteDir(layout: VaultLayout, entry: Pick<CloneStateNoteE
   return layout.sharerHomeDirs.get(entry.sharedZoneOwner);
 }
 
+/** What a directory path in the vault corresponds to, per the state maps. */
+export interface StateDirInfo {
+  kind: "folder" | "sharerHome";
+  /** Set for kind "folder". */
+  folderRecordName?: string | undefined;
+  /** Set for a shared folder or a sharer home. */
+  sharedZoneOwner?: string | undefined;
+}
+
 /**
- * Reconstructs every directory path the *previous* layout implied, from the
- * carried state maps - what the stale-directory cleanup compares against
- * after a reconciliation pass. Best-effort: unknown parents resolve the way
- * buildFolderTree promoted them (to the root of their namespace).
+ * Reconstructs the directory map the carried state implies (dirPath →
+ * what's there), without needing this run's records - the index `push`/
+ * `status` classify local directories against, and the source of the
+ * previous layout's paths for pull's stale-directory sweep. Best-effort:
+ * unknown parents resolve the way buildFolderTree promoted them (to the
+ * root of their namespace).
  */
-export function previousLayoutDirs(previous: Pick<CloneState, "folders" | "sharerHomes">): string[] {
+export function stateDirIndex(previous: Pick<CloneState, "folders" | "sharerHomes">): Map<string, StateDirInfo> {
   const folders = previous.folders ?? {};
   const memo = new Map<string, string | undefined>();
 
@@ -255,17 +266,22 @@ export function previousLayoutDirs(previous: Pick<CloneState, "folders" | "share
     return dir;
   };
 
-  const dirs: string[] = [];
-  for (const recordName of Object.keys(folders)) {
+  const index = new Map<string, StateDirInfo>();
+  for (const [owner, home] of Object.entries(previous.sharerHomes ?? {})) {
+    index.set(home.dirName, { kind: "sharerHome", sharedZoneOwner: owner });
+  }
+  for (const [recordName, entry] of Object.entries(folders)) {
     const dir = resolve(recordName, new Set());
     if (dir !== undefined) {
-      dirs.push(dir);
+      index.set(dir, { kind: "folder", folderRecordName: recordName, sharedZoneOwner: entry.sharedZoneOwner });
     }
   }
-  for (const home of Object.values(previous.sharerHomes ?? {})) {
-    dirs.push(home.dirName);
-  }
-  return dirs;
+  return index;
+}
+
+/** Every directory path the previous layout implied - see stateDirIndex. */
+export function previousLayoutDirs(previous: Pick<CloneState, "folders" | "sharerHomes">): string[] {
+  return [...stateDirIndex(previous).keys()];
 }
 
 /** Overlays fresh Folder records onto carried-forward FolderInfos: fresh

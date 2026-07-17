@@ -87,10 +87,10 @@ const NULL_FIELDS = ["FirstAttachmentThumbnail", "FirstAttachmentUTIEncrypted", 
  */
 export const TRASH_FOLDER_RECORD_NAME = "TrashFolder-CloudKit";
 
-function trashFolderReference(): unknown {
+function folderReference(folderRecordName: string): unknown {
   // Bare zoneName, no ownerRecordName - matching what the captured client
   // sends on writes (the fuller zone identity only appears on the read side).
-  return { recordName: TRASH_FOLDER_RECORD_NAME, action: "VALIDATE", zoneID: { zoneName: "Notes" } };
+  return { recordName: folderRecordName, action: "VALIDATE", zoneID: { zoneName: "Notes" } };
 }
 
 /**
@@ -108,7 +108,22 @@ const DELETION_EMPTY_FIELDS = ["FirstAttachmentThumbnail", "FirstAttachmentUTIEn
  * validation can fail.
  */
 export function buildNoteTrashFields(current: CloudKitRecord, nowMs: number): Record<string, UpdateFieldValue> {
-  return buildNoteDeletionFields(current, nowMs, { markDeleted: false });
+  return buildNoteRelocationFields(current, TRASH_FOLDER_RECORD_NAME, nowMs, { markDeleted: false });
+}
+
+/**
+ * The field set that moves a note into an arbitrary folder - structurally
+ * identical to the trash-move (Apple's "delete to Recently Deleted" IS a
+ * folder move, see the lifecycle HAR analysis), just pointed at a real
+ * folder instead of `TrashFolder-CloudKit`. The one write shape Step 4 of
+ * the folders plan relies on, precisely because it was already proven live.
+ */
+export function buildNoteMoveFields(
+  current: CloudKitRecord,
+  folderRecordName: string,
+  nowMs: number,
+): Record<string, UpdateFieldValue> {
+  return buildNoteRelocationFields(current, folderRecordName, nowMs, { markDeleted: false });
 }
 
 /**
@@ -120,11 +135,12 @@ export function buildNoteTrashFields(current: CloudKitRecord, nowMs: number): Re
  * a live note; the capture shows both fields together.
  */
 export function buildNotePurgeFields(current: CloudKitRecord, nowMs: number): Record<string, UpdateFieldValue> {
-  return buildNoteDeletionFields(current, nowMs, { markDeleted: true });
+  return buildNoteRelocationFields(current, TRASH_FOLDER_RECORD_NAME, nowMs, { markDeleted: true });
 }
 
-function buildNoteDeletionFields(
+function buildNoteRelocationFields(
   current: CloudKitRecord,
+  folderRecordName: string,
   nowMs: number,
   options: { markDeleted: boolean },
 ): Record<string, UpdateFieldValue> {
@@ -143,9 +159,9 @@ function buildNoteDeletionFields(
   echo("CreationDate");
   fields.ModificationDate = { value: nowMs };
   echo("TitleEncrypted");
-  fields.Folders = { value: [trashFolderReference()] };
+  fields.Folders = { value: [folderReference(folderRecordName)] };
   fields.FoldersModificationDate = { value: nowMs };
-  fields.Folder = { value: trashFolderReference() };
+  fields.Folder = { value: folderReference(folderRecordName) };
   echo("SnippetEncrypted");
   if (options.markDeleted) {
     fields.Deleted = { value: 1 };
@@ -170,16 +186,13 @@ export function buildNoteCreateFields(
   newTextDataBase64: string,
   newText: string,
   nowMs: number,
+  folderRecordName: string = "DefaultFolder-CloudKit",
 ): Record<string, UpdateFieldValue> {
-  const defaultFolder = {
-    recordName: "DefaultFolder-CloudKit",
-    action: "VALIDATE",
-    zoneID: { zoneName: "Notes" },
-  };
+  const folder = folderReference(folderRecordName);
   const fields: Record<string, UpdateFieldValue> = {
     CreationDate: { value: nowMs },
-    Folders: { value: [defaultFolder] },
-    Folder: { value: defaultFolder },
+    Folders: { value: [folder] },
+    Folder: { value: folder },
     ModificationDate: { value: nowMs },
     TitleEncrypted: { value: Buffer.from(deriveNoteTitle(newText), "utf-8").toString("base64") },
     SnippetEncrypted: { value: Buffer.from(deriveNoteSnippet(newText), "utf-8").toString("base64") },
