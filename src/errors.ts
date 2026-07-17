@@ -202,6 +202,18 @@ export class UnknownObjectError extends IcloudNotesSyncError {
   }
 }
 
+/** `object delete --force` found the target blocked by referrers it won't
+ * cascade into: a Folder or another Note is collateral, not per-note
+ * cleanup, so it stops and names them instead. */
+export class ObjectForceDeleteBlockedError extends IcloudNotesSyncError {
+  constructor(recordName: string, blockers: readonly { recordName: string; recordType: string }[]) {
+    const listed = blockers.map((blocker) => `${blocker.recordType} ${blocker.recordName}`).join(", ");
+    super(`Can't force-delete "${recordName}": it's referenced by record(s) --force won't delete for you: ${listed}.`, {
+      hint: 'Delete those explicitly first ("icloud-notes object delete <recordName>") if you really mean to, then retry.',
+    });
+  }
+}
+
 /** Deleting a structural record (a Folder) detaches everything under it -
  * unlike a Note or Attachment, where naming the ID is intent enough, this
  * needs an explicit --yes. */

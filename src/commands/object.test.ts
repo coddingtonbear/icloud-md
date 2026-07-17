@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import chalk from "chalk";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 import type { CloneState } from "../notes/cloneState.js";
-import { applyObjectFilters, buildObjectIndex, renderObjectList, type ObjectInfo } from "./object.js";
+import { applyObjectFilters, buildObjectIndex, findIncomingReferences, isCascadableType, rejectionWithBlockerHint, renderObjectList, type ObjectInfo } from "./object.js";
 
 function record(overrides: Partial<CloudKitRecord> & Pick<CloudKitRecord, "recordName" | "recordType">): CloudKitRecord {
   return { fields: {}, recordChangeTag: "1a", ...overrides };
@@ -152,4 +152,53 @@ test("renderObjectList prints one line per object, health annotations, and a typ
 
 test("renderObjectList says so when nothing matches", () => {
   assert.deepEqual(renderObjectList([]), ["No matching objects."]);
+});
+
+test("findIncomingReferences names each referrer, excluding the record itself", () => {
+  const index = [
+    info({ recordName: "NOTE-1", recordType: "Note", references: ["FOLDER-1", "NOTE-1"] }),
+    info({ recordName: "ATT-1", recordType: "Attachment", references: ["NOTE-1"], title: "Table", state: "live" }),
+    info({ recordName: "US-1", recordType: "Note_UserSpecific", references: ["NOTE-1"], state: "trashed" }),
+    info({ recordName: "OTHER", recordType: "Note", references: ["FOLDER-1"] }),
+  ];
+
+  assert.deepEqual(findIncomingReferences(index, "NOTE-1"), [
+    { recordName: "ATT-1", recordType: "Attachment", title: "Table", state: "live" },
+    { recordName: "US-1", recordType: "Note_UserSpecific", title: undefined, state: "trashed" },
+  ]);
+  assert.deepEqual(findIncomingReferences(index, "NOBODY"), []);
+});
+
+test("isCascadableType allows per-note leaves and refuses structural types", () => {
+  assert.equal(isCascadableType("Attachment"), true);
+  assert.equal(isCascadableType("Media"), true);
+  assert.equal(isCascadableType("InlineAttachment"), true);
+  assert.equal(isCascadableType("Note_UserSpecific"), true);
+  assert.equal(isCascadableType("PasswordProtectedNote_UserSpecific"), true);
+  assert.equal(isCascadableType("Note"), false);
+  assert.equal(isCascadableType("Folder"), false);
+  assert.equal(isCascadableType("SomeFutureType"), false);
+});
+
+test("rejectionWithBlockerHint extracts the blocking recordID from a real-shaped reason", () => {
+  const error = rejectionWithBlockerHint(
+    "NOTE-1",
+    "VALIDATING_REFERENCE_ERROR",
+    "Field=Note, recordID=92df3572-aaaa-bbbb-cccc-1234567890ab, title=Record delete would violate validating reference, rejecting update",
+  );
+
+  assert.match(error.message, /blocked by 92df3572-aaaa-bbbb-cccc-1234567890ab/);
+  assert.match(error.message, /object delete 92df3572-aaaa-bbbb-cccc-1234567890ab/);
+  assert.match(error.message, /object show NOTE-1/);
+});
+
+test("rejectionWithBlockerHint leaves other errors and unparseable reasons untouched", () => {
+  const other = rejectionWithBlockerHint("N", "CONFLICT", "changeTag mismatch");
+  assert.equal(other.message.includes("blocked by"), false);
+
+  const unparseable = rejectionWithBlockerHint("N", "VALIDATING_REFERENCE_ERROR", "no id here");
+  assert.equal(unparseable.message.includes("blocked by"), false);
+
+  const noReason = rejectionWithBlockerHint("N", "VALIDATING_REFERENCE_ERROR", undefined);
+  assert.equal(noReason.message.includes("blocked by"), false);
 });

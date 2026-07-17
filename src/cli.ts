@@ -191,11 +191,14 @@ const OBJECT_USAGE =
   "      records the sync path never fetches), with lifecycle state, references, local tracking, and - for\n" +
   "      notes - whether this tool can parse them (--broken shows only ones it can't).\n" +
   "  object show <recordName> [directory]\n" +
-  "      Dump one record verbatim (all fields), plus the same derived summary list computes.\n" +
-  "  object delete <recordName> [directory] [--yes]\n" +
+  "      Dump one record verbatim (all fields), plus the derived summary and every record referencing it\n" +
+  "      (incomingReferences) - the \"who's in the way of deleting this?\" view.\n" +
+  "  object delete <recordName> [directory] [--yes] [--force]\n" +
   "      Permanently delete one record by ID - the repair tool for broken objects. Notes use Apple's own\n" +
   "      two-stage purge (works on attachment-bearing and unparseable notes); other types use forceDelete.\n" +
-  "      Deleting a Folder requires --yes.";
+  "      --force tombstones the record immediately via forceDelete instead, cascading over leaf-type\n" +
+  "      referrers (attachments etc.) - for records whose content itself breaks Notes clients, since a\n" +
+  "      purged record's fields stay in the sync stream until server GC. Deleting a Folder requires --yes.";
 
 async function objectCommand(args: string[]): Promise<void> {
   const [subcommand, ...subArgs] = args;
@@ -240,13 +243,17 @@ async function objectCommand(args: string[]): Promise<void> {
     }
     case "delete": {
       const [recordName, dirArg] = positional;
-      const unknownFlag = flags.find((flag) => flag !== "--yes");
+      const unknownFlag = flags.find((flag) => flag !== "--yes" && flag !== "--force");
       if (unknownFlag || !recordName || positional.length > 2) {
         console.error(OBJECT_USAGE);
         process.exitCode = 1;
         return;
       }
-      await runObjectDelete(dirArg ?? ".", recordName, { yes: flags.includes("--yes"), onLoginStatus });
+      await runObjectDelete(dirArg ?? ".", recordName, {
+        yes: flags.includes("--yes"),
+        force: flags.includes("--force"),
+        onLoginStatus,
+      });
       return;
     }
     default:

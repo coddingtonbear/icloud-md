@@ -1,5 +1,6 @@
 import chalk from "chalk";
 import { resolveFolderAccount } from "../auth/folderAuth.js";
+import type { IcloudSession } from "../session.js";
 import {
   fetchAllZoneRecords,
   forceDeleteRecord,
@@ -14,6 +15,7 @@ import {
   NotClonedDirectoryError,
   NotesUnavailableError,
   ObjectDeleteNeedsConfirmationError,
+  ObjectForceDeleteBlockedError,
   UnknownObjectError,
 } from "../errors.js";
 import { buildNotePurgeFields, buildNoteTrashFields } from "../notes/encodeNoteRecord.js";
@@ -93,34 +95,79 @@ export async function runObjectList(
   }
 }
 
+/** One incoming reference as `object show` reports it: enough to identify
+ * the referrer and judge whether it matters (a live Attachment blocks a
+ * forceDelete; a tombstone doesn't). */
+export interface IncomingReference {
+  recordName: string;
+  recordType: string;
+  title?: string | undefined;
+  state: ObjectLifecycleState;
+}
+
 export async function runObjectShow(
   targetDir: string,
   recordName: string,
   options: ObjectCommandOptions = {},
 ): Promise<void> {
   const { state, auth } = await resolveObjectAuth(targetDir, options);
-  const records = await lookupRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, "private", PRIVATE_NOTES_ZONE, [
-    recordName,
-  ]);
-  const record = records[0];
+  // A full zone walk rather than a single-record lookup: `show` is the
+  // "look before you shoot" step, and the question that matters before a
+  // delete is "who references this?" - answerable only from the whole zone.
+  const records = await fetchAllZoneRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid);
+  const record = records.find((candidate) => candidate.recordName === recordName);
   if (!record) {
     throw new UnknownObjectError(recordName);
   }
-  // The raw record verbatim, plus the same derived summary `list` computes -
-  // minus referencedBy, which only a full zone walk can know.
-  const [info] = buildObjectIndex([record], state);
-  console.log(JSON.stringify({ ...info, referencedBy: undefined, record }, null, 2));
+  const index = buildObjectIndex(records, state);
+  const info = index.find((candidate) => candidate.recordName === recordName);
+  console.log(
+    JSON.stringify({ ...info, record, incomingReferences: findIncomingReferences(index, recordName) }, null, 2),
+  );
+}
+
+/** Every record in `index` holding a reference to `recordName` - the
+ * by-name answer behind `object list`'s bare `<- N ref(s)` count. Exported
+ * for tests; shared by `object show` and the `--force` cascade. */
+export function findIncomingReferences(index: ObjectInfo[], recordName: string): IncomingReference[] {
+  return index
+    .filter((info) => info.recordName !== recordName && info.references.includes(recordName))
+    .map((info) => ({ recordName: info.recordName, recordType: info.recordType, title: info.title, state: info.state }));
 }
 
 export interface ObjectDeleteOptions extends ObjectCommandOptions {
   /** Required for structural record types (Folders), where a typo'd ID has
    * a blast radius beyond the record itself. */
   yes?: boolean;
+  /**
+   * True immediate removal via `forceDelete`, cascading over leaf-type
+   * referrers - the "this record is poison, get it out of the sync stream
+   * NOW" escape hatch. Unlike the default two-stage purge (which only marks
+   * the record and leaves its fields in `changes/zone` until server GC), a
+   * forceDelete tombstones the record immediately - the only state
+   * guaranteed safe when the record's content itself crashes Notes clients.
+   */
+  force?: boolean;
 }
 
 /** Record types whose deletion detaches or destroys things beyond the
  * record itself - these require an explicit --yes. */
 const NEEDS_CONFIRMATION_TYPES = new Set(["Folder", "Folder_UserSpecific"]);
+
+/**
+ * Record types the `--force` cascade may delete on its own to unblock the
+ * target: per-note leaves whose whole existence hangs off the record being
+ * deleted. A Folder or another Note showing up as a blocker is collateral,
+ * not cleanup - the cascade refuses and reports instead.
+ */
+export function isCascadableType(recordType: string): boolean {
+  return (
+    recordType === "Attachment" ||
+    recordType === "Media" ||
+    recordType === "InlineAttachment" ||
+    recordType.endsWith("_UserSpecific")
+  );
+}
 
 export async function runObjectDelete(
   targetDir: string,
@@ -140,9 +187,19 @@ export async function runObjectDelete(
   const [info] = buildObjectIndex([record], state);
   const label = `${record.recordType} ${recordName}${info?.title ? ` ("${info.title}")` : ""}`;
 
-  if (record.deleted === true || isPurged(record)) {
+  if (record.deleted === true || (isPurged(record) && options.force !== true)) {
     await forgetObjectLocally(targetDir, recordName, state);
     console.log(`${label}: already permanently deleted - nothing to do remotely.`);
+    return;
+  }
+
+  if (NEEDS_CONFIRMATION_TYPES.has(record.recordType) && options.yes !== true) {
+    throw new ObjectDeleteNeedsConfirmationError(record.recordType, recordName);
+  }
+
+  if (options.force === true) {
+    await forceDeleteWithCascade(session, ckdatabasewsUrl, dsid, state, label, record);
+    await forgetObjectLocally(targetDir, recordName, state);
     return;
   }
 
@@ -178,10 +235,6 @@ export async function runObjectDelete(
     return;
   }
 
-  if (NEEDS_CONFIRMATION_TYPES.has(record.recordType) && options.yes !== true) {
-    throw new ObjectDeleteNeedsConfirmationError(record.recordType, recordName);
-  }
-
   // Non-Note records have no captured deletion precedent - forceDelete is
   // the only primitive there is, live-verified to work when nothing still
   // references the target (the server rejects it otherwise, which is
@@ -197,10 +250,118 @@ export async function runObjectDelete(
     record.recordChangeTag ?? "",
   );
   if (!result.ok) {
-    throw new NoteDeleteRejectedError(recordName, result.serverErrorCode, result.reason);
+    throw rejectionWithBlockerHint(recordName, result.serverErrorCode, result.reason);
   }
   await forgetObjectLocally(targetDir, recordName, state);
   console.log(`Permanently deleted ${label}.`);
+}
+
+/**
+ * A `VALIDATING_REFERENCE_ERROR` reason names the blocking record's
+ * recordID (observed live 2026-07-16: "recordID=<uuid> ... Record delete
+ * would violate validating reference") - so even a failed delete can tell
+ * the user exactly what stands in the way and what to run next. Exported
+ * for tests.
+ */
+export function rejectionWithBlockerHint(
+  recordName: string,
+  serverErrorCode: string,
+  reason: string | undefined,
+): NoteDeleteRejectedError {
+  const error = new NoteDeleteRejectedError(recordName, serverErrorCode, reason);
+  if (serverErrorCode !== "VALIDATING_REFERENCE_ERROR" || reason === undefined) {
+    return error;
+  }
+  const blocker = /recordID=([0-9A-Za-z-]+)/.exec(reason)?.[1];
+  if (!blocker) {
+    return error;
+  }
+  return new NoteDeleteRejectedError(
+    recordName,
+    serverErrorCode,
+    `${reason} - blocked by ${blocker}; "icloud-notes object show ${recordName}" lists every referrer, ` +
+      `"icloud-notes object delete ${blocker}" removes this one`,
+  );
+}
+
+/**
+ * The `--force` path: `forceDelete` the target, and if the server refuses
+ * because live records still reference it, delete those referrers first
+ * (leaf types only - see `isCascadableType`) and retry. Sequential
+ * single-record deletes throughout, staying on the one forceDelete shape
+ * that's been live-verified; the referrer set comes from a fresh full zone
+ * walk using the same reference scan `object show` reports.
+ */
+async function forceDeleteWithCascade(
+  session: IcloudSession,
+  ckdatabasewsUrl: string,
+  dsid: string,
+  state: CloneState,
+  label: string,
+  record: CloudKitRecord,
+): Promise<void> {
+  console.log(`Force-deleting ${label}...`);
+  const first = await forceDeleteRecord(
+    session,
+    ckdatabasewsUrl,
+    dsid,
+    PRIVATE_NOTES_ZONE,
+    record.recordName,
+    record.recordType,
+    record.recordChangeTag ?? "",
+  );
+  if (first.ok) {
+    console.log(`Permanently deleted ${label}.`);
+    return;
+  }
+  if (first.serverErrorCode !== "VALIDATING_REFERENCE_ERROR") {
+    throw new NoteDeleteRejectedError(record.recordName, first.serverErrorCode, first.reason);
+  }
+
+  console.log("Blocked by validating references - walking the zone to find every referrer...");
+  const records = await fetchAllZoneRecords(session, ckdatabasewsUrl, dsid);
+  const index = buildObjectIndex(records, state);
+  const referrers = findIncomingReferences(index, record.recordName).filter(
+    (referrer) => referrer.state !== "tombstone",
+  );
+  const blockers = referrers.filter((referrer) => !isCascadableType(referrer.recordType));
+  if (blockers.length > 0) {
+    throw new ObjectForceDeleteBlockedError(record.recordName, blockers);
+  }
+
+  const recordsByName = new Map(records.map((candidate) => [candidate.recordName, candidate]));
+  for (const referrer of referrers) {
+    const referrerRecord = recordsByName.get(referrer.recordName);
+    const result = await forceDeleteRecord(
+      session,
+      ckdatabasewsUrl,
+      dsid,
+      PRIVATE_NOTES_ZONE,
+      referrer.recordName,
+      referrer.recordType,
+      referrerRecord?.recordChangeTag ?? "",
+    );
+    if (!result.ok) {
+      throw rejectionWithBlockerHint(referrer.recordName, result.serverErrorCode, result.reason);
+    }
+    delete state.attachments?.[referrer.recordName];
+    delete state.tableAttachments?.[referrer.recordName];
+    console.log(`  deleted ${referrer.recordType} ${referrer.recordName}${referrer.title ? ` ("${referrer.title}")` : ""}`);
+  }
+
+  const retry = await forceDeleteRecord(
+    session,
+    ckdatabasewsUrl,
+    dsid,
+    PRIVATE_NOTES_ZONE,
+    record.recordName,
+    record.recordType,
+    record.recordChangeTag ?? "",
+  );
+  if (!retry.ok) {
+    throw rejectionWithBlockerHint(record.recordName, retry.serverErrorCode, retry.reason);
+  }
+  console.log(`Permanently deleted ${label} and ${referrers.length} referencing record(s).`);
 }
 
 async function resolveObjectAuth(targetDir: string, options: ObjectCommandOptions) {
