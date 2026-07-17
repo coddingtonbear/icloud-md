@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { CloudKitRecord, ShareParticipant } from "../cloudkit/databaseClient.js";
-import type { CloneState, CloneStateFolderEntry, CloneStateSharerHomeEntry } from "./cloneState.js";
+import type { CloneState, CloneStateFolderEntry, CloneStateNoteEntry, CloneStateSharerHomeEntry } from "./cloneState.js";
 import {
   buildFolderTree,
   decodeFolderRecord,
@@ -48,10 +48,6 @@ export function buildVaultLayout(
   sharedZones: readonly SharedZoneRecords[],
   previous?: Pick<CloneState, "folders" | "sharerHomes">,
 ): VaultLayout {
-  const preferredDirNames = new Map<string, string>(
-    Object.entries(previous?.folders ?? {}).map(([recordName, entry]) => [recordName, entry.dirName]),
-  );
-
   // Own folders: previous state as the base, overlaid with this run's
   // records (which may add, rename, re-parent, or tombstone).
   const ownFolders = mergeFolderInfos(
@@ -60,6 +56,30 @@ export function buildVaultLayout(
       .map(([recordName, entry]) => ({ recordName, title: entry.name, parentRecordName: entry.parentRecordName })),
     privateRecords,
   );
+
+  // A folder keeps its existing directory name only while its *title* is
+  // unchanged - a remote rename gets a freshly derived directory name, and
+  // the pull-side reconciler moves the contents (see folderReconcile.ts).
+  // Everything else keeps its name for stability across sibling churn.
+  const currentTitles = new Map<string, string>();
+  for (const info of ownFolders) {
+    currentTitles.set(info.recordName, info.title);
+  }
+  for (const zone of sharedZones) {
+    for (const record of zone.records) {
+      const decoded = record.deleted !== true ? decodeFolderRecord(record) : undefined;
+      if (decoded) {
+        currentTitles.set(decoded.recordName, decoded.title);
+      }
+    }
+  }
+  const preferredDirNames = new Map<string, string>();
+  for (const [recordName, entry] of Object.entries(previous?.folders ?? {})) {
+    const currentTitle = currentTitles.get(recordName);
+    if (currentTitle === undefined || currentTitle === entry.name) {
+      preferredDirNames.set(recordName, entry.dirName);
+    }
+  }
 
   const ownTree = buildFolderTree(ownFolders, preferredDirNames);
 
@@ -92,8 +112,12 @@ export function buildVaultLayout(
       if ((previousHome !== undefined) !== preferPrevious) {
         continue;
       }
-      const name = previousHome?.name ?? sharerDisplayName(zone) ?? zone.ownerRecordName;
-      const candidate = previousHome?.dirName ?? sanitizeFolderDirName(name);
+      // Like folders: the home keeps its directory while the sharer's
+      // display name is unchanged; a fresh, different name re-derives it.
+      const fresh = sharerDisplayName(zone);
+      const renamed = previousHome !== undefined && fresh !== undefined && fresh !== previousHome.name;
+      const name = renamed ? (fresh as string) : (previousHome?.name ?? fresh ?? zone.ownerRecordName);
+      const candidate = !renamed && previousHome !== undefined ? previousHome.dirName : sanitizeFolderDirName(name);
       const dirName = claimTopLevelName(candidate, topLevelClaimed);
       sharerHomeDirs.set(zone.ownerRecordName, dirName);
       stateSharerHomes[zone.ownerRecordName] = { name, dirName };
@@ -172,6 +196,76 @@ export function placeNote(
 export function noteDirOf(stateFile: string): string {
   const dir = path.posix.dirname(stateFile);
   return dir === "." ? "" : dir;
+}
+
+/**
+ * Where a *tracked* note should sit under the current layout, from its
+ * state entry - `placeNote`'s twin for notes the server didn't re-send this
+ * run. Returns undefined for "leave it where it is" (a shared note whose
+ * zone has no home this run - vanished zones are handled separately).
+ */
+export function expectedNoteDir(layout: VaultLayout, entry: Pick<CloneStateNoteEntry, "folderRecordName" | "sharedZoneOwner">): string | undefined {
+  if (entry.sharedZoneOwner === undefined) {
+    const dir = entry.folderRecordName !== undefined ? layout.folderDirs.get(entry.folderRecordName) : undefined;
+    return dir ?? layout.folderDirs.get(DEFAULT_FOLDER_RECORD_NAME) ?? "";
+  }
+  if (entry.folderRecordName !== undefined) {
+    const dir = layout.folderDirs.get(entry.folderRecordName);
+    if (dir !== undefined && layout.stateFolders[entry.folderRecordName]?.sharedZoneOwner === entry.sharedZoneOwner) {
+      return dir;
+    }
+  }
+  return layout.sharerHomeDirs.get(entry.sharedZoneOwner);
+}
+
+/**
+ * Reconstructs every directory path the *previous* layout implied, from the
+ * carried state maps - what the stale-directory cleanup compares against
+ * after a reconciliation pass. Best-effort: unknown parents resolve the way
+ * buildFolderTree promoted them (to the root of their namespace).
+ */
+export function previousLayoutDirs(previous: Pick<CloneState, "folders" | "sharerHomes">): string[] {
+  const folders = previous.folders ?? {};
+  const memo = new Map<string, string | undefined>();
+
+  const resolve = (recordName: string, seen: Set<string>): string | undefined => {
+    if (memo.has(recordName)) {
+      return memo.get(recordName);
+    }
+    const entry = folders[recordName];
+    if (!entry || seen.has(recordName)) {
+      return undefined;
+    }
+    seen.add(recordName);
+    const homePrefix =
+      entry.sharedZoneOwner !== undefined ? previous.sharerHomes?.[entry.sharedZoneOwner]?.dirName : undefined;
+    if (entry.sharedZoneOwner !== undefined && homePrefix === undefined) {
+      memo.set(recordName, undefined);
+      return undefined;
+    }
+
+    let dir: string;
+    const parent = entry.parentRecordName !== undefined ? resolve(entry.parentRecordName, seen) : undefined;
+    if (parent !== undefined) {
+      dir = `${parent}/${entry.dirName}`;
+    } else {
+      dir = homePrefix !== undefined ? `${homePrefix}/${entry.dirName}` : entry.dirName;
+    }
+    memo.set(recordName, dir);
+    return dir;
+  };
+
+  const dirs: string[] = [];
+  for (const recordName of Object.keys(folders)) {
+    const dir = resolve(recordName, new Set());
+    if (dir !== undefined) {
+      dirs.push(dir);
+    }
+  }
+  for (const home of Object.values(previous.sharerHomes ?? {})) {
+    dirs.push(home.dirName);
+  }
+  return dirs;
 }
 
 /** Overlays fresh Folder records onto carried-forward FolderInfos: fresh

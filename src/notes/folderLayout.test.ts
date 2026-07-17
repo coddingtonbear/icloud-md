@@ -173,3 +173,20 @@ test("sharerDisplayName reads the OWNER participant only", () => {
   };
   assert.equal(sharerDisplayName(zone), "Hassan Almemari");
 });
+
+test("buildVaultLayout re-derives the directory name when a folder's title changed", () => {
+  const layout = buildVaultLayout([folderRecord("F", "Cooking")], [], {
+    folders: { F: { name: "Recipes", dirName: "Recipes" } },
+    sharerHomes: {},
+  });
+  assert.equal(layout.folderDirs.get("F"), "Cooking");
+  assert.equal(layout.stateFolders.F?.dirName, "Cooking");
+});
+
+test("buildVaultLayout keeps the directory name when only siblings changed", () => {
+  const layout = buildVaultLayout([folderRecord("NEW", "Aardvark")], [], {
+    folders: { F: { name: "Recipes", dirName: "Recipes" } },
+    sharerHomes: {},
+  });
+  assert.equal(layout.folderDirs.get("F"), "Recipes");
+});

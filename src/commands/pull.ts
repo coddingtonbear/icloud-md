@@ -12,7 +12,8 @@ import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { isEnoent } from "../fsUtil.js";
 import { noteFileName, uniqueFileName } from "../notes/filename.js";
-import { buildVaultLayout, noteDirOf, placeNote, type SharedZoneRecords } from "../notes/folderLayout.js";
+import { buildVaultLayout, noteDirOf, placeNote, previousLayoutDirs, type SharedZoneRecords } from "../notes/folderLayout.js";
+import { reconcileNotePlacements, removeStaleDirs } from "../notes/folderReconcile.js";
 import { mergeNoteVersions } from "../notes/mergeConflict.js";
 import { readBaseCopy, removeBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { localFileState } from "../notes/localFileState.js";
@@ -124,12 +125,12 @@ export async function runPull(
   }
 
   // Rebuild the directory layout from carried state + this run's folder
-  // records: new folders (own or shared) materialize as directories, and
-  // existing ones keep their names (a remote rename shows up in state's
-  // folder `name` but the directory deliberately isn't renamed yet - full
-  // tree reconciliation is the next investigation step). Tracked notes
-  // likewise stay at their current paths; only *new* notes are placed by
-  // the current tree.
+  // records: new folders (own or shared) materialize as directories, a
+  // renamed folder gets a freshly derived directory name, and everything
+  // else keeps its name. The record loop below writes content at notes'
+  // *current* paths; the reconciliation pass afterwards moves files whose
+  // directory no longer matches the tree (remote renames/moves - remote
+  // wins) and sweeps out emptied old directories.
   const layout = buildVaultLayout(records, sharedZoneRecords, { folders: state.folders, sharerHomes: state.sharerHomes });
   for (const dir of layout.allDirs) {
     await mkdir(path.join(targetDir, dir), { recursive: true });
@@ -336,6 +337,19 @@ export async function runPull(
   progress?.onProcessComplete?.();
 
   await handleVanishedSharedZones(targetDir, sharedZones, notes, attachments, tableAttachments, summary);
+
+  // Tree reconciliation: move notes (and their attachments) whose directory
+  // no longer matches the current layout, then sweep out directories the
+  // previous layout used that are now empty.
+  const relocations = await reconcileNotePlacements(targetDir, layout, notes, attachments);
+  for (const relocation of relocations) {
+    summary.notices.push({ level: "info", message: `Moved ${relocation.from} -> ${relocation.to} (folder changed remotely)` });
+  }
+  await removeStaleDirs(
+    targetDir,
+    previousLayoutDirs({ folders: state.folders, sharerHomes: state.sharerHomes }),
+    new Set(layout.allDirs),
+  );
 
   await writeCloneState(targetDir, {
     account: state.account,
