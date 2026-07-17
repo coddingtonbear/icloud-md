@@ -21,6 +21,28 @@ export interface CloneStateNoteEntry {
    * record every time. Absent when the note is fully publishable.
    */
   unpublishableReason?: string | undefined;
+  /**
+   * The Folder record this note lives in, resolving into `folders` - the
+   * note's directory derives from that folder's tree position. Absent for
+   * shared notes (their Folder reference points into the sharer's zone,
+   * whose folder records we can't read - see the folders doc) and in state
+   * files written before folder support.
+   */
+  folderRecordName?: string | undefined;
+}
+
+/** One synced Apple Notes folder - see the folders doc for the tree design. */
+export interface CloneStateFolderEntry {
+  /** Decoded folder title as of the last sync ("Recipes"). */
+  name: string;
+  /** Parent Folder recordName for a nested folder; absent for top-level. */
+  parentRecordName?: string | undefined;
+  /**
+   * This folder's directory name on disk - sanitized and uniquified among
+   * siblings; the full path derives from ancestors' dirNames. Persisted so
+   * names stay stable across pulls (buildFolderTree's preferredDirNames).
+   */
+  dirName: string;
 }
 
 export interface CloneStateAttachmentEntry {
@@ -82,6 +104,12 @@ export interface CloneState {
    */
   replicaId?: string | undefined;
   notes: Record<string, CloneStateNoteEntry>;
+  /**
+   * The account's folder tree as of the last sync, keyed by the Folder
+   * record's recordName (including `DefaultFolder-CloudKit`; never Trash).
+   * Absent in state files written before folder support.
+   */
+  folders?: Record<string, CloneStateFolderEntry> | undefined;
   /** Downloaded attachments, keyed by the `Attachment` record's recordName
    * (the identifier embedded in the owning note's body). Absent entirely in
    * state files written before Phase 4. */
@@ -155,7 +183,23 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
       modificationDate: entry.modificationDate,
       sharedZoneOwner: typeof entry.sharedZoneOwner === "string" ? entry.sharedZoneOwner : undefined,
       unpublishableReason: typeof entry.unpublishableReason === "string" ? entry.unpublishableReason : undefined,
+      folderRecordName: typeof entry.folderRecordName === "string" ? entry.folderRecordName : undefined,
     };
+  }
+
+  let folders: Record<string, CloneStateFolderEntry> | undefined;
+  if (isRecord(value.folders)) {
+    folders = {};
+    for (const [recordName, entry] of Object.entries(value.folders)) {
+      if (!isRecord(entry) || typeof entry.name !== "string" || typeof entry.dirName !== "string") {
+        throw new CorruptStateFileError(`${filePath} has a malformed entry for folder "${recordName}".`);
+      }
+      folders[recordName] = {
+        name: entry.name,
+        parentRecordName: typeof entry.parentRecordName === "string" ? entry.parentRecordName : undefined,
+        dirName: entry.dirName,
+      };
+    }
   }
 
   const replicaId = typeof value.replicaId === "string" ? value.replicaId : undefined;
@@ -223,7 +267,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
     account = { appleId: value.account.appleId, dsid: value.account.dsid };
   }
 
-  return { account, syncToken, sharedZoneSyncTokens, replicaId, notes, attachments, tableAttachments, trashed };
+  return { account, syncToken, sharedZoneSyncTokens, replicaId, notes, folders, attachments, tableAttachments, trashed };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

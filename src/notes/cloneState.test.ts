@@ -158,6 +158,59 @@ test("throws CorruptStateFileError for a malformed table attachment entry", () =
     await assert.rejects(readCloneState(dir), CorruptStateFileError);
   }));
 
+test("round-trips the folder tree and per-note folder membership", () =>
+  withTempDir(async (dir) => {
+    const state: CloneState = {
+      syncToken: "token",
+      notes: {
+        "REC-1": {
+          file: "Recipes/Pie.md",
+          recordChangeTag: "a",
+          modificationDate: 1,
+          folderRecordName: "FOLDER-1",
+        },
+        "REC-SHARED": { file: "Cooking Recipes.md", recordChangeTag: "b", modificationDate: 2 },
+      },
+      folders: {
+        "DefaultFolder-CloudKit": { name: "Notes", dirName: "Notes" },
+        "FOLDER-1": { name: "Recipes", dirName: "Recipes" },
+        "FOLDER-2": { name: "Desserts", parentRecordName: "FOLDER-1", dirName: "Desserts" },
+      },
+    };
+
+    await writeCloneState(dir, state);
+    const readBack = await readCloneState(dir);
+
+    assert.equal(readBack?.folders?.["FOLDER-1"]?.dirName, "Recipes");
+    assert.equal(readBack?.folders?.["FOLDER-1"]?.parentRecordName, undefined);
+    assert.equal(readBack?.folders?.["FOLDER-2"]?.parentRecordName, "FOLDER-1");
+    assert.equal(readBack?.folders?.["DefaultFolder-CloudKit"]?.name, "Notes");
+    assert.equal(readBack?.notes["REC-1"]?.folderRecordName, "FOLDER-1");
+    assert.equal(readBack?.notes["REC-SHARED"]?.folderRecordName, undefined);
+  }));
+
+test("reads a pre-folder-support state file (no folders field) without error", () =>
+  withTempDir(async (dir) => {
+    const legacy: CloneState = { syncToken: "old-token", notes: {} };
+    await writeCloneState(dir, legacy);
+
+    const readBack = await readCloneState(dir);
+    assert.equal(readBack?.folders, undefined);
+  }));
+
+test("throws CorruptStateFileError for a malformed folder entry", () =>
+  withTempDir(async (dir) => {
+    const stateDir = path.join(dir, ".icloud-notes-sync");
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(
+      path.join(stateDir, "state.json"),
+      JSON.stringify({ notes: {}, folders: { "FOLDER-1": { name: "Recipes" } } }),
+      "utf-8",
+    );
+
+    await assert.rejects(readCloneState(dir), CorruptStateFileError);
+  }));
+
 test("round-trips the trash registry", () =>
   withTempDir(async (dir) => {
     const state: CloneState = {
