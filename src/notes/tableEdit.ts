@@ -20,8 +20,18 @@
  *    shifts every identity object's `UUIDIndex` up by one (the layout is
  *    positional; done once, then reused). On the topotext side, every
  *    mergeable string in the table draws `CharID` clocks from the shared
- *    `Document.ttTimestamp` table, so we append our own `Clock` entry and
- *    write cell/mirror runs under our own 1-based `CharID.replicaID`.
+ *    `Document.ttTimestamp` table, and - per Apple's own web-client source
+ *    (`TTVectorMultiTimestamp.savetoArchive`/`replicaUUIDByIndex`, recovered
+ *    2026-07-16 after the Stage-1 live doubling incident) - that table is a
+ *    **sorted set, not a registration log**: entries are serialized in
+ *    NSUUID order and a 1-based `CharID.replicaID` is the replica's *rank*
+ *    among the sorted UUIDs. Registering therefore inserts our `Clock` at
+ *    its sorted position and, when that displaces existing entries, remaps
+ *    every `CharID` (run coordinate and style anchor) in every mergeable
+ *    string of the document. Getting this wrong is invisible to a fresh
+ *    parse (attribution stays self-consistent) but makes Apple's
+ *    *incremental* merge attribute every char to the wrong replica and
+ *    union instead of unify - the doubled-cells incident.
  *  - **Identity pairs are structural, not residue**: every row/column is
  *    born as an *ordering* identity (listed in `attachments`, self-paired
  *    in `set`) plus a *content* identity (keys `cellColumns`/row-map
@@ -30,8 +40,10 @@
  *  - **The FFFC mirror is maintained by topotext splice**: one U+FFFC per
  *    live entry, inserted at the entry's visual position under our own
  *    clocks; deletion tombstones the exact character, with the tombstone's
- *    anchor rewritten to our deletion counter (`ttTimestamp`'s second
- *    `ReplicaClock`), which advances by one per deletion.
+ *    anchor (the run's *style timestamp*) rewritten to our style clock
+ *    (`ttTimestamp`'s second `ReplicaClock`, `TTMergeableStringTimestampTypeStyle`
+ *    in Apple's source - the 3/4 rulebook's "deletion counter" reading,
+ *    refined), which advances by one per deletion.
  *  - **Deletes physically remove** dictionary elements and cell-text
  *    objects (pool compaction remaps every reference), while **retaining
  *    forever** the redirect entry, both identity objects, and the UUIDs.
@@ -72,10 +84,8 @@ import { randomBytes } from "node:crypto";
 import { create, isFieldSet } from "@bufbuild/protobuf";
 import {
   computePositions,
-  parseDictByName,
   parseOrderedSet,
   parseRefPairList,
-  requireEntry,
   resolveRef,
   resolveTable,
   uuidIndexOfRef,
@@ -107,7 +117,6 @@ import {
   Document_DocObjectSchema,
   ObjectIDSchema,
   StringArray_ArrayAttachmentSchema,
-  TimestampSchema,
   VectorTimestamp_ElementSchema,
   type Dictionary,
   type Document_DocObject,
@@ -122,7 +131,6 @@ import {
   type VectorTimestamp_Clock as TtClock,
 } from "./gen/topotext_pb.js";
 
-const TABLE_OBJECT_INDEX = 0;
 /** The identity objects' `typeItem` entry; index 2 in every capture, but
  * looked up by name rather than assumed. */
 const IDENTITY_TYPE_NAME = "com.apple.CRDT.NSUUID";
@@ -310,19 +318,88 @@ function elementStamp(session: TableWriteSession): VersionStamp {
   return { replicaIndex: session.replicaIndex, clock: session.baseClock + 2 };
 }
 
-/** The anchor for a mirror deletion tombstone: our deletion counter's
- * current value, advancing it by one - and, like Apple's own deletion
- * saves, landing the save on base+2. */
+/** The anchor for a mirror deletion tombstone: our style clock's current
+ * value (`ttTimestamp`'s second `ReplicaClock` - Apple's
+ * `TTMergeableStringTimestampTypeStyle`), advancing it by one - and, like
+ * Apple's own deletion saves, landing the save on base+2. */
 function takeDeletionAnchor(session: TableWriteSession): { replica: number; clock: number } {
   session.highestTick = Math.max(session.highestTick, session.baseClock + 2);
   const counters = session.ttClock.replicaClock;
-  const deletion = counters[1];
-  if (!deletion) {
-    throw new Error("Table's topotext clock entry is missing its deletion counter - refusing to guess");
+  const style = counters[1];
+  if (!style) {
+    throw new Error("Table's topotext clock entry is missing its style clock - refusing to guess");
   }
-  const value = Number(deletion.clock);
-  deletion.clock = value + 1;
+  const value = Number(style.clock);
+  style.clock = value + 1;
   return { replica: session.textClock.replicaIndex, clock: value };
+}
+
+function compareUuidBytes(a: Uint8Array, b: Uint8Array): number {
+  const length = Math.min(a.length, b.length);
+  for (let i = 0; i < length; i += 1) {
+    if (a[i]! !== b[i]!) {
+      return a[i]! - b[i]!;
+    }
+  }
+  return a.length - b.length;
+}
+
+/** Rewrites every non-origin `CharID` (run coordinate and style anchor) in
+ * every mergeable string of the document - cells and both ordering mirrors
+ * are the same `topotext.String` shape. Replica 0 (the origin/sentinel
+ * pseudo-replica) is never remapped. */
+function remapCharIds(doc: TableDocument, map: (oldReplicaId: number) => number): void {
+  for (const entry of doc.objects) {
+    for (const str of [entry.string, entry.tsOrderedSet?.array?.array?.contents]) {
+      if (!str) {
+        continue;
+      }
+      for (const run of str.substring) {
+        for (const id of [run.charID, run.timestamp]) {
+          if (id && id.replicaID !== 0) {
+            id.replicaID = map(id.replicaID);
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Heals a document whose `ttTimestamp` entries aren't in sorted UUID order -
+ * the residue of this engine's own first live push, which *appended* its
+ * `Clock` entry (the Stage-1 doubled-cells incident, dev log 2026-07-16).
+ * Apple's encoder provably always emits the table sorted
+ * (`TTVectorMultiTimestamp.savetoArchive` iterates `sortedUUIDs()`), so an
+ * unsorted table can only be our own residue; restoring the writing
+ * engine's intent - wire index -> sorted rank - reproduces exactly what the
+ * fixed engine would have written. Refuses (rather than reinterprets) an
+ * unsorted document that doesn't carry `replicaUuid`, since "our residue"
+ * is the only unsorted shape whose intent we can know.
+ */
+function normalizeTopotextOrder(doc: TableDocument, replicaUuid: Uint8Array): void {
+  const tt = doc.document.ttTimestamp;
+  if (!tt || tt.clock.length < 2) {
+    return;
+  }
+  const order = tt.clock.map((_clock, index) => index);
+  order.sort((a, b) => compareUuidBytes(tt.clock[a]!.replicaUUID, tt.clock[b]!.replicaUUID));
+  if (order.every((oldIndex, newIndex) => oldIndex === newIndex)) {
+    return;
+  }
+  if (!tt.clock.some((clock) => bytesEqual(clock.replicaUUID, replicaUuid))) {
+    throw new Error("Table's topotext clock table isn't in sorted UUID order and isn't this tool's own residue - refusing to edit");
+  }
+  const oldToNew = new Map<number, number>();
+  order.forEach((oldIndex, newIndex) => oldToNew.set(oldIndex + 1, newIndex + 1));
+  tt.clock = order.map((oldIndex) => tt.clock[oldIndex]!);
+  remapCharIds(doc, (oldReplicaId) => {
+    const next = oldToNew.get(oldReplicaId);
+    if (next === undefined) {
+      throw new Error(`Table run references topotext replica ${oldReplicaId}, outside the clock table - refusing to edit`);
+    }
+    return next;
+  });
 }
 
 function beginWriteSession(doc: TableDocument, replicaUuid: Uint8Array): TableWriteSession {
@@ -377,16 +454,25 @@ function beginWriteSession(doc: TableDocument, replicaUuid: Uint8Array): TableWr
   }
   let ttIndex = tt.clock.findIndex((clock) => bytesEqual(clock.replicaUUID, replicaUuid));
   if (ttIndex === -1) {
-    // A fresh entry matching the observed two-counter shape: text clock
-    // (total UTF-16 units inserted), then the deletion counter, which
-    // starts at 1 on every fresh replica observed.
-    tt.clock.push(
+    // The clock table is a *sorted set* (see the file header): insert our
+    // entry at its NSUUID-sorted rank, and when that displaces existing
+    // entries, shift every displaced rank's CharIDs up by one across the
+    // whole document. The entry itself matches the observed two-counter
+    // shape: text clock (total UTF-16 units inserted), then the style
+    // clock, which starts at 1 on every fresh replica observed.
+    const position = tt.clock.filter((clock) => compareUuidBytes(clock.replicaUUID, replicaUuid) < 0).length;
+    if (position < tt.clock.length) {
+      remapCharIds(doc, (oldReplicaId) => (oldReplicaId >= position + 1 ? oldReplicaId + 1 : oldReplicaId));
+    }
+    tt.clock.splice(
+      position,
+      0,
       create(TtClockSchema, {
         replicaUUID: new Uint8Array(replicaUuid),
         replicaClock: [create(TtReplicaClockSchema, { clock: 0 }), create(TtReplicaClockSchema, { clock: 1 })],
       }),
     );
-    ttIndex = tt.clock.length - 1;
+    ttIndex = position;
   }
   const ttClock = tt.clock[ttIndex]!;
   const textCounter = ttClock.replicaClock[0];
@@ -415,26 +501,14 @@ function beginWriteSession(doc: TableDocument, replicaUuid: Uint8Array): TableWr
 }
 
 function finalizeWriteSession(session: TableWriteSession): void {
-  // Every save re-stamps the direction marker's registerLatest (base+1) -
-  // observed on all 14 scripted revisions regardless of edit kind.
-  const registerTick = session.baseClock + 1;
-  session.highestTick = Math.max(session.highestTick, registerTick);
-  const tableObject = session.doc.objects[TABLE_OBJECT_INDEX];
-  if (!tableObject) {
-    throw new Error("Table object pool is empty");
-  }
-  const tableDict = parseDictByName(session.doc, tableObject, "table object");
-  const directionRef = resolveRef(requireEntry(tableDict, "crTableColumnDirection"), "crTableColumnDirection");
-  const registerLatest = session.doc.objects[directionRef]?.registerLatest;
-  if (!registerLatest) {
-    throw new Error("Table's column-direction marker isn't the expected RegisterLatest shape - refusing to edit");
-  }
-  registerLatest.timestamp = create(TimestampSchema, {
-    replicaIndex: BigInt(session.replicaIndex),
-    counter: BigInt(registerTick),
-  });
-
-  session.versionElement.clock = BigInt(session.highestTick);
+  // Our version element always advances so foreign vector comparisons see
+  // this save (text-only saves land on base+1, structural on base+2). The
+  // direction marker's registerLatest is deliberately NOT re-stamped: the
+  // scripted capture's same-device saves always did, but the real
+  // multi-device 2AV->2AX save shows a foreign device leaving it alone -
+  // and a foreign restamp is worse than none, since our young counter would
+  // compare *lower* than the device's own in last-writer-wins terms.
+  session.versionElement.clock = BigInt(Math.max(session.highestTick, session.baseClock + 1));
 }
 
 /** Increments every identity object's UUIDIndex by one, for a UUID
@@ -482,6 +556,7 @@ export function applyTableEdit(doc: TableDocument, desiredGrid: readonly string[
     }
   }
 
+  normalizeTopotextOrder(doc, replicaUuid);
   validateTableDocumentInvariants(doc);
   const plan = diffTableGrid(gridFromTableDocument(doc), desiredGrid);
   if (plan.kind === "noop") {
@@ -1061,6 +1136,53 @@ export function validateTableDocumentInvariants(doc: TableDocument): void {
     }
   } catch (cause) {
     failures.push(cause instanceof Error ? cause.message : String(cause));
+  }
+
+  // The topotext clock table is a sorted set (the Stage-1 doubling
+  // incident's rule): entries in strict NSUUID order, and every CharID in
+  // the document accounted for by its rank's clocks - run coordinates
+  // within the text clock, style anchors within the style clock. Holds on
+  // every committed fixture; a violation means chars would be attributed
+  // to the wrong replica by Apple's incremental merge.
+  const tt = doc.document.ttTimestamp;
+  if (!tt) {
+    failures.push("document has no topotext clock table (ttTimestamp)");
+  } else {
+    for (let i = 1; i < tt.clock.length; i += 1) {
+      if (compareUuidBytes(tt.clock[i - 1]!.replicaUUID, tt.clock[i]!.replicaUUID) >= 0) {
+        failures.push(`ttTimestamp entries ${i - 1} and ${i} are not in strict sorted UUID order`);
+      }
+    }
+    const maxTextEnd = new Map<number, number>();
+    const maxStyleAnchor = new Map<number, number>();
+    for (const entry of doc.objects) {
+      for (const str of [entry.string, entry.tsOrderedSet?.array?.array?.contents]) {
+        for (const run of str?.substring ?? []) {
+          if (run.charID && run.charID.replicaID !== 0) {
+            const end = run.charID.clock + run.length;
+            maxTextEnd.set(run.charID.replicaID, Math.max(maxTextEnd.get(run.charID.replicaID) ?? 0, end));
+          }
+          if (run.timestamp && run.timestamp.replicaID !== 0) {
+            maxStyleAnchor.set(
+              run.timestamp.replicaID,
+              Math.max(maxStyleAnchor.get(run.timestamp.replicaID) ?? 0, run.timestamp.clock),
+            );
+          }
+        }
+      }
+    }
+    for (const [replicaId, end] of maxTextEnd) {
+      const clock = tt.clock[replicaId - 1]?.replicaClock[0];
+      if (!clock || end > Number(clock.clock)) {
+        failures.push(`topotext replica ${replicaId}: run coordinates reach ${end}, beyond its text clock ${clock ? Number(clock.clock) : "(none)"}`);
+      }
+    }
+    for (const [replicaId, anchor] of maxStyleAnchor) {
+      const clock = tt.clock[replicaId - 1]?.replicaClock[1];
+      if (!clock || anchor > Number(clock.clock)) {
+        failures.push(`topotext replica ${replicaId}: style anchors reach ${anchor}, beyond its style clock ${clock ? Number(clock.clock) : "(none)"}`);
+      }
+    }
   }
 
   if (failures.length > 0) {

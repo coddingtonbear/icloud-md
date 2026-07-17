@@ -617,3 +617,38 @@ export const TABLE_EVOLUTION_REVISIONS: readonly { seq: number; op: string; grid
       "00I=",
   },
 ];
+
+/**
+ * The exact document this tool's first-ever live table push produced
+ * (Attachment `001b9e8a-c474-4311-af32-abe70026b346`, disposable note
+ * "Table Write Verify (2026-07-16)", recordChangeTag `2dq`, fetched back
+ * from the server after the Stage-1 doubled-cells incident): a cell edit
+ * whose replica registration *appended* its `ttTimestamp` Clock entry
+ * instead of inserting at its sorted-UUID rank. Self-consistent to a fresh
+ * parse (which is why every gate passed), but Apple's incremental merge
+ * resolves `CharID.replicaID` as a rank among the *sorted* UUIDs
+ * (`TTVectorMultiTimestamp.replicaUUIDByIndex`), so every char was
+ * attributed to the wrong replica and clients unioned instead of unified -
+ * doubling every cell's text on screen. The writing replica's UUID (this
+ * clone's `state.json` replicaId at the time) is
+ * `44681ad5-c726-c5e5-7d00-08df7530ae41` - tests re-edit under it to prove
+ * `tableEdit.ts`'s `normalizeTopotextOrder` heals this exact residue.
+ */
+export const TABLE_UNSORTED_TT_REGRESSION =
+  "eJzt1G9oXeUZAPB7zr25OTlJ7fHUP93Zl/QONMtoud6OtgxGrY2L6ap0MY6ysdX8ubUpSW6b3uqmXeeKsCrCRDodQqH4QSaWfNq3VQTncK5Ekax2ONAs" +
+  "tMUPsquMsc0Py0ia1SZNNmHs034XLs953vf5vX8eDifKpScmoiiX5LInJ6J4S1yMcknT2lxcjIIknI/hQswvxEJSmI9NC7GYBGtz2c79O6JCdkuUS0ul" +
+  "9vJ/+GXFKEjDcpAVo3walvNZMWpKw3KUFaNiGpZXZW1xHBfmVk7Dcpit3/+lKMhujcL0C6V123v7+gdGqttrI4dHx7qGx6uD9eHa2M7q3npfrXf4gX31" +
+  "7HxwLJgK4heC+OF4Z1psvHKm8cqZLIkLc9dMctl87AjmR4Ikl4TZfOwIs5viuVbMzs7Ork5y2ZXnzjAK5v7pDVEuTbZeOt71VvDM5InJ7v5Xb+s+md4Q" +
+  "BWmyeeCDxq7dx849996Zvm3Pnno77YjTOCzPXauQRfNtDdbm5sea07Bc/HTsqsqmZSqbPx3L2vbHUZgVo0IaJs2LsmhR1rIoi//XHSn0jH48k3/zfPzG" +
+  "4y++0/XuxcsdWdeYeuSO0x+ueWnj9HRj9sLuhXvGaVhuWXLPtjQst17TkbnKeJnKthU60rooa1uUrVqUXZd1Vi7v0ZqG5euW7NGShuXrr9rjX7Vzr+bq" +
+  "JbWFNCwnV9X29HanTf0jB/b1r9jeMGn6DO1tyrp770zztbHqigs1J/nPsFB+0fnTZc6/Zun5B8b7H6z91+f/cdD7WJDG9Ydq66tDw/Xq0IorxklwZcV0" +
+  "4WqXX8GoPejIL1S1XnktC/MjYZJLmrP52NH0b04Sl6LhoepYfbj+/dJNg+PLfT1KhUPVkb2l4uB4b+2hQ6WW++7r6eoZG6p+r9QyOH659lCpdbA6MrKQ" +
+  "dN48WBvd0H/gwEh1w/berr4N99x7z+HRger4MhP31seHxx7ovPGaibldrq4fq9WrhzYsfN+unejZvsIEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAE" +
+  "QRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAE" +
+  "QRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAE" +
+  "QRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAE" +
+  "QRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAEQRAE" +
+  "QRAEQRAEQRAEQRAEQRAEQRD/r6KSHBm/uGnbt3f87PBd35yZOvJUTyV5+PqJO/f9pDcXHtn74MZvHD1fSb64/nd3PfnXzrsfPTWz6fnVqyYryXe2HJzJ" +
+  "/ea7p8pP/+r1T174RbWS/Onzs/e/3NT3xOfOPvqPx060NyrJE5suHTz5yd93nP3a/X8MZ35bryRd+7Jzr9/y64s/yEXvHy5PbKskt35ryx++/peD0xca" +
+  "X25kr/10upJsHvigsWv3sXPPvXemb9uzp96uJD98+f1wa0/7jT9v/+XUU39O91SSrZeOd70VPDN5YrK7/9Xbuk9Wkj23Z6fX/2jo3O9v33Mh99Hxs5Vk" +
+  "XWPqkTtOf7jmpY3T043ZC7srSbC5c/zmPU+/9tWjE7ue/9tHRytJoWf045n8m+fjNx5/8Z2udy9+ZUucxdd0JA2jVWkYtczNLb1BGkbNaRgF/wRjLkI2";

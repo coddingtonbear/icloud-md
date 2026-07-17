@@ -17,6 +17,7 @@ import {
   TABLE_FIRST_REVISION,
   TABLE_FINAL_REVISION,
   TABLE_LONG_LIVED_SNAPSHOTS,
+  TABLE_UNSORTED_TT_REGRESSION,
   TABLE_WRITE_PATH_REVISIONS,
 } from "./realFixtures.js";
 
@@ -152,13 +153,105 @@ test("first edit registers our replica: version element appended, UUID inserted 
   assert.equal(doc.version.element.length, replicaCountBefore + 1);
   const ourElement = doc.version.element[replicaCountBefore]!;
   assert.equal(Number(ourElement.replicaIndex), replicaCountBefore);
-  assert.equal(Number(ourElement.clock), 1); // pure text edit: base 0 + register tick only
+  assert.equal(Number(ourElement.clock), 1); // pure text edit: base 0 + 1 (structural saves land on base+2)
   assert.equal(doc.uuidTable.length, uuidCountBefore + 1);
   assert.deepEqual([...doc.uuidTable[replicaCountBefore]!], [...OUR_REPLICA]);
   assert.deepEqual(
     identityUuidIndexes(doc).sort((a, b) => a - b),
     identityIndexesBefore.map((index) => index + 1),
   );
+});
+
+// OUR_REPLICA (0xa0...) sorts *after* every fixture's replica UUIDs, so the
+// tests above and below exercise the append case of sorted registration;
+// SMALL_REPLICA sorts *before* them all, exercising the displacement case
+// the Stage-1 doubling incident missed (ttTimestamp is a sorted set - see
+// tableEdit.ts's file header).
+const SMALL_REPLICA = new Uint8Array(Array.from({ length: 16 }, () => 0x01));
+
+test("registration below existing entries inserts at the sorted rank and remaps every existing CharID up by one", () => {
+  const original = parse(TABLE_EVOLUTION_REVISIONS[4]!.base64);
+  const mirrorRunsBefore = original.objects[original.crRowsRef]!.tsOrderedSet!.array!.array!.contents!.substring.map((s) => ({
+    replicaID: s.charID!.replicaID,
+    clock: s.charID!.clock,
+  }));
+
+  const doc = parse(TABLE_EVOLUTION_REVISIONS[4]!.base64);
+  const desired = [
+    ["apple-r1c1", "berry-r1c2"],
+    ["cedar-r2c1", "delta-r2c2-small"],
+  ];
+  assert.equal(applyTableEdit(doc, desired, SMALL_REPLICA), true);
+  validateTableDocumentInvariants(doc);
+  assert.deepEqual(gridFromTableDocument(doc), desired);
+
+  const tt = doc.document.ttTimestamp!;
+  assert.deepEqual([...tt.clock[0]!.replicaUUID], [...SMALL_REPLICA]);
+  // Apple's runs (previously replicaID 1) now live at rank 2 ...
+  const mirrorRunsAfter = doc.objects[doc.crRowsRef]!.tsOrderedSet!.array!.array!.contents!.substring;
+  mirrorRunsBefore.forEach((before, i) => {
+    const after = mirrorRunsAfter[i]!;
+    assert.equal(after.charID!.replicaID, before.replicaID === 0 ? 0 : before.replicaID + 1);
+    assert.equal(after.charID!.clock, before.clock);
+  });
+  // ... and our new run writes under rank 1.
+  const editedCell = doc.objects.find((o) => o.string?.string === "delta-r2c2-small")!;
+  const ourRun = editedCell.string!.substring.find((s) => s.charID!.replicaID === 1);
+  assert.ok(ourRun, "the inserted text's run should carry our sorted rank (1)");
+
+  const encoded = encodeTableDocument(doc);
+  assert.equal(tableDocumentRoundTrips(encoded), true);
+  assert.deepEqual(gridFromTableDocument(parseTableDocument(encoded)), desired);
+});
+
+test("the direction marker's registerLatest is left untouched, matching the real foreign-device save (2AV -> 2AX)", () => {
+  const original = parse(TABLE_EVOLUTION_REVISIONS[4]!.base64);
+  const registerBefore = original.objects.find((o) => o.registerLatest)!.registerLatest!;
+  const doc = parse(TABLE_EVOLUTION_REVISIONS[4]!.base64);
+  editAndVerify(doc, [
+    ["apple-r1c1", "berry-r1c2"],
+    ["cedar-r2c1", "delta-r2c2-reg"],
+  ]);
+  const registerAfter = doc.objects.find((o) => o.registerLatest)!.registerLatest!;
+  assert.equal(registerAfter.timestamp?.replicaIndex, registerBefore.timestamp?.replicaIndex);
+  assert.equal(registerAfter.timestamp?.counter, registerBefore.timestamp?.counter);
+});
+
+// --- the Stage-1 doubling incident's own artifact -----------------------------
+
+const INCIDENT_REPLICA = new Uint8Array(Buffer.from("44681ad5c726c5e57d0008df7530ae41", "hex"));
+
+test("the unsorted-ttTimestamp incident document violates the sorted-set/accounting invariants as parsed", () => {
+  assert.throws(() => validateTableDocumentInvariants(parse(TABLE_UNSORTED_TT_REGRESSION)), /sorted UUID order|clock/);
+});
+
+test("editing the incident document under its own replica heals it: sorted table, remapped CharIDs, invariants restored", () => {
+  const doc = parse(TABLE_UNSORTED_TT_REGRESSION);
+  const desired = [
+    ["alpha", "bravo"],
+    ["one", "two-edited-again"],
+  ];
+  assert.equal(applyTableEdit(doc, desired, INCIDENT_REPLICA), true);
+  assert.deepEqual(gridFromTableDocument(doc), desired);
+  validateTableDocumentInvariants(doc);
+  const tt = doc.document.ttTimestamp!;
+  assert.deepEqual([...tt.clock[0]!.replicaUUID], [...INCIDENT_REPLICA]); // 44... sorts before 7c...
+  const encoded = encodeTableDocument(doc);
+  assert.equal(tableDocumentRoundTrips(encoded), true);
+  assert.deepEqual(gridFromTableDocument(parseTableDocument(encoded)), desired);
+});
+
+test("a no-op edit against the incident document reports no change rather than half-healing", () => {
+  const doc = parse(TABLE_UNSORTED_TT_REGRESSION);
+  const currentGrid = gridFromTableDocument(doc);
+  assert.equal(applyTableEdit(doc, currentGrid, INCIDENT_REPLICA), false);
+});
+
+test("an unsorted document that is not our own residue is refused, not reinterpreted", () => {
+  const doc = parse(TABLE_UNSORTED_TT_REGRESSION);
+  const changed = gridFromTableDocument(doc).map((row) => [...row]);
+  changed[0]![0] = "changed";
+  assert.throws(() => applyTableEdit(doc, changed, OUR_REPLICA), /isn't this tool's own residue/);
 });
 
 test("first edit registers our topotext clock: a fresh two-counter ttTimestamp entry, advanced by the units we wrote", () => {
