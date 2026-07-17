@@ -9,7 +9,9 @@
       "Bash(date -Iseconds)",
       "Bash(git -C /home/acoddington/Documents/Projects/icloud-notes-sync remote -v)",
       "Bash(npm run *)",
-      "Bash(npx tsx *)"
+      "Bash(npx tsx *)",
+      "Bash(git -C /home/acoddington/Documents/Projects/icloud-notes-sync status --short)",
+      "Bash(git -C /home/acoddington/Documents/Projects/icloud-notes-sync diff --stat)"
     ]
   }
 }
