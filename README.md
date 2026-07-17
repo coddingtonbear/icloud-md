@@ -1,393 +1,291 @@
 # icloud-notes-sync
 
-A command-line tool for syncing Apple Notes (via iCloud) to a local, git-backed
-folder — and back again. Inspired by tools like `git` itself: a single binary,
-a working tree, and explicit fetch/push-style commands rather than continuous
-background syncing.
-
-This project is based on reverse-engineering the private CloudKit web service
-that `www.icloud.com/notes` itself talks to. It is **not** an official or
-supported API, and it can break at any time if Apple changes the protocol,
-the Notes data format, or account-level encryption settings (see
-[Caveats](#caveats) below).
-
-## Goals
-
-- **TypeScript.** Chosen deliberately, not just for the Node ecosystem, but
-  because a future goal is to reuse this code inside an Obsidian plugin.
-- **git-backed working folder.** Notes are materialized as files in a plain
-  folder that can be (and probably should be) a git repo, so history, diffing,
-  and conflict resolution can lean on tools you already trust.
-- **A single CLI**, `git`-flavored in spirit: something like `notes fetch`,
-  `notes status`, `notes push`, rather than a daemon or FUSE filesystem (a
-  FUSE filesystem was considered but is out of scope for now — the
-  auth/session model doesn't lend itself to always-on background access as
-  cleanly as periodic fetch/push does).
-- **Conflict awareness.** Because both iCloud and the local folder can change
-  independently, the tool needs to detect when a note changed remotely since
-  the last fetch *and* changed locally, and surface that as a conflict rather
-  than silently picking a winner.
-- **Safety over completeness.** It's fine — expected, even — for early phases
-  to simply refuse to touch notes it doesn't fully understand (attachments,
-  tables, unrecognized embedded objects) rather than risk corrupting them.
-
-## How it works (short version)
-
-The iCloud web client talks directly to CloudKit's private database web
-service for the `com.apple.notes` container:
+A command-line tool for syncing Apple Notes (via iCloud) to a local folder
+of plain files — and back again. `git`-flavored in spirit: a single binary,
+a working tree, and explicit `clone`/`pull`/`push` commands rather than a
+background daemon. It doesn't touch git itself, but the folder it writes is
+exactly the kind of thing you'd want to put under git.
 
 ```
-https://p<N>-ckdatabasews.icloud.com/database/1/com.apple.notes/production/private/...
+$ icloud-notes clone ./my-notes
+$ cd my-notes && $EDITOR "Grocery list.md"
+$ icloud-notes push
 ```
 
-using the same request shapes as CloudKit JS (`records/query`,
-`records/lookup`, `records/modify`, `changes/zone`, with a `syncToken` /
-`moreComing` model for incremental sync). Authentication is deliberately
-*not* reimplemented: signing in opens a real (headed) browser window via
-Playwright, Apple's own pages run the entire sign-in flow — password,
-whatever 2FA variant the account uses, CAPTCHAs, interstitials — and once
-the page's own `setup.icloud.com` bootstrap call succeeds, the session
-cookies are harvested from the browser and the window closes. This keeps
-the reverse-engineered surface down to the *result* of login (a cookie jar
-plus client identifiers) rather than Apple's login protocol itself, which
-they actively churn (their current web client uses a device-attested
-`bridge/*` 2FA flow that plain HTTP can't replicate — a direct SRP-6a
-login was implemented here and later removed for exactly that reason; see
-git history if it's ever worth resurrecting).
+## Why
 
-Note title and body are stored in fields named things like `TitleEncrypted`
-and `TextDataEncrypted`. Despite the name, in accounts *without* Advanced
-Data Protection enabled, these arrive over the wire as plain, readable bytes
-(compressed, not encrypted client-side) — `ENCRYPTED_BYTES` here describes
-Apple's server-side at-rest encryption, not end-to-end/device-locked
-encryption. Decompressing them yields the same protobuf "mergeable data"
-format used on-device in `NoteStore.sqlite`, which existing open-source
-projects (e.g. `apple_cloud_notes_parser`) have already reverse-engineered in
-useful detail. The compression container (gzip vs. zlib) varies per record
-depending on whichever client last wrote it, not on which endpoint served the
-read — decoding has to try both.
+Apple Notes has no supported way to get your notes onto disk as plain files.
+This tool exists to fix that:
 
-## Current status
+- **Your notes become real files**, editable in whatever editor you already
+  use, versionable in git, greppable, diffable, and scriptable — instead of
+  being locked inside Notes.app or the iCloud web client.
+- **Plain files, not a proprietary export.** `clone` writes one Markdown
+  file per note into a folder you control; `pull` and `push` keep it in sync
+  with iCloud in both directions. The tool itself never touches git — but
+  wrap that folder in a git repo yourself and you get free history,
+  diffing, and backup on top, which is exactly what it's designed for.
+- **Built-in version history, independent of git.** Every `pull`/`push` that
+  changes a note snapshots it, so you can inspect or roll back *any* past
+  version of a note — even ones you never `pull`ed while they existed — via
+  `icloud-notes history`/`diff`/`revert`. This has already saved real data
+  during this project's own development (see the disclaimer below).
+- **Conflict-aware, not silently-overwriting.** If a note changed in iCloud
+  since your last sync *and* you edited it locally, `pull` does a real
+  three-way merge and only asks you to resolve the parts that actually
+  overlap — the rest merges automatically.
+- **A `git`-flavored CLI**, not a background daemon or FUSE filesystem —
+  something you run when you want to sync, not something always watching.
 
-Phase 0 is mostly done. Authentication is **per-folder, but transparently
-so**: credentials are never stored inside a vault directory itself (a vault
-is exactly the kind of thing that gets copied/zipped/synced/committed
-elsewhere, and most of those paths don't respect `.gitignore`), but the CLI
-still behaves as if each folder owns its own login. Every Apple ID this
-machine has signed into gets its own subdirectory under
-`~/.config/icloud-notes-sync/accounts/<dsid>/` (session, a persistent
-Playwright browser profile, and a small non-secret `meta.json`); a cloned
-folder's own `.icloud-notes-sync/state.json` records only which account it's
-bound to (`{ appleId, dsid }`), never any credential material itself.
+## ⚠️ Before you use this
 
-1. One-time setup: `npm install -g icloud-notes-sync` puts the `icloud-notes`
-   command on your `PATH`. (Working from a clone instead: `npm run build &&
-   npm link`, re-run `npm run build` after source changes.)
-2. `icloud-notes clone <directory>` on a brand-new directory always opens a
-   browser window on `www.icloud.com` first - sign in as you normally would.
-   The first run downloads the login browser automatically (a one-off
-   ~150 MB Chromium fetch, via `npx playwright install chromium` under the
-   hood) before opening it. The command detects sign-in completion on its
-   own, verifies the captured session, and closes the window. Closing the
-   window yourself aborts. Whichever Apple ID you sign into becomes (or is
-   matched against) that folder's bound account - so `clone ./my-notes` and
-   `clone ./someone-elses-notes` can freely use different Apple IDs, with no
-   flag needed.
-3. Each account's login keeps its own persistent browser profile under
-   `~/.config/icloud-notes-sync/accounts/<dsid>/browser-profile/`, so after
-   the first sign-in for that Apple ID, Apple treats it as a trusted,
-   returning browser - later sign-ins for that same account typically skip
-   2FA (and may need no interaction at all if the profile's own session is
-   still alive). `icloud-notes reauthenticate [directory]` forces a fresh
-   sign-in against an already-cloned folder's bound account (defaults to the
-   current directory) - useful if silent recovery can't get back in on its
-   own. It refuses - rather than silently rebinding the folder - if you sign
-   into a different Apple ID than the one that folder was cloned for.
-4. `icloud-notes verify-auth [directory]` calls the same
-   `/setup/ws/1/validate` endpoint the web client calls on page load, using
-   that folder's bound account's session (defaults to the current
-   directory). Success confirms the session is valid and prints the
-   account's `dsid` and the partition-specific CloudKit host (e.g.
-   `p43-ckdatabasews.icloud.com`) that all Notes calls need.
+**This is not an official or supported Apple API.** It works by
+reverse-engineering the private CloudKit web service that
+`www.icloud.com/notes` itself talks to, and by reverse-engineering the
+binary format Notes uses to store note content (a CRDT-based "mergeable
+data" protobuf format). Apple can change either of those at any time without
+notice, and this project has already required real repair work when its own
+understanding of that format turned out to be incomplete.
 
-One fallback bootstrap path also exists: `npm run import-har --
-<path-to-file.har>` extracts cookies from a Chrome DevTools export, verifies
-them, and writes them into that account's own subdirectory the same way a
-browser login would - mainly for debugging against a known-good browser
-session. (For headless environments, run `clone`/`reauthenticate` on a
-machine with a display and copy that account's whole
-`~/.config/icloud-notes-sync/accounts/<dsid>/` subdirectory over - it's
-host-independent.)
+**Data loss is a real possibility, not a hypothetical one.** During
+development, an early version of the table-writing code corrupted a live
+note on *two separate occasions* — once crashing the note so badly it
+appeared empty on another device. Both times, the note was fully recovered,
+specifically because this tool's own version-history snapshots (see
+`history`/`revert` below) had a pre-corruption copy on disk. That is the
+intended safety net, but you should not assume it is infallible, and you
+should not treat this tool as a substitute for a real backup.
 
-`icloud-notes clone <directory>` is implemented: it walks the whole Notes
-zone, decodes plain-text note bodies, downloads any attachments (see
-"Attachments" below), and writes one file per note into the target
-directory, skipping only notes in Trash and anything that fails to decode
-or whose attachments can't be resolved. It also writes
-`.icloud-notes-sync/state.json` (per-note record name → file/changeTag/
-modification date, plus the zone's syncToken) and a pristine "base copy" of
-each note's text under `.icloud-notes-sync/base/` - the merge ancestor
-`pull` needs for real 3-way merging.
+**Use this at your own risk, on your own account, and only against a
+working tree that's also a git repo** (or otherwise backed up) so you always
+have an independent copy of your notes outside of iCloud and outside of this
+tool. Before relying on `push` (or `delete`, or `revert`) against notes you
+care about, try it first against a disposable test note.
 
-Notes **shared with you** are cloned too. They live in a different place
-than your own notes: CloudKit's *shared* database
-(`.../production/shared/...`), in one zone per sharer (`changes/database`
-enumerates the zones; each is a "Notes" zone tagged with the sharer's
-`ownerRecordName`). One wrinkle: the shared database's `changes/zone`
-listing doesn't return note bodies, so any live note that arrives without
-`TextDataEncrypted` gets a follow-up `records/lookup` (the same call the
-web client makes when you open a shared note). Shared notes are written
-into the same directory as your own; `state.json` records which sharer's
-zone each one belongs to, plus a per-zone syncToken for incremental `pull`.
+A few things follow directly from the reverse-engineering:
 
-`icloud-notes pull [directory]` (defaults to the current directory) is also
-implemented: it fetches only what changed since the stored syncToken, and
-for any tracked note whose local file no longer matches its base copy, runs
-a real 3-way (diff3) merge - base vs. local vs. new remote - via
-[node-diff3](https://github.com/bhousel/node-diff3). If local and remote
-touched different parts of the note, it merges automatically with no
-markers at all. If they touched the same region, it writes standard
-git-style diff3 conflict markers (`<<<<<<< local` / `||||||| base` /
-`=======` / `>>>>>>> remote`) directly into the file for you to resolve by
-hand - most editors (VS Code included) already understand this format. A
-note deleted remotely while locally edited gets the same treatment, merged
-against an empty remote so the markers show exactly what your local edits
-were protecting.
+- It likely **requires Advanced Data Protection (ADP) to be disabled** on
+  the account — with ADP on, note content is end-to-end encrypted in a way
+  this tool doesn't attempt to decrypt.
+- Login itself is **not** reverse-engineered: `clone`/`reauthenticate` open
+  a real, headed browser window and let Apple's own sign-in pages (password,
+  2FA, CAPTCHAs) run to completion, then harvest the resulting session. This
+  keeps the tool out of the business of replicating Apple's login protocol,
+  which changes far more often than the sync API does.
 
-`pull` covers shared notes as well, using the per-zone syncTokens stored in
-`state.json`. A shared zone that disappears from the enumeration (its owner
-stopped sharing with you, or deleted the notes) is deliberately *not*
-treated as a deletion: losing access isn't proof the notes are gone, so the
-local files stay in place and are merely untracked (with a warning), unlike
-a per-note remote deletion, which does remove a clean local copy.
+## Install
 
-`icloud-notes push [directory] [--dry-run]` sends local edits back up.
-It finds tracked notes whose file no longer matches its base copy, refuses
-anything ambiguous (unresolved conflict markers, notes shared by someone
-else, emptied files, attachment/asset-backed notes), and uploads the rest
-via `records/modify` with the note's `recordChangeTag` as an optimistic
-lock — a note that changed remotely since the last `pull` is reported as a
-conflict (pull first; it merges), never overwritten, and the server
-enforces the same tag check again at write time.
+Requires Node.js 20+.
 
-**Attachment notes are permanently read-only, not just "not yet".** They're
-tracked (readable, editable-looking files, per the "Attachments" section
-below) but `push` will always refuse to write them back — the note's
-underlying CRDT structure carries attribute runs this tool only reads
-(`note_text`), never fully parses or round-trips, so editing one back would
-risk corrupting it. If you edit an attachment-bearing note anyway, `push`
-reports which file and why, and names `icloud-notes restore <file>` as the
-way to discard that edit and get back to a clean, synced copy — see
-`restore` below. `push` also refuses a *plain* note whose text has grown a
-hand-typed `attachments/...` link or image embed matching the shape this
-tool renders: there's no real uploaded file behind it, so pushing it as
-literal text would silently "succeed" while doing something other than
-what it looks like.
+```
+npm install -g icloud-notes-sync
+```
 
-**Attachments.** `clone`/`pull` download attachments and represent them as
-files under an `attachments/` folder alongside your notes, with the note's
-text rewritten to reference them (`![name](attachments/name)` for images,
-`[name](attachments/name)` otherwise) in place of Apple's `U+FFFC`
-placeholder character. The fetch chain, confirmed against both an audio and
-an image attachment: a note's decoded body embeds an `attachmentIdentifier`
-that is itself the CloudKit `recordName` of a separate `Attachment` record,
-which references a `Media` record via a `Media` field, whose `Asset` field
-holds the actual signed download URL. `state.json` tracks each downloaded
-attachment (keyed by the `Attachment` record's recordName) with the
-`Media` record's `Asset.fileChecksum`, so `pull` only re-downloads a file
-whose checksum has actually changed. `Attachment` records can carry their
-own additional signed asset (`MergeableDataAsset`) - seen populated for an
-audio recording (transcript/waveform data) and `null` for a plain image -
-which isn't downloaded; only the real file (the `Media` record's `Asset`)
-is. Upload is a non-goal, not deferred: the web Notes editor has no
-affordance to attach a new file to a note at all, so there's no legitimate
-client operation to reverse-engineer the way plain-text push had one.
+This puts the `icloud-notes` command on your `PATH`.
 
-**Known limitations of the current download support**, live-verified with
-`clone` against a real account but not yet exercised for the following:
+Building from a clone of this repo instead:
 
-- **Shared-note attachments are unverified.** The fetch chain uses the
-  correct database/zoneID for a shared note's attachments (mirroring how
-  shared note text already works), but no shared note with an attachment
-  has actually been observed live yet - treat this path as unproven until
-  it is.
-- **`MergeableDataAsset` (the audio transcript/waveform data) is never
-  downloaded**, by design - only the real payload (`Media.Asset`). An
-  audio attachment's transcript, if it has one, isn't available locally.
-- **Multiple attachments in a single note are untested live.** The
-  placeholder-to-attachment-reference matching is positional and written
-  to handle any number of attachments, but every real note seen so far has
-  had exactly one.
+```
+git clone https://github.com/coddingtonbear/icloud-notes-sync.git
+cd icloud-notes-sync
+npm install
+npm run build && npm link
+```
 
-**How push edits a note.** The note body isn't just text — it's a CRDT
-document (the same "mergeable data" protobuf Apple's own clients sync),
-carrying every insertion ever made, with deleted ranges kept as tombstones,
-each attributed to a replica (device) and clock. Overwriting it naively
-would corrupt other devices' ability to merge. So push:
+(Re-run `npm run build` after pulling source changes.)
 
-1. fetches the note's *current* document from the server,
-2. requires it to re-encode **byte-for-byte** from our parsed model (any
-   structure we don't fully understand → the note stays read-only) — the
-   encoder here is [`@bufbuild/protobuf`](https://github.com/bufbuild/protobuf-es)
-   (protobuf-es), generated from this project's own `.proto` schemas
-   (`proto/versioned_document.proto`, `proto/topotext.proto`,
-   `proto/crdt.proto` — reverse-engineered from real captures, with
-   names/shapes aligned to Apple's own schema as recovered from the Notes
-   web-app bundle) and configured for proto2
-   explicit field presence, not a hand-written byte-exact ordered-token
-   encoder as in earlier versions of this tool — validated against real
-   captures before the switch (see the dev notes),
-3. applies the local file's change as a minimal splice — tombstoning
-   removed text and inserting new text under this vault's own stable
-   replica id (persisted in `state.json`), the same way the web client's
-   own editor does (verified by replaying a captured web-client save and
-   reproducing its upload byte-for-byte),
-4. decodes the rebuilt document and requires it to yield exactly the local
-   file's text, re-checks the CRDT's internal invariants, and only then
-   uploads (zlib-compressed, as the write path requires).
+## Quick start
 
-`--dry-run` runs every step except the upload. Display metadata
-(`TitleEncrypted`, `SnippetEncrypted`) is re-derived from the new text the
-way the web client derives it; all other record fields are echoed back
-unchanged, mirroring captured web-client update operations. Push covers
-*edits to existing notes* only: creating new notes remotely, pushing local
-deletions, and writing to shared notes are all still out of scope.
+```
+icloud-notes clone ./my-notes
+```
 
-**A note on session lifetime:** a HAR-imported session's short lifespan was
-caused by racing a *browser tab's* own background heartbeat — the tab calls
-`/setup/ws/1/validate` every 14 minutes and rotates the session's bearer
-token (`X-APPLE-WEBAUTH-TOKEN`) each time, invalidating whatever value was
-snapshotted into the HAR. A session minted by a real sign-in isn't shared
-with any browser tab, so it isn't racing against that heartbeat. Whether it
-can still go stale from long idle periods independent of that heartbeat is
-still an open question (see the project's dev notes) — this tool doesn't yet
-drive its own periodic `/validate` refresh, so if `verify-auth` ever reports
-a stale session, `icloud-notes reauthenticate [directory]` (fast, since the
-account's persistent browser profile usually skips 2FA) is the fallback.
+The first run downloads a Chromium browser for sign-in automatically (a
+one-off ~150 MB fetch), then opens it against `www.icloud.com` — sign in as
+you normally would (password, 2FA, whatever your account requires). The
+command detects sign-in completion on its own and closes the window;
+closing it yourself aborts the clone. This walks your whole Notes zone
+(including notes shared with you) and writes one Markdown file per note into
+`./my-notes`, downloading any attachments alongside them.
+
+After that:
+
+```
+cd my-notes
+icloud-notes status        # what would `push` do right now?
+icloud-notes pull          # fetch remote changes, merging with local edits
+icloud-notes push          # send local changes back to iCloud
+```
+
+Later sign-ins for the same Apple ID typically skip 2FA — each account gets
+its own persistent browser profile under
+`~/.config/icloud-notes-sync/accounts/<dsid>/`, which Apple treats as a
+trusted, returning browser. Credentials are never stored inside the vault
+folder itself (a vault is exactly the kind of thing that gets copied,
+zipped, or synced elsewhere); a cloned folder's own
+`.icloud-notes-sync/state.json` only records *which* account it's bound to.
 
 ## Commands
 
-Deliberately reusing git's own vocabulary rather than inventing new terms,
-since the tool is explicitly modeled on git's fetch/push workflow and these
-words are already the most discoverable choice for what each one does:
+| Command | What it does |
+| --- | --- |
+| `clone <directory>` | Full initial export into a fresh directory: every note, attachments included. Signs in via a browser window the first time a directory (or Apple ID) is used. Refuses to run against an already-cloned directory — use `pull` there instead. |
+| `pull [directory]` | Fetch everything that changed remotely since the last sync; auto-merges non-overlapping local edits, writes conflict markers for overlapping ones. Defaults to the current directory. |
+| `push [directory] [--dry-run]` | Reconcile local disk state up to iCloud: creates notes for new `.md` files, uploads edited notes, moves notes whose file was deleted locally to Recently Deleted, and merges in remote changes to anything edited on both sides. Refuses anything ambiguous rather than guessing. |
+| `status [directory]` | Preview exactly what the next `push` would do — creates, edits, deletes, and any refusals — without writing anything. Runs the same live checks `push --dry-run` does, so it needs to sign in. |
+| `restore <file> [directory]` | Discard a tracked note's *local, uncommitted* edits, reverting the file to the last-synced copy. Purely local, no network call. |
+| `delete <file> [directory] [--hard]` | Move a note to Recently Deleted (recoverable in Notes for ~30 days) and stop tracking it locally, keeping the locally-edited copy on disk as an untracked file. `--hard` permanently deletes instead — works even on attachment-bearing or unparseable notes, and on a note already soft-deleted. This is a real remote write with no confirmation prompt. |
+| `history <file> [directory] [--records]` | List a note's version-history timeline, newest first. |
+| `diff <file> <ref> [directory]` | Diff two history snapshots, or one snapshot against the current remote copy. `<ref>` is a snapshot/epoch id from `history`, or `<from>..<to>`. |
+| `revert <file> <id> [directory] [--yes]` | Write a historical snapshot back to the server — the escape hatch if a note gets corrupted or a bad edit gets pushed. A real remote write; without `--yes` it only reports what it would do. |
+| `object <list\|show\|delete>` | Record-level plumbing for repairing broken notes: list every raw CloudKit record in your Notes zone with health/reference info, inspect one record in full, or permanently delete one by ID. Run `icloud-notes object` with no arguments for the full usage. |
+| `reauthenticate [directory]` | Force a fresh sign-in for a directory's already-bound account. Useful if a session goes stale and silent recovery can't get back in on its own. Refuses if you sign into a different Apple ID than the one the directory was cloned for. |
+| `verify-auth [directory]` | Check whether a directory's bound account session is still valid. |
+| `bug-report --since <duration> [directory]` | Bundle version info, the last error, local sync state, and recent debug-log entries into a file to attach to a GitHub issue (e.g. `--since 2h`). |
 
-- **`clone <directory>`** *(implemented)* — full initial export: fetch every
-  note (downloading any attachments alongside them) and write it into a
-  fresh directory, alongside sync state. Signs in via a browser window the
-  first time a directory (or a new Apple ID) is used - there's no separate
-  `login` step. Refuses to run against a directory that's already been
-  cloned (same spirit as `git clone` refusing a non-empty destination) -
-  use `pull` there instead.
-- **`reauthenticate [directory]`** *(implemented)* — force a fresh sign-in
-  for an already-cloned directory's bound account (defaults to the current
-  directory). Not git vocabulary, but there's no `git` equivalent to steal a
-  name from here. Refuses - rather than silently rebinding the folder - if
-  the completed sign-in turns out to be for a different Apple ID than the
-  one that directory was cloned for.
-- **`pull [directory]`** *(implemented)* — run inside (or pointed at) a
-  cloned directory; fetches whatever changed remotely since the last sync
-  (using the stored `syncToken`) and updates local files accordingly, or
-  reports a conflict instead of overwriting a note that also changed
-  locally. Named `pull`, not `fetch`, because there's no separate
-  remote-tracking ref to update first — it goes straight to the working
-  directory, same as `git pull` without a merge step.
-- **`push [directory] [--dry-run]`** *(implemented)* — send local edits back
-  up. Refuses to push a note whose remote `recordChangeTag` has moved since
-  the last `clone`/`pull` baseline, surfacing that as a conflict instead of
-  overwriting newer remote content — the safety mechanism this needs isn't a
-  full merge, just "don't clobber a change you haven't seen." See "How push
-  edits a note" above for the CRDT handling and the byte-for-byte round-trip
-  gate.
-- **`restore <file> [directory]`** *(implemented)* — discard a tracked
-  note's local edits, overwriting it with its base copy (the last-known-
-  synced text). Purely local, no network call. Not modeled on a specific
-  `git` command, but the same idea as `git restore <path>`. The general
-  escape hatch for any note stuck behind a `push` refusal you'd rather
-  abandon than resolve — most notably a note with an attachment, which
-  `push` will never accept edits to (see above).
+No `commit`/`branch`/`merge` equivalents exist — the working directory *is*
+the local state, and the git repo you presumably wrapped around it (or the
+`history`/`diff`/`revert` trio above) is where history and conflict
+resolution live.
 
-No `commit`/`branch`/`merge` equivalents are planned — the working directory
-*is* the local state, and conflicts are meant to be resolved by hand (or via
-whatever the actual git repo wrapping the folder offers), not by the tool
-itself.
+## What works today
 
-## Phased roadmap
+Live-verified against a real account (not just unit tests):
 
-**Phase 0 — Foundation.** *(mostly done)* Authentication (browser-driven
-login), session/cookie handling, and a thin typed client for the CloudKit
-private database web service. No note logic yet, just "can we reliably
-make authenticated requests." Remaining: a self-driven `/validate` refresh
-heartbeat for long-running sessions.
+- **`clone`/`pull`/`push` for plain-text notes**, including notes shared
+  with you (read side), with real three-way merging on `pull`.
+- **`push` as a full reconciler**: creating notes from new local files,
+  uploading edits, and moving deleted-locally notes to Recently Deleted —
+  all gated by an optimistic-lock check against the note's remote change
+  tag, so a note that changed remotely since your last sync is reported as
+  a conflict, never silently overwritten.
+- **Attachments** (images and audio confirmed): downloaded and rewritten
+  into note text as `attachments/`-relative links; re-downloaded only when
+  the remote file's checksum actually changes.
+- **Table edits.** Tables are stored as a separate embedded CRDT structure,
+  not plain text, and getting this right took real work (see the
+  disclaimer above) — but cell edits and supported structural changes now
+  round-trip both ways. Row/column *reordering* and changes that touch both
+  rows and columns in the same save are deliberately refused rather than
+  risking a bad write; edit the row/column contents, not their order.
+- **`delete`/`delete --hard`**, and the `object` repair-kit commands, for
+  cleaning up notes this tool (or anything else) leaves in a broken state.
 
-**Phase 1 — Read-only fetch.** Walk the Notes zone via `changes/zone`,
-decode the note protobuf format for title/body text, and write notes out as
-files in a folder (git repo). Notes with any structure we can't confidently
-decode are skipped/reported rather than partially synced (attachments are
-handled, not skipped - see Phase 4). Store enough metadata per note (record
-name, change tag, modification date) to support later phases.
+Implemented and unit-tested against real captured data, but **not yet
+exercised end-to-end against a live account** — treat as less proven than
+the above:
 
-**Phase 2 — Change detection.** On each fetch, compare each note's stored
-baseline (change tag / modification date) against both the current remote
-state and the local file's state, to answer "did this change locally,
-remotely, both, or neither?" This is groundwork for conflict handling, not
-full merge logic yet.
+- **`history`/`diff`/`revert`** and push-time auto-merge via version
+  history. (`revert` in particular has already been used successfully, by
+  hand, to recover from the corruption incidents described above — but the
+  command itself, with its normal `--yes` write path, hasn't had a full
+  live pass yet.)
 
-**Phase 3 — Write-back for plain-text notes.** *(core implemented)* Build
-the note protobuf back up from an edited local file and push it via
-`records/modify` (`update`, with `recordChangeTag` for optimistic
-concurrency). Restricted to notes we can prove round-trip cleanly: decode →
-re-encode → byte-for-byte match against the original (modulo the intended
-edit) before we ever consider writing to a note. Anything we can't verify
-this way stays read-only. Remaining Phase 3 work: creating notes remotely,
-pushing local deletions, and broader real-device merge validation
-(cross-device concurrent-edit behavior against pushed CRDT structures).
+## Known limitations
 
-**Phase 4 — Attachments.** *(download implemented)* Download attachments
-(served from a separate signed-URL asset host, `cvws.icloud-content.com`)
-and represent them locally under `attachments/` - see the "Attachments"
-section above for the fetch chain and the local representation. Upload is
-a non-goal, not a later step: the web Notes editor has no affordance to
-attach a new file to a note at all, so there's no legitimate client
-operation to reverse-engineer the way plain-text push had one.
+- **Regular file attachments (images, audio, other files) are permanently
+  read-only, not just "not yet."** `push` will always refuse to write back
+  a note that has a non-table attachment — its underlying CRDT structure
+  carries attribute runs this tool only reads, never fully parses, so
+  editing one back risks corrupting it. `restore <file>` discards any local
+  edit to get back to a clean copy. (Tables are the one exception — see
+  above.)
+- **Attachment upload is not supported, and isn't planned.** The iCloud web
+  Notes editor itself has no way to attach a new file to a note, so there's
+  no legitimate client behavior to reverse-engineer here.
+- **Shared-note attachments are unverified.** The download code path should
+  work (it mirrors how shared note text already does), but no shared note
+  with an attachment has actually been observed live yet.
+- **Creating, deleting, or writing to notes *shared with you* is out of
+  scope.** Shared notes are cloned and pulled (read side) but push-side
+  write-back to them isn't implemented.
+- **No real-time or continuous sync.** This is a deliberate fetch/push
+  tool, not a background daemon.
+- **Apple Notes' folder structure is ignored.** Whatever folders you've
+  organized notes into inside Notes.app are flattened away — every note
+  lands in one directory, with no subfolders mirroring that structure.
+- **Concurrent edits from *other* Apple devices aren't deeply merged at the
+  CRDT level.** `pull`'s three-way merge is a real text diff (auto-merging
+  non-overlapping edits, flagging overlapping ones), not an implementation
+  of Notes' own CRDT merge logic.
 
-**Phase 5 — Obsidian plugin (future, not committed).** Revisit whether the
-sync core can be reused directly inside an Obsidian plugin rather than only
-a standalone CLI.
+## How it works
 
-## Non-goals (for now)
+The iCloud web client talks directly to CloudKit's private database web
+service for the `com.apple.notes` container
+(`https://p<N>-ckdatabasews.icloud.com/database/1/com.apple.notes/...`),
+using the same request shapes as CloudKit JS (`records/query`,
+`records/lookup`, `records/modify`, `changes/zone`, with a `syncToken` /
+`moreComing` incremental-sync model). This tool talks to that same service
+directly, with its own typed client.
 
-- Real-time/continuous sync — this is a deliberate fetch/push tool, not a
-  background daemon.
-- Full CRDT-level merge of concurrent edits — `pull` does a real line-level
-  diff3 merge (auto-merging non-overlapping changes, writing conflict
-  markers for overlapping ones), but that's a text-diffing tool, not an
-  understanding of Notes' own CRDT structure. Overlapping conflicts are
-  surfaced for you to resolve, never auto-resolved.
-- Perfect fidelity for rich formatting (tables, scanned documents, drawings)
-  — see "safety over completeness" above.
-- Collaboration features beyond reading — notes shared with you are cloned
-  and pulled (read side), but share management (participants, permissions,
-  creating/accepting shares) and writing back to shared notes are out of
-  scope; write-back generally is Phase 3, and shared notes will be its last,
-  most cautious step if at all.
-- Attachment upload — the web Notes editor itself has no way to attach a
-  new file to a note, so Phase 4 is download/local-representation only.
+**Auth** is the one piece deliberately *not* reverse-engineered: `clone`
+opens a real, headed Playwright browser window on Apple's own sign-in
+pages, and once the page's own bootstrap call succeeds, session cookies are
+harvested from the browser and the window closes. This keeps the
+reverse-engineered surface limited to the *result* of login (a cookie jar
+and client identifiers), not Apple's login protocol itself, which churns
+far more (their current web client requires a device-attested 2FA flow that
+plain HTTP can't replicate).
 
-## Caveats
+**Note content** lives in fields named things like `TitleEncrypted` and
+`TextDataEncrypted`. Despite the name, on accounts *without* Advanced Data
+Protection, these arrive as plain, readable bytes (compressed, not
+encrypted client-side — `ENCRYPTED_BYTES` here describes Apple's
+server-side at-rest encryption, not end-to-end encryption). Decompressing
+them yields the same protobuf "mergeable data" CRDT format used on-device
+in `NoteStore.sqlite`, which this project's own `.proto` schemas (in
+`proto/`) target — cross-checked against Apple's own recovered source and
+against several other independent reverse-engineering efforts of the same
+format.
 
-- **Apple Notes' own folder structure is deliberately ignored.** Whatever
-  folders you've organized notes into inside the Notes app itself (Notes'
-  `Folder` records) are flattened away — `clone`/`pull` write every note
-  from every one of your Notes folders into one single local directory, with
-  no subdirectories mirroring that structure. The `Folder` reference on a
-  note record is only consulted to detect Trash (so trashed notes can be
-  skipped); it's never used to group output. This is intentional behavior
-  today, though mirroring the account's folder tree as nested directories is
-  under consideration (see the project's dev notes).
-- This relies entirely on an undocumented, private API that Apple can change
-  without notice.
-- It very likely depends on **Advanced Data Protection being disabled** for
-  the account in question; ADP may change how (or whether) note content can
-  be read this way at all.
-- Treat this as a personal tool for your own account, not something to be
-  pointed at arbitrary Apple IDs.
+**Writing a note back** isn't just uploading new text — the note body is a
+CRDT document carrying every insertion ever made, with deletions kept as
+tombstones, each attributed to a replica (device) and a logical clock.
+Overwriting it naively would break other devices' ability to merge it. So
+`push`:
+
+1. fetches the note's *current* document from the server,
+2. requires it to re-encode byte-for-byte from this tool's own parsed
+   model — anything not fully understood stays read-only rather than risk
+   a bad round-trip,
+3. applies the local edit as a minimal splice under this vault's own stable
+   replica id, the same way the web client's own editor does,
+4. decodes the rebuilt document, requires it to yield exactly the local
+   file's text, re-validates the CRDT's internal invariants, and only then
+   uploads.
+
+`push --dry-run` runs every step except the final upload. Table edits go
+through an analogous (and considerably more involved) incremental-patch
+engine, since tables carry their own nested CRDT structure with
+row/column identity and ordering concerns that plain text doesn't have —
+this is the part of the codebase that produced the corruption incidents
+mentioned above, and the part most worth treating with caution even now
+that it's working.
+
+## Non-goals
+
+- Real-time/continuous sync.
+- Full CRDT-level merge of concurrent edits from other Apple devices —
+  `pull` does a real line-level three-way merge, not a reimplementation of
+  Notes' own merge algorithm.
+- Perfect fidelity for rich formatting, scanned documents, or drawings.
+- Attachment upload.
+- Write access to notes shared with you (read access is supported).
+
+## Contributing / development
+
+```
+npm install
+npm run typecheck
+npm test
+npm run build
+```
+
+Issues and PRs welcome — see the disclaimer above for the general spirit of
+this project: it's reverse-engineered, and safety-over-completeness is a
+deliberate design principle, not an oversight.
+
+## License
+
+MIT
