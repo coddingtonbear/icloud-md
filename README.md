@@ -28,8 +28,7 @@ This tool exists to fix that:
 - **Built-in version history, independent of git.** Every `pull`/`push` that
   changes a note snapshots it, so you can inspect or roll back *any* past
   version of a note — even ones you never `pull`ed while they existed — via
-  `icloud-notes history`/`diff`/`revert`. This has already saved real data
-  during this project's own development (see the disclaimer below).
+  `icloud-notes history`/`diff`/`revert`.
 - **Conflict-aware, not silently-overwriting.** If a note changed in iCloud
   since your last sync *and* you edited it locally, `pull` does a real
   three-way merge and only asks you to resolve the parts that actually
@@ -42,19 +41,16 @@ This tool exists to fix that:
 **This is not an official or supported Apple API.** It works by
 reverse-engineering the private CloudKit web service that
 `www.icloud.com/notes` itself talks to, and by reverse-engineering the
-binary format Notes uses to store note content (a CRDT-based "mergeable
-data" protobuf format). Apple can change either of those at any time without
-notice, and this project has already required real repair work when its own
-understanding of that format turned out to be incomplete.
+format Notes uses to store note content. Apple can change either of those
+at any time without notice.
 
-**Data loss is a real possibility, not a hypothetical one.** During
-development, an early version of the table-writing code corrupted a live
-note on *two separate occasions* — once crashing the note so badly it
-appeared empty on another device. Both times, the note was fully recovered,
-specifically because this tool's own version-history snapshots (see
-`history`/`revert` below) had a pre-corruption copy on disk. That is the
-intended safety net, but you should not assume it is infallible, and you
-should not treat this tool as a substitute for a real backup.
+**Data loss is a real possibility, not a hypothetical one.** `push`,
+`delete`, and `revert` all make real writes to your live Notes account
+based on this tool's own reverse-engineered understanding of Apple's
+formats, not documented behavior. This tool's own version-history snapshots
+(`history`/`diff`/`revert`) are a real safety net, but you should not
+assume they're infallible, and you should not treat this tool as a
+substitute for a real backup.
 
 **Use this at your own risk, on your own account, and only against a
 working tree that's also a git repo** (or otherwise backed up) so you always
@@ -150,8 +146,6 @@ resolution live.
 
 ## What works today
 
-Live-verified against a real account (not just unit tests):
-
 - **`clone`/`pull`/`push` for plain-text notes**, including notes shared
   with you (read side), with real three-way merging on `pull`.
 - **`push` as a full reconciler**: creating notes from new local files,
@@ -162,34 +156,23 @@ Live-verified against a real account (not just unit tests):
 - **Attachments** (images and audio confirmed): downloaded and rewritten
   into note text as `attachments/`-relative links; re-downloaded only when
   the remote file's checksum actually changes.
-- **Table edits.** Tables are stored as a separate embedded CRDT structure,
-  not plain text, and getting this right took real work (see the
-  disclaimer above) — but cell edits and supported structural changes now
-  round-trip both ways. Row/column *reordering* and changes that touch both
-  rows and columns in the same save are deliberately refused rather than
-  risking a bad write; edit the row/column contents, not their order.
+- **Table edits.** Cell edits and supported structural changes round-trip
+  both ways. Row/column *reordering* and changes that touch both rows and
+  columns in the same save are deliberately refused rather than risking a
+  bad write; edit the row/column contents, not their order.
 - **`delete`/`delete --hard`**, and the `object` repair-kit commands, for
   cleaning up notes this tool (or anything else) leaves in a broken state.
-
-Implemented and unit-tested against real captured data, but **not yet
-exercised end-to-end against a live account** — treat as less proven than
-the above:
-
-- **`history`/`diff`/`revert`** and push-time auto-merge via version
-  history. (`revert` in particular has already been used successfully, by
-  hand, to recover from the corruption incidents described above — but the
-  command itself, with its normal `--yes` write path, hasn't had a full
-  live pass yet.)
+- **`history`/`diff`/`revert`**, and push-time auto-merge via version
+  history — the safety net for inspecting or undoing a bad edit.
 
 ## Known limitations
 
 - **Regular file attachments (images, audio, other files) are permanently
   read-only, not just "not yet."** `push` will always refuse to write back
-  a note that has a non-table attachment — its underlying CRDT structure
-  carries attribute runs this tool only reads, never fully parses, so
-  editing one back risks corrupting it. `restore <file>` discards any local
-  edit to get back to a clean copy. (Tables are the one exception — see
-  above.)
+  a note that has a non-table attachment, since this tool doesn't fully
+  parse that part of a note's internal format and editing one back risks
+  corrupting it. `restore <file>` discards any local edit to get back to a
+  clean copy. (Tables are the one exception — see above.)
 - **Attachment upload is not supported, and isn't planned.** The iCloud web
   Notes editor itself has no way to attach a new file to a note, so there's
   no legitimate client behavior to reverse-engineer here.
@@ -204,10 +187,10 @@ the above:
 - **Apple Notes' folder structure is ignored.** Whatever folders you've
   organized notes into inside Notes.app are flattened away — every note
   lands in one directory, with no subfolders mirroring that structure.
-- **Concurrent edits from *other* Apple devices aren't deeply merged at the
-  CRDT level.** `pull`'s three-way merge is a real text diff (auto-merging
-  non-overlapping edits, flagging overlapping ones), not an implementation
-  of Notes' own CRDT merge logic.
+- **Concurrent edits from *other* Apple devices aren't merged the way Notes
+  itself does internally.** `pull`'s three-way merge is a real text diff
+  (auto-merging non-overlapping edits, flagging overlapping ones), not a
+  reimplementation of Notes' own internal merge behavior.
 
 ## How it works
 
@@ -233,45 +216,40 @@ plain HTTP can't replicate).
 Protection, these arrive as plain, readable bytes (compressed, not
 encrypted client-side — `ENCRYPTED_BYTES` here describes Apple's
 server-side at-rest encryption, not end-to-end encryption). Decompressing
-them yields the same protobuf "mergeable data" CRDT format used on-device
-in `NoteStore.sqlite`, which this project's own `.proto` schemas (in
-`proto/`) target — cross-checked against Apple's own recovered source and
-against several other independent reverse-engineering efforts of the same
-format.
+them yields the same internal format Notes uses on-device in
+`NoteStore.sqlite`, which this project's own `.proto` schemas (in `proto/`)
+target — cross-checked against Apple's own recovered source and against
+several other independent reverse-engineering efforts of the same format.
 
-**Writing a note back** isn't just uploading new text — the note body is a
-CRDT document carrying every insertion ever made, with deletions kept as
-tombstones, each attributed to a replica (device) and a logical clock.
-Overwriting it naively would break other devices' ability to merge it. So
-`push`:
-
-1. fetches the note's *current* document from the server,
-2. requires it to re-encode byte-for-byte from this tool's own parsed
-   model — anything not fully understood stays read-only rather than risk
-   a bad round-trip,
-3. applies the local edit as a minimal splice under this vault's own stable
-   replica id, the same way the web client's own editor does,
-4. decodes the rebuilt document, requires it to yield exactly the local
-   file's text, re-validates the CRDT's internal invariants, and only then
-   uploads.
-
-`push --dry-run` runs every step except the final upload. Table edits go
-through an analogous (and considerably more involved) incremental-patch
-engine, since tables carry their own nested CRDT structure with
-row/column identity and ordering concerns that plain text doesn't have —
-this is the part of the codebase that produced the corruption incidents
-mentioned above, and the part most worth treating with caution even now
-that it's working.
+**Writing a note back** isn't a simple overwrite. `push` fetches the note's
+current version from the server, verifies it can rebuild that exact
+version byte-for-byte from what this tool understands, applies just the
+local edit, re-verifies the result matches the local file exactly, and
+only then uploads. Anything this tool doesn't fully understand stays
+read-only rather than risk a bad write. `push --dry-run` runs every step
+except the final upload; table edits go through an analogous check.
 
 ## Non-goals
 
 - Real-time/continuous sync.
-- Full CRDT-level merge of concurrent edits from other Apple devices —
-  `pull` does a real line-level three-way merge, not a reimplementation of
-  Notes' own merge algorithm.
+- Full replication of Notes' own internal merge behavior for concurrent
+  edits from other Apple devices — `pull` does a real line-level three-way
+  text merge instead.
 - Perfect fidelity for rich formatting, scanned documents, or drawings.
 - Attachment upload.
 - Write access to notes shared with you (read access is supported).
+
+## Reporting bugs
+
+Every issue must include the output of:
+
+```
+icloud-notes bug-report --since <duration>
+```
+
+(e.g. `--since 2h`, run against the affected directory) attached in full,
+**and** concrete, immediately scriptable reproduction steps. Issues missing
+either will not be accepted.
 
 ## Contributing / development
 
