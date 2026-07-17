@@ -156,10 +156,11 @@ resolution live.
 - **Attachments** (images and audio confirmed): downloaded and rewritten
   into note text as `attachments/`-relative links; re-downloaded only when
   the remote file's checksum actually changes.
-- **Table edits.** Cell edits and supported structural changes round-trip
-  both ways. Row/column *reordering* and changes that touch both rows and
-  columns in the same save are deliberately refused rather than risking a
-  bad write; edit the row/column contents, not their order.
+- **Table edits.** Cell edits, and inserting/deleting a contiguous run of
+  rows or columns, round-trip both ways. Row/column *reordering*, and any
+  edit that adds/removes rows and columns in the same save, are refused
+  rather than risking a bad write — split a reorder into a delete push
+  followed by an insert push instead.
 - **`delete`/`delete --hard`**, and the `object` repair-kit commands, for
   cleaning up notes this tool (or anything else) leaves in a broken state.
 - **`history`/`diff`/`revert`**, and push-time auto-merge via version
