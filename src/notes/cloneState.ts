@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { CorruptStateFileError } from "../errors.js";
+import { CorruptStateFileError, UnsupportedVaultLayoutError } from "../errors.js";
 import { isEnoent } from "../fsUtil.js";
 
 export interface CloneStateNoteEntry {
@@ -43,6 +43,27 @@ export interface CloneStateFolderEntry {
    * names stay stable across pulls (buildFolderTree's preferredDirNames).
    */
   dirName: string;
+  /**
+   * For a folder shared *with* this account (a whole shared folder): the
+   * sharer's ownerRecordName. Its tree roots under that sharer's home
+   * directory (see `sharerHomes`) instead of the vault root. Absent for the
+   * account's own folders.
+   */
+  sharedZoneOwner?: string | undefined;
+}
+
+/** One sharer's top-level home directory - where everything shared by that
+ * user lives: their shared folders as real subdirectories, and their
+ * individually-shared notes loose at its top (those notes' folder
+ * membership points into the sharer's unreadable private tree - see the
+ * folders doc, 2026-07-16T21:34). */
+export interface CloneStateSharerHomeEntry {
+  /** Display name as of the last sync - the share's OWNER participant's
+   * name, email, or phone, falling back to the opaque ownerRecordName. */
+  name: string;
+  /** Directory name on disk (top-level, uniquified alongside the account's
+   * own root folders). */
+  dirName: string;
 }
 
 export interface CloneStateAttachmentEntry {
@@ -81,6 +102,15 @@ export interface CloneStateAccount {
 
 export interface CloneState {
   /**
+   * On-disk layout generation. Version 2 is the folder-tree layout (notes
+   * inside folder directories, per-folder attachments). State files without
+   * the field are the original flat layout, which this tool no longer
+   * reads - readCloneState fails loudly telling the user to re-clone
+   * (backward compatibility deliberately waived, see the folders doc,
+   * 2026-07-16T21:10). writeCloneState always stamps the current version.
+   */
+  layoutVersion?: number | undefined;
+  /**
    * Which Apple ID this folder was cloned for - resolves to that account's
    * own session under `~/.config/icloud-notes-sync/accounts/<dsid>/` (see
    * `accountStore.ts`), never anything secret stored here. Absent only for
@@ -107,9 +137,11 @@ export interface CloneState {
   /**
    * The account's folder tree as of the last sync, keyed by the Folder
    * record's recordName (including `DefaultFolder-CloudKit`; never Trash).
-   * Absent in state files written before folder support.
+   * Shared folders appear here too, tagged with their `sharedZoneOwner`.
    */
   folders?: Record<string, CloneStateFolderEntry> | undefined;
+  /** Per-sharer home directories, keyed by the sharer's ownerRecordName. */
+  sharerHomes?: Record<string, CloneStateSharerHomeEntry> | undefined;
   /** Downloaded attachments, keyed by the `Attachment` record's recordName
    * (the identifier embedded in the owning note's body). Absent entirely in
    * state files written before Phase 4. */
@@ -138,10 +170,15 @@ export interface CloneState {
 export const STATE_DIR_NAME = ".icloud-notes-sync";
 export const STATE_FILE_NAME = "state.json";
 
+/** The on-disk layout generation this build reads and writes - see
+ * CloneState.layoutVersion. */
+export const CURRENT_LAYOUT_VERSION = 2;
+
 export async function writeCloneState(targetDir: string, state: CloneState): Promise<void> {
   const dir = path.join(targetDir, STATE_DIR_NAME);
   await mkdir(dir, { recursive: true });
-  await writeFile(path.join(dir, STATE_FILE_NAME), JSON.stringify(state, null, 2) + "\n", "utf-8");
+  const stamped: CloneState = { ...state, layoutVersion: CURRENT_LAYOUT_VERSION };
+  await writeFile(path.join(dir, STATE_FILE_NAME), JSON.stringify(stamped, null, 2) + "\n", "utf-8");
 }
 
 export async function readCloneState(targetDir: string): Promise<CloneState | undefined> {
@@ -163,6 +200,10 @@ export async function readCloneState(targetDir: string): Promise<CloneState | un
 function assertCloneState(value: unknown, filePath: string): CloneState {
   if (typeof value !== "object" || value === null || !isRecord(value) || !isRecord(value.notes)) {
     throw new CorruptStateFileError(`${filePath} does not look like a valid state file (missing "notes" object).`);
+  }
+
+  if (value.layoutVersion !== CURRENT_LAYOUT_VERSION) {
+    throw new UnsupportedVaultLayoutError(path.dirname(path.dirname(filePath)));
   }
 
   const syncToken = typeof value.syncToken === "string" ? value.syncToken : undefined;
@@ -198,7 +239,19 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
         name: entry.name,
         parentRecordName: typeof entry.parentRecordName === "string" ? entry.parentRecordName : undefined,
         dirName: entry.dirName,
+        sharedZoneOwner: typeof entry.sharedZoneOwner === "string" ? entry.sharedZoneOwner : undefined,
       };
+    }
+  }
+
+  let sharerHomes: Record<string, CloneStateSharerHomeEntry> | undefined;
+  if (isRecord(value.sharerHomes)) {
+    sharerHomes = {};
+    for (const [owner, entry] of Object.entries(value.sharerHomes)) {
+      if (!isRecord(entry) || typeof entry.name !== "string" || typeof entry.dirName !== "string") {
+        throw new CorruptStateFileError(`${filePath} has a malformed entry for sharer home "${owner}".`);
+      }
+      sharerHomes[owner] = { name: entry.name, dirName: entry.dirName };
     }
   }
 
@@ -267,7 +320,19 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
     account = { appleId: value.account.appleId, dsid: value.account.dsid };
   }
 
-  return { account, syncToken, sharedZoneSyncTokens, replicaId, notes, folders, attachments, tableAttachments, trashed };
+  return {
+    layoutVersion: CURRENT_LAYOUT_VERSION,
+    account,
+    syncToken,
+    sharedZoneSyncTokens,
+    replicaId,
+    notes,
+    folders,
+    sharerHomes,
+    attachments,
+    tableAttachments,
+    trashed,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

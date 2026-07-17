@@ -15,6 +15,18 @@ export interface CloudKitRecordStamp {
   deviceID?: string | undefined;
 }
 
+/** One participant of a `cloudkit.share` record, flattened from CloudKit's
+ * nested userIdentity shape to just what this tool uses: identifying the
+ * sharer (`type === "OWNER"`) by a human-readable name. */
+export interface ShareParticipant {
+  type?: string | undefined;
+  userRecordName?: string | undefined;
+  givenName?: string | undefined;
+  familyName?: string | undefined;
+  emailAddress?: string | undefined;
+  phoneNumber?: string | undefined;
+}
+
 export interface CloudKitRecord {
   recordName: string;
   recordType: string;
@@ -26,6 +38,8 @@ export interface CloudKitRecord {
   parentRecordName?: string | undefined;
   created?: CloudKitRecordStamp | undefined;
   modified?: CloudKitRecordStamp | undefined;
+  /** `cloudkit.share` records only: who shares this zone's content. */
+  participants?: ShareParticipant[] | undefined;
 }
 
 export interface ZoneChangesResult {
@@ -737,7 +751,27 @@ function parseRecord(value: unknown): CloudKitRecord {
     parentRecordName: parent,
     created: parseRecordStamp(value.created),
     modified: parseRecordStamp(value.modified),
+    participants: parseParticipants(value.participants),
   };
+}
+
+function parseParticipants(value: unknown): ShareParticipant[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  return value.filter(isRecord).map((participant) => {
+    const identity = isRecord(participant.userIdentity) ? participant.userIdentity : {};
+    const nameComponents = isRecord(identity.nameComponents) ? identity.nameComponents : {};
+    const lookupInfo = isRecord(identity.lookupInfo) ? identity.lookupInfo : {};
+    return {
+      type: typeof participant.type === "string" ? participant.type : undefined,
+      userRecordName: typeof identity.userRecordName === "string" ? identity.userRecordName : undefined,
+      givenName: typeof nameComponents.givenName === "string" ? nameComponents.givenName : undefined,
+      familyName: typeof nameComponents.familyName === "string" ? nameComponents.familyName : undefined,
+      emailAddress: typeof lookupInfo.emailAddress === "string" ? lookupInfo.emailAddress : undefined,
+      phoneNumber: typeof lookupInfo.phoneNumber === "string" ? lookupInfo.phoneNumber : undefined,
+    };
+  });
 }
 
 function parseRecordStamp(value: unknown): CloudKitRecordStamp | undefined {

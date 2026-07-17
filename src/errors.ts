@@ -60,6 +60,14 @@ export class NotClonedDirectoryError extends IcloudNotesSyncError {
   }
 }
 
+export class UnsupportedVaultLayoutError extends IcloudNotesSyncError {
+  constructor(targetDir: string) {
+    super(`${targetDir} was cloned before folder support and uses the old flat layout, which this version no longer reads.`, {
+      hint: 'Re-clone into a fresh directory: "icloud-notes clone <new-directory>". (This tool made no changes.)',
+    });
+  }
+}
+
 export class MissingSessionFileError extends IcloudNotesSyncError {
   constructor(sessionPath: string, options: ErrorOptions = {}) {
     super(`No session file found at ${sessionPath}.`, {

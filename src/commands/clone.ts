@@ -6,6 +6,7 @@ import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { resolveNoteAttachments, type AttachmentAuth } from "../notes/attachmentSync.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { noteFileName, uniqueFileName } from "../notes/filename.js";
+import { buildVaultLayout, placeNote, type SharedZoneRecords } from "../notes/folderLayout.js";
 import { writeBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState, writeCloneState, type CloneState } from "../notes/cloneState.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
@@ -73,17 +74,28 @@ export async function runClone(
   const notes: CloneState["notes"] = {};
   const attachments: NonNullable<CloneState["attachments"]> = {};
   const tableAttachments: NonNullable<CloneState["tableAttachments"]> = {};
-  const usedFileNames = new Set<string>();
-  const usedAttachmentFileNames = new Set<string>();
+  const usedFileNames = new Map<string, Set<string>>();
+  const usedAttachmentFileNames = new Map<string, Set<string>>();
   const sharedZoneSyncTokens: Record<string, string> = {};
   const attachmentAuth: AttachmentAuth = { session: auth.session, ckdatabasewsUrl: auth.ckdatabasewsUrl, dsid: auth.dsid };
 
   const sources: Array<{ records: CloudKitRecord[]; sharedZoneOwner?: string | undefined }> = [{ records }];
+  const sharedZoneRecords: SharedZoneRecords[] = [];
   for (const zone of sharedZones) {
     if (zone.zoneID.ownerRecordName && zone.syncToken) {
       sharedZoneSyncTokens[zone.zoneID.ownerRecordName] = zone.syncToken;
     }
+    if (zone.zoneID.ownerRecordName) {
+      sharedZoneRecords.push({ ownerRecordName: zone.zoneID.ownerRecordName, records: zone.records });
+    }
     sources.push({ records: zone.records, sharedZoneOwner: zone.zoneID.ownerRecordName });
+  }
+
+  // The account's folder tree (own + per-sharer) becomes the directory
+  // tree; every folder materializes, empty ones included.
+  const layout = buildVaultLayout(records, sharedZoneRecords);
+  for (const dir of layout.allDirs) {
+    await mkdir(path.join(targetDir, dir), { recursive: true });
   }
 
   const totalRecords = sources.reduce((sum, source) => sum + source.records.length, 0);
@@ -106,6 +118,8 @@ export async function runClone(
           continue;
         }
 
+        const placement = placeNote(layout, record, source.sharedZoneOwner);
+
         let bodyText = decoded.bodyText;
         let unpublishableReason = decoded.unpublishableReason;
         if (decoded.attachments.length > 0) {
@@ -122,7 +136,8 @@ export async function runClone(
             decoded.attachments,
             attachments,
             tableAttachments,
-            usedAttachmentFileNames,
+            usedNamesFor(usedAttachmentFileNames, placement.dir),
+            placement.dir,
           );
           bodyText = resolved.bodyText;
           unpublishableReason = combineUnpublishableReasons(unpublishableReason, resolved.unpublishableReason);
@@ -131,10 +146,12 @@ export async function runClone(
           Object.assign(tableAttachments, resolved.tableAttachments);
         }
 
-        const fileName = uniqueFileName(noteFileName(decoded.title), usedFileNames);
-        usedFileNames.add(fileName);
+        const usedInDir = usedNamesFor(usedFileNames, placement.dir);
+        const fileName = uniqueFileName(noteFileName(decoded.title), usedInDir);
+        usedInDir.add(fileName);
+        const relativeFile = path.posix.join(placement.dir, fileName);
 
-        const filePath = path.join(targetDir, fileName);
+        const filePath = path.join(targetDir, relativeFile);
         await writeFile(filePath, bodyText, "utf-8");
         await applyNoteFileTimes(filePath, record);
         await writeBaseCopy(targetDir, record.recordName, bodyText);
@@ -150,11 +167,12 @@ export async function runClone(
         const modificationDate = modificationDateOf(record);
 
         notes[record.recordName] = {
-          file: fileName,
+          file: relativeFile,
           recordChangeTag: record.recordChangeTag ?? "",
           modificationDate,
           sharedZoneOwner: source.sharedZoneOwner,
           unpublishableReason,
+          folderRecordName: placement.folderRecordName,
         };
       } finally {
         progress?.onRecordProcessed?.();
@@ -169,9 +187,21 @@ export async function runClone(
     syncToken,
     sharedZoneSyncTokens,
     notes,
+    folders: layout.stateFolders,
+    sharerHomes: layout.stateSharerHomes,
     attachments,
     tableAttachments,
   });
 
   return summary;
+}
+
+/** The per-directory used-names set, created on first use. */
+function usedNamesFor(byDir: Map<string, Set<string>>, dir: string): Set<string> {
+  let names = byDir.get(dir);
+  if (!names) {
+    names = new Set();
+    byDir.set(dir, names);
+  }
+  return names;
 }

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { CorruptStateFileError } from "../errors.js";
+import { CorruptStateFileError, UnsupportedVaultLayoutError } from "../errors.js";
 import { readCloneState, writeCloneState, type CloneState } from "./cloneState.js";
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
@@ -105,13 +105,28 @@ test("reads a pre-account-binding state file (no account field) without error", 
     assert.equal(readBack?.account, undefined);
   }));
 
+test("refuses a pre-folder-layout vault loudly, telling the user to re-clone", () =>
+  withTempDir(async (dir) => {
+    // Exactly what a real vault cloned before folder support looks like:
+    // a valid state file with no layoutVersion field.
+    const stateDir = path.join(dir, ".icloud-notes-sync");
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(
+      path.join(stateDir, "state.json"),
+      JSON.stringify({ syncToken: "old", notes: { "REC-1": { file: "Note.md", recordChangeTag: "t", modificationDate: 1 } } }),
+      "utf-8",
+    );
+
+    await assert.rejects(readCloneState(dir), UnsupportedVaultLayoutError);
+  }));
+
 test("throws CorruptStateFileError for a malformed account field", () =>
   withTempDir(async (dir) => {
     const stateDir = path.join(dir, ".icloud-notes-sync");
     await mkdir(stateDir, { recursive: true });
     await writeFile(
       path.join(stateDir, "state.json"),
-      JSON.stringify({ notes: {}, account: { appleId: "me@example.com" } }),
+      JSON.stringify({ layoutVersion: 2, notes: {}, account: { appleId: "me@example.com" } }),
       "utf-8",
     );
 
@@ -151,7 +166,7 @@ test("throws CorruptStateFileError for a malformed table attachment entry", () =
     await mkdir(stateDir, { recursive: true });
     await writeFile(
       path.join(stateDir, "state.json"),
-      JSON.stringify({ notes: {}, tableAttachments: { "ATT-1": {} } }),
+      JSON.stringify({ layoutVersion: 2, notes: {}, tableAttachments: { "ATT-1": {} } }),
       "utf-8",
     );
 
@@ -204,7 +219,7 @@ test("throws CorruptStateFileError for a malformed folder entry", () =>
     await mkdir(stateDir, { recursive: true });
     await writeFile(
       path.join(stateDir, "state.json"),
-      JSON.stringify({ notes: {}, folders: { "FOLDER-1": { name: "Recipes" } } }),
+      JSON.stringify({ layoutVersion: 2, notes: {}, folders: { "FOLDER-1": { name: "Recipes" } } }),
       "utf-8",
     );
 
@@ -239,7 +254,7 @@ test("throws CorruptStateFileError for a malformed trashed entry", () =>
     await mkdir(stateDir, { recursive: true });
     await writeFile(
       path.join(stateDir, "state.json"),
-      JSON.stringify({ notes: {}, trashed: { "REC-1": { file: "Gone.md" } } }),
+      JSON.stringify({ layoutVersion: 2, notes: {}, trashed: { "REC-1": { file: "Gone.md" } } }),
       "utf-8",
     );
 

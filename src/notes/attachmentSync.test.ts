@@ -201,11 +201,13 @@ test("matchAttachmentRecords resolves a new audio attachment's filename and down
     "NOTE1",
     {},
     used,
+    "",
   );
   assert.deepEqual(matched, [
     {
       recordName: "7DAFDA6F-4AC4-41D8-9958-049373B80824",
       relativeFile: "attachments/Call with Janice Elkins.m4a",
+      linkPath: "attachments/Call with Janice Elkins.m4a",
       needsDownload: true,
       downloadURL: "https://cvws.icloud-content.com/B/audio-asset",
       entry: {
@@ -230,6 +232,7 @@ test("matchAttachmentRecords resolves a new image attachment's filename and down
     "NOTE2",
     {},
     new Set(),
+    "",
   );
   assert.equal(matched?.[0]?.relativeFile, "attachments/_7130093.jpeg");
   assert.equal(matched?.[0]?.needsDownload, true);
@@ -255,6 +258,7 @@ test("matchAttachmentRecords skips re-download when the tracked checksum still m
     "NOTE2",
     existing,
     new Set(),
+    "",
   );
   assert.equal(matched?.[0]?.needsDownload, false);
   assert.equal(matched?.[0]?.relativeFile, "attachments/_7130093.jpeg");
@@ -279,6 +283,7 @@ test("matchAttachmentRecords re-downloads when the tracked checksum has changed"
     "NOTE2",
     existing,
     new Set(),
+    "",
   );
   assert.equal(matched?.[0]?.needsDownload, true);
   // Same tracked file name is kept, even though it's re-downloaded.
@@ -288,7 +293,51 @@ test("matchAttachmentRecords re-downloads when the tracked checksum has changed"
 test("matchAttachmentRecords leaves that entry undefined when the Media record has no well-formed Asset field", () => {
   const refs: AttachmentReference[] = [{ attachmentIdentifier: "A", typeUti: "public.jpeg" }];
   const brokenMedia: CloudKitRecord = { recordName: "M1", recordType: "Media", fields: {} };
-  assert.deepEqual(matchAttachmentRecords(refs, ["M1"], [brokenMedia], "NOTE1", {}, new Set()), [undefined]);
+  assert.deepEqual(matchAttachmentRecords(refs, ["M1"], [brokenMedia], "NOTE1", {}, new Set(), ""), [undefined]);
+});
+
+test("matchAttachmentRecords places a nested note's attachment beside it, with a note-relative link", () => {
+  const refs: AttachmentReference[] = [
+    { attachmentIdentifier: "7ED80274-4400-4C02-87EA-F542F056FF02", typeUti: "public.jpeg" },
+  ];
+  const matched = matchAttachmentRecords(
+    refs,
+    ["066C8A2E-796F-403F-AD75-A5267CBD0E18"],
+    [IMAGE_MEDIA_RECORD],
+    "NOTE2",
+    {},
+    new Set(),
+    "Recipes/Desserts",
+  );
+  assert.equal(matched?.[0]?.relativeFile, "Recipes/Desserts/attachments/_7130093.jpeg");
+  assert.equal(matched?.[0]?.linkPath, "attachments/_7130093.jpeg");
+  assert.equal(matched?.[0]?.entry.file, "Recipes/Desserts/attachments/_7130093.jpeg");
+});
+
+test("matchAttachmentRecords keeps an already-tracked attachment at its existing path", () => {
+  const refs: AttachmentReference[] = [
+    { attachmentIdentifier: "7ED80274-4400-4C02-87EA-F542F056FF02", typeUti: "public.jpeg" },
+  ];
+  const existing = {
+    "7ED80274-4400-4C02-87EA-F542F056FF02": {
+      file: "Recipes/attachments/_7130093.jpeg",
+      mediaRecordName: "066C8A2E-796F-403F-AD75-A5267CBD0E18",
+      mediaFileChecksum: "ARKf/Vy+irL9d80LorfL6M0D7FG5",
+      noteRecordName: "NOTE2",
+    },
+  };
+  const matched = matchAttachmentRecords(
+    refs,
+    ["066C8A2E-796F-403F-AD75-A5267CBD0E18"],
+    [IMAGE_MEDIA_RECORD],
+    "NOTE2",
+    existing,
+    new Set(),
+    "Recipes",
+  );
+  assert.equal(matched?.[0]?.relativeFile, "Recipes/attachments/_7130093.jpeg");
+  assert.equal(matched?.[0]?.linkPath, "attachments/_7130093.jpeg");
+  assert.equal(matched?.[0]?.needsDownload, false);
 });
 
 test("matchAttachmentRecords disambiguates a filename collision the same way notes do", () => {
@@ -303,6 +352,7 @@ test("matchAttachmentRecords disambiguates a filename collision the same way not
     "NOTE2",
     {},
     used,
+    "",
   );
   assert.equal(matched?.[0]?.relativeFile, "attachments/_7130093 2.jpeg");
 });

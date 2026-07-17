@@ -35,7 +35,13 @@ const ATTACHMENTS_DIR = "attachments";
 export interface MatchedAttachment {
   /** The Attachment record's recordName - state.attachments' key. */
   recordName: string;
+  /** Vault-root-relative path of the attachment file - attachments live in
+   * an `attachments/` directory next to their note (per-folder, see the
+   * folders doc, 2026-07-16T21:29). */
   relativeFile: string;
+  /** The same file relative to the note's own directory - what the note
+   * body's markdown link uses. */
+  linkPath: string;
   needsDownload: boolean;
   downloadURL: string;
   entry: CloneStateAttachmentEntry;
@@ -81,6 +87,7 @@ export function matchAttachmentRecords(
   noteRecordName: string,
   existingAttachments: Record<string, CloneStateAttachmentEntry>,
   usedAttachmentFileNames: Set<string>,
+  noteDir: string,
 ): (MatchedAttachment | undefined)[] {
   const mediaByName = new Map(mediaRecords.map((record) => [record.recordName, record]));
   const matched: (MatchedAttachment | undefined)[] = [];
@@ -111,11 +118,15 @@ export function matchAttachmentRecords(
           usedAttachmentFileNames,
         );
     usedAttachmentFileNames.add(fileName);
-    const relativeFile = path.posix.join(ATTACHMENTS_DIR, fileName);
+    // An already-tracked attachment stays at its existing path (its note
+    // hasn't moved - the caller derives noteDir from the note's own state
+    // entry); a new one lands in the attachments dir next to its note.
+    const relativeFile = existing ? existing.file : path.posix.join(noteDir, ATTACHMENTS_DIR, fileName);
 
     matched.push({
       recordName: ref.attachmentIdentifier,
       relativeFile,
+      linkPath: path.posix.relative(noteDir, relativeFile),
       needsDownload: !existing || existing.mediaFileChecksum !== asset.fileChecksum,
       downloadURL: asset.downloadURL,
       entry: { file: relativeFile, mediaRecordName, mediaFileChecksum: asset.fileChecksum, noteRecordName },
@@ -196,6 +207,7 @@ export async function resolveNoteAttachments(
   existingAttachments: Record<string, CloneStateAttachmentEntry>,
   existingTableAttachments: Record<string, CloneStateTableAttachmentEntry>,
   usedAttachmentFileNames: Set<string>,
+  noteDir: string,
 ): Promise<AttachmentSyncResult> {
   const previousForNote = Object.keys(existingAttachments).filter(
     (recordName) => existingAttachments[recordName]?.noteRecordName === noteRecordName,
@@ -284,6 +296,7 @@ export async function resolveNoteAttachments(
       noteRecordName,
       existingAttachments,
       usedAttachmentFileNames,
+      noteDir,
     );
 
     for (let j = 0; j < fileRefs.length; j += 1) {
@@ -300,11 +313,11 @@ export async function resolveNoteAttachments(
       }
       if (attachment.needsDownload) {
         const bytes = await fetchAssetBytes(attachment.downloadURL);
-        await mkdir(path.join(targetDir, ATTACHMENTS_DIR), { recursive: true });
+        await mkdir(path.dirname(path.join(targetDir, attachment.relativeFile)), { recursive: true });
         await writeFile(path.join(targetDir, attachment.relativeFile), bytes);
       }
       attachments[attachment.recordName] = attachment.entry;
-      replacements[index] = formatAttachmentMarkdown(ref, attachment.relativeFile);
+      replacements[index] = formatAttachmentMarkdown(ref, attachment.linkPath);
     }
   }
 

@@ -1,4 +1,4 @@
-import { readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveFolderAccount } from "../auth/folderAuth.js";
 import { fetchAllNoteRecords, fetchSharedNoteRecords, type CloudKitRecord } from "../cloudkit/databaseClient.js";
@@ -12,6 +12,7 @@ import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { isEnoent } from "../fsUtil.js";
 import { noteFileName, uniqueFileName } from "../notes/filename.js";
+import { buildVaultLayout, noteDirOf, placeNote, type SharedZoneRecords } from "../notes/folderLayout.js";
 import { mergeNoteVersions } from "../notes/mergeConflict.js";
 import { readBaseCopy, removeBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { localFileState } from "../notes/localFileState.js";
@@ -83,8 +84,17 @@ export async function runPull(
   const attachments: NonNullable<CloneState["attachments"]> = { ...state.attachments };
   const tableAttachments: NonNullable<CloneState["tableAttachments"]> = { ...state.tableAttachments };
   const trashed: NonNullable<CloneState["trashed"]> = { ...state.trashed };
-  const usedFileNames = new Set(Object.values(state.notes).map((entry) => entry.file));
-  const usedAttachmentFileNames = new Set(Object.values(attachments).map((entry) => path.basename(entry.file)));
+  // File names are unique per directory; both maps are keyed by the note's
+  // vault-root-relative directory ("" for the root).
+  const usedFileNames = new Map<string, Set<string>>();
+  for (const entry of Object.values(state.notes)) {
+    usedNamesFor(usedFileNames, noteDirOf(entry.file)).add(path.posix.basename(entry.file));
+  }
+  const usedAttachmentFileNames = new Map<string, Set<string>>();
+  for (const entry of Object.values(attachments)) {
+    // entry.file is "<noteDir>/attachments/<name>" - key by the note dir.
+    usedNamesFor(usedAttachmentFileNames, noteDirOf(path.posix.dirname(entry.file))).add(path.posix.basename(entry.file));
+  }
   const attachmentAuth: AttachmentAuth = { session: auth.session, ckdatabasewsUrl: auth.ckdatabasewsUrl, dsid: auth.dsid };
   const summary: PullSummary = {
     added: 0,
@@ -102,11 +112,27 @@ export async function runPull(
 
   const sources: Array<{ records: CloudKitRecord[]; sharedZoneOwner?: string | undefined }> = [{ records }];
   const sharedZoneSyncTokens: Record<string, string> = {};
+  const sharedZoneRecords: SharedZoneRecords[] = [];
   for (const zone of sharedZones) {
     if (zone.zoneID.ownerRecordName && zone.syncToken) {
       sharedZoneSyncTokens[zone.zoneID.ownerRecordName] = zone.syncToken;
     }
+    if (zone.zoneID.ownerRecordName) {
+      sharedZoneRecords.push({ ownerRecordName: zone.zoneID.ownerRecordName, records: zone.records });
+    }
     sources.push({ records: zone.records, sharedZoneOwner: zone.zoneID.ownerRecordName });
+  }
+
+  // Rebuild the directory layout from carried state + this run's folder
+  // records: new folders (own or shared) materialize as directories, and
+  // existing ones keep their names (a remote rename shows up in state's
+  // folder `name` but the directory deliberately isn't renamed yet - full
+  // tree reconciliation is the next investigation step). Tracked notes
+  // likewise stay at their current paths; only *new* notes are placed by
+  // the current tree.
+  const layout = buildVaultLayout(records, sharedZoneRecords, { folders: state.folders, sharerHomes: state.sharerHomes });
+  for (const dir of layout.allDirs) {
+    await mkdir(path.join(targetDir, dir), { recursive: true });
   }
 
   const totalRecords = sources.reduce((sum, source) => sum + source.records.length, 0);
@@ -164,6 +190,13 @@ export async function runPull(
             })) || recordedNewSnapshot;
         }
 
+        // Where this note lives: a tracked note stays at its current path
+        // (even if its folder membership changed - reconciliation is a
+        // later step); a new note is placed by the current folder tree.
+        // `folderRecordName` always reflects the *current* membership.
+        const placement = placeNote(layout, record, source.sharedZoneOwner);
+        const noteDir = existing ? noteDirOf(existing.file) : placement.dir;
+
         let bodyText = decoded.bodyText;
         let unpublishableReason = decoded.unpublishableReason;
         if (decoded.attachments.length > 0) {
@@ -180,7 +213,8 @@ export async function runPull(
             decoded.attachments,
             attachments,
             tableAttachments,
-            usedAttachmentFileNames,
+            usedNamesFor(usedAttachmentFileNames, noteDir),
+            noteDir,
           );
           bodyText = resolved.bodyText;
           unpublishableReason = combineUnpublishableReasons(unpublishableReason, resolved.unpublishableReason);
@@ -229,19 +263,22 @@ export async function runPull(
         }
 
         if (!existing) {
-          const fileName = uniqueFileName(noteFileName(decoded.title), usedFileNames);
-          usedFileNames.add(fileName);
+          const usedInDir = usedNamesFor(usedFileNames, noteDir);
+          const fileName = uniqueFileName(noteFileName(decoded.title), usedInDir);
+          usedInDir.add(fileName);
+          const relativeFile = path.posix.join(noteDir, fileName);
 
-          const filePath = path.join(targetDir, fileName);
+          const filePath = path.join(targetDir, relativeFile);
           await writeFile(filePath, bodyText, "utf-8");
           await applyNoteFileTimes(filePath, record);
           await writeBaseCopy(targetDir, record.recordName, bodyText);
           notes[record.recordName] = {
-            file: fileName,
+            file: relativeFile,
             recordChangeTag: record.recordChangeTag ?? "",
             modificationDate: modificationDateOf(record),
             sharedZoneOwner: source.sharedZoneOwner,
             unpublishableReason,
+            folderRecordName: placement.folderRecordName,
           };
           summary.added += 1;
           continue;
@@ -261,6 +298,7 @@ export async function runPull(
             recordChangeTag: record.recordChangeTag ?? existing.recordChangeTag,
             modificationDate: modificationDateOf(record),
             unpublishableReason,
+            folderRecordName: placement.folderRecordName,
           };
           summary.updated += 1;
           continue;
@@ -277,6 +315,7 @@ export async function runPull(
           recordChangeTag: record.recordChangeTag ?? existing.recordChangeTag,
           modificationDate: modificationDateOf(record),
           unpublishableReason,
+          folderRecordName: placement.folderRecordName,
         };
 
         if (outcome.hasConflict) {
@@ -307,12 +346,24 @@ export async function runPull(
     // mint a fresh replica.
     replicaId: state.replicaId,
     notes,
+    folders: layout.stateFolders,
+    sharerHomes: layout.stateSharerHomes,
     attachments,
     tableAttachments,
     trashed,
   });
 
   return summary;
+}
+
+/** The per-directory used-names set, created on first use. */
+function usedNamesFor(byDir: Map<string, Set<string>>, dir: string): Set<string> {
+  let names = byDir.get(dir);
+  if (!names) {
+    names = new Set();
+    byDir.set(dir, names);
+  }
+  return names;
 }
 
 /**
