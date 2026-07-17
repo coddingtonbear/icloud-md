@@ -46,6 +46,9 @@ export interface PushOptions {
   dryRun?: boolean;
   /** Routes any headless-recovery login status messages; defaults to staying silent (see `resolveFolderAccount`). */
   onLoginStatus?: (message: string) => void;
+  /** Presentation hook: re-express vault-root-relative paths for display
+   * (the CLI passes cwd-relativization). Defaults to identity. */
+  formatPath?: (file: string) => string;
 }
 
 interface PushCandidate {
@@ -613,7 +616,7 @@ export async function runPush(targetDir: string, options: PushOptions = {}): Pro
     console.log(`Pushed ${pushed} note(s) from ${targetDir}`);
   }
 
-  for (const line of renderPlan(entries)) {
+  for (const line of renderPlan(entries, options.formatPath)) {
     console.log(line);
   }
 }

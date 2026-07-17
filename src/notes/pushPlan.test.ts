@@ -73,3 +73,17 @@ test("stripFilePrefix removes a leading \"<file>: \" prefix", () => {
 test("stripFilePrefix leaves a message alone when it doesn't start with the file's own prefix", () => {
   assert.equal(stripFilePrefix("something else entirely", "Note.md"), "something else entirely");
 });
+
+test("renderPlan re-expresses paths through formatPath, including inside reason lines", () => {
+  const entries: PlanEntry[] = [
+    {
+      kind: "update",
+      file: "Recipes/Pie.md",
+      resolution: "refused",
+      reason: 'this note has an attachment - run "icloud-notes restore Recipes/Pie.md" to discard your local edit',
+    },
+  ];
+  const lines = renderPlan(entries, (file) => `../${file}`);
+  assert.match(lines[0] ?? "", /modified: {3}\.\.\/Recipes\/Pie\.md/);
+  assert.match(lines[1] ?? "", /restore \.\.\/Recipes\/Pie\.md/);
+});

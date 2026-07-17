@@ -14,6 +14,7 @@ import { runPush } from "./commands/push.js";
 import { runRestore } from "./commands/restore.js";
 import { runRevert } from "./commands/revert.js";
 import { runStatus } from "./commands/status.js";
+import { displayPath, findVaultRoot } from "./vaultRoot.js";
 import { IcloudNotesSyncError, NotClonedDirectoryError } from "./errors.js";
 import { recordLastError } from "./lastError.js";
 import { readCloneState } from "./notes/cloneState.js";
@@ -100,8 +101,19 @@ function printPullSummary(targetDir: string, summary: PullSummary): void {
   }
 }
 
+/** An explicit [directory] argument wins verbatim; otherwise walk up from
+ * the current directory to find the enclosing vault, git-style. The "."
+ * fallback keeps the not-a-cloned-directory error pointing at where the
+ * user actually ran the command. */
+async function resolveTargetDir(targetDirArg: string | undefined): Promise<string> {
+  if (targetDirArg !== undefined) {
+    return targetDirArg;
+  }
+  return (await findVaultRoot(process.cwd())) ?? ".";
+}
+
 async function verifyAuth(targetDirArg: string | undefined): Promise<void> {
-  const targetDir = targetDirArg ?? ".";
+  const targetDir = await resolveTargetDir(targetDirArg);
   const state = await readCloneState(targetDir);
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
@@ -125,7 +137,7 @@ async function clone(targetDirArg: string | undefined): Promise<void> {
 }
 
 async function pull(targetDirArg: string | undefined): Promise<void> {
-  const targetDir = targetDirArg ?? ".";
+  const targetDir = await resolveTargetDir(targetDirArg);
   const summary = await runPull(targetDir, makeSyncProgress(), (message) => console.log(message));
   printPullSummary(targetDir, summary);
 }
@@ -139,9 +151,11 @@ async function push(args: string[]): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  await runPush(positional[0] ?? ".", {
+  const targetDir = await resolveTargetDir(positional[0]);
+  await runPush(targetDir, {
     dryRun: flags.includes("--dry-run"),
     onLoginStatus: (message) => console.log(message),
+    formatPath: (file) => displayPath(targetDir, file),
   });
 }
 
@@ -151,7 +165,11 @@ async function status(args: string[]): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  await runStatus(args[0] ?? ".", { onLoginStatus: (message) => console.log(message) });
+  const targetDir = await resolveTargetDir(args[0]);
+  await runStatus(targetDir, {
+    onLoginStatus: (message) => console.log(message),
+    formatPath: (file) => displayPath(targetDir, file),
+  });
 }
 
 async function restore(args: string[]): Promise<void> {
@@ -161,7 +179,7 @@ async function restore(args: string[]): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  await runRestore(dirArg ?? ".", fileArg);
+  await runRestore(await resolveTargetDir(dirArg), fileArg);
 }
 
 async function deleteNote(args: string[]): Promise<void> {
@@ -178,7 +196,7 @@ async function deleteNote(args: string[]): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  await runDelete(dirArg ?? ".", fileArg, {
+  await runDelete(await resolveTargetDir(dirArg), fileArg, {
     hard: flags.includes("--hard"),
     onLoginStatus: (message) => console.log(message),
   });
@@ -218,7 +236,7 @@ async function objectCommand(args: string[]): Promise<void> {
         return;
       }
       await runObjectList(
-        positional[0] ?? ".",
+        await resolveTargetDir(positional[0]),
         {
           type,
           broken: flags.includes("--broken"),
@@ -238,7 +256,7 @@ async function objectCommand(args: string[]): Promise<void> {
         process.exitCode = 1;
         return;
       }
-      await runObjectShow(dirArg ?? ".", recordName, { onLoginStatus });
+      await runObjectShow(await resolveTargetDir(dirArg), recordName, { onLoginStatus });
       return;
     }
     case "delete": {
@@ -249,7 +267,7 @@ async function objectCommand(args: string[]): Promise<void> {
         process.exitCode = 1;
         return;
       }
-      await runObjectDelete(dirArg ?? ".", recordName, {
+      await runObjectDelete(await resolveTargetDir(dirArg), recordName, {
         yes: flags.includes("--yes"),
         force: flags.includes("--force"),
         onLoginStatus,
@@ -276,7 +294,7 @@ async function history(args: string[]): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  await runHistory(dirArg ?? ".", fileArg, { records: flags.includes("--records") });
+  await runHistory(await resolveTargetDir(dirArg), fileArg, { records: flags.includes("--records") });
 }
 
 const DIFF_USAGE =
@@ -305,7 +323,7 @@ async function diff(args: string[]): Promise<void> {
     return;
   }
 
-  await runDiff(dirArg ?? ".", fileArg, fromId, toId, (message) => console.log(message));
+  await runDiff(await resolveTargetDir(dirArg), fileArg, fromId, toId, (message) => console.log(message));
 }
 
 async function revert(args: string[]): Promise<void> {
@@ -322,7 +340,7 @@ async function revert(args: string[]): Promise<void> {
     return;
   }
 
-  await runRevert(dirArg ?? ".", fileArg, idArg, {
+  await runRevert(await resolveTargetDir(dirArg), fileArg, idArg, {
     confirmed: flags.includes("--yes"),
     onLoginStatus: (message) => console.log(message),
   });
@@ -349,11 +367,11 @@ async function bugReport(args: string[]): Promise<void> {
     return;
   }
 
-  await runBugReport(positional[0] ?? ".", since);
+  await runBugReport(await resolveTargetDir(positional[0]), since);
 }
 
 async function reauthenticate(targetDirArg: string | undefined): Promise<void> {
-  const targetDir = targetDirArg ?? ".";
+  const targetDir = await resolveTargetDir(targetDirArg);
   console.log("Opening a browser window for iCloud sign-in...");
   const result = await reauthenticateFolder(targetDir, { onStatus: (message) => console.log(message) });
   console.log(`Reauthenticated as ${result.appleId} (dsid ${result.dsid}) for ${targetDir}.`);

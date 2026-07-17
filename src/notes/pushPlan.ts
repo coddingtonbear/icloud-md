@@ -33,8 +33,15 @@ const LABELS: Record<PlanEntryKind, (file: string) => string> = {
  * and a trailing summary line. Shared by `push --dry-run`, real `push`, and
  * `status` so the three can never show different things for the same state
  * - see the "Push becomes the full reconciler" project notes.
+ *
+ * `formatPath` is the presentation hook for git-style cwd-relative output:
+ * entries keep vault-root-relative paths internally, and the CLI passes a
+ * formatter that re-expresses them relative to the user's current
+ * directory. It's also applied to occurrences of the path *inside* reason
+ * lines (restore-command hints and the like), so suggested commands stay
+ * copy-pasteable from wherever the user is standing.
  */
-export function renderPlan(entries: readonly PlanEntry[]): string[] {
+export function renderPlan(entries: readonly PlanEntry[], formatPath: (file: string) => string = (file) => file): string[] {
   const visible = entries.filter((entry) => entry.resolution !== "noop");
   if (visible.length === 0) {
     return ["Nothing to push."];
@@ -48,9 +55,10 @@ export function renderPlan(entries: readonly PlanEntry[]): string[] {
   let conflicts = 0;
 
   for (const entry of visible) {
-    lines.push(LABELS[entry.kind](entry.file));
+    lines.push(LABELS[entry.kind](formatPath(entry.file)));
     if (entry.resolution === "refused" || entry.resolution === "conflict") {
-      lines.push(chalk.magenta(`  ! ${entry.reason ?? "refused"}`));
+      const reason = (entry.reason ?? "refused").split(entry.file).join(formatPath(entry.file));
+      lines.push(chalk.magenta(`  ! ${reason}`));
       if (entry.resolution === "refused") {
         refused += 1;
       } else {

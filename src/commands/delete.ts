@@ -15,7 +15,7 @@ import { NoteDeleteRejectedError, NotClonedDirectoryError, NotesUnavailableError
 import { buildNotePurgeFields, buildNoteTrashFields, TRASH_FOLDER_RECORD_NAME } from "../notes/encodeNoteRecord.js";
 import { isEnoent } from "../fsUtil.js";
 import { localFileState, type LocalFileState } from "../notes/localFileState.js";
-import { resolveTrackedNote } from "../notes/trackedFile.js";
+import { matchTrackedFile, resolveTrackedNote } from "../notes/trackedFile.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 
@@ -128,15 +128,14 @@ function resolveDeletionTarget(state: CloneState, fileArg: string, targetDir: st
     if (!(cause instanceof UntrackedFileError)) {
       throw cause;
     }
-    const fileName = path.basename(fileArg);
-    const registered = Object.entries(state.trashed ?? {}).find(([, entry]) => entry.file === fileName);
+    const registered = matchTrackedFile(state.trashed ?? {}, fileArg, targetDir);
     if (!registered) {
       throw cause;
     }
     const [recordName, entry] = registered;
     if (!hard) {
-      throw new UntrackedFileError(fileName, targetDir, {
-        hint: `This note was already moved to Recently Deleted by this tool. Run "icloud-notes delete --hard ${fileName}" to permanently delete it.`,
+      throw new UntrackedFileError(fileArg, targetDir, {
+        hint: `This note was already moved to Recently Deleted by this tool. Run "icloud-notes delete --hard ${fileArg}" to permanently delete it.`,
       });
     }
     return { recordName, file: entry.file };

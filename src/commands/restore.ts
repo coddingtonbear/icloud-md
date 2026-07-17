@@ -2,7 +2,8 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { readBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState } from "../notes/cloneState.js";
-import { NotClonedDirectoryError, UntrackedFileError } from "../errors.js";
+import { resolveTrackedNote } from "../notes/trackedFile.js";
+import { NotClonedDirectoryError } from "../errors.js";
 
 /**
  * Discards a tracked note's local edits, overwriting it with its base copy -
@@ -18,16 +19,11 @@ export async function runRestore(targetDir: string, fileArg: string): Promise<vo
     throw new NotClonedDirectoryError(targetDir);
   }
 
-  const fileName = path.basename(fileArg);
-  const match = Object.entries(state.notes).find(([, entry]) => entry.file === fileName);
-  if (!match) {
-    throw new UntrackedFileError(fileName, targetDir);
-  }
-  const [recordName, entry] = match;
+  const { recordName, entry } = resolveTrackedNote(state, fileArg, targetDir);
 
   const base = await readBaseCopy(targetDir, recordName);
   if (base === undefined) {
-    throw new Error(`"${fileName}" has no base copy to restore to - this shouldn't happen for a tracked note.`);
+    throw new Error(`"${entry.file}" has no base copy to restore to - this shouldn't happen for a tracked note.`);
   }
 
   await writeFile(path.join(targetDir, entry.file), base, "utf-8");

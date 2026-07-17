@@ -60,6 +60,14 @@ export class NotClonedDirectoryError extends IcloudNotesSyncError {
   }
 }
 
+export class AmbiguousTrackedFileError extends IcloudNotesSyncError {
+  constructor(baseName: string, candidates: readonly string[]) {
+    super(`"${baseName}" matches more than one tracked note: ${candidates.join(", ")}.`, {
+      hint: "Qualify it with its folder (or run the command from inside that folder).",
+    });
+  }
+}
+
 export class UnsupportedVaultLayoutError extends IcloudNotesSyncError {
   constructor(targetDir: string) {
     super(`${targetDir} was cloned before folder support and uses the old flat layout, which this version no longer reads.`, {
