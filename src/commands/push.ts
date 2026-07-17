@@ -14,9 +14,11 @@ import { mergeNoteVersions } from "../notes/mergeConflict.js";
 import { hasAttachmentReference, isTableUti } from "../notes/noteAttachments.js";
 import { hasUnknownContentMarker } from "../notes/unknownContent.js";
 import { localFileState } from "../notes/localFileState.js";
+import { recordEpoch } from "../notes/noteEpoch.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { compressNoteDocument, decodeNoteBodyText, decompressNoteDocument } from "../notes/noteText.js";
 import { prepareTableAttachmentUpdate, reconstructBodyTextWithPlaceholders } from "../notes/tablePushEdit.js";
+import { historyRecordNames } from "../notes/trackedFile.js";
 import { recordVersion } from "../notes/versionHistory.js";
 import {
   applyTextEdit,
@@ -287,6 +289,13 @@ export async function runPush(targetDir: string, options: PushOptions = {}): Pro
       }
     }
     await writeBaseCopy(targetDir, recordName, localText);
+    // A whole-note index over what just landed remotely, mirroring `pull`'s
+    // own capture - see the "Whole-note coordinated version epochs"
+    // investigation. Deliberately only reached after a real server-side
+    // write succeeded, not on the staleness pre-check's incidental snapshot
+    // capture above (which fires whether or not this push actually goes
+    // through).
+    await recordEpoch(targetDir, recordName, historyRecordNames(state, recordName));
     summary.pushed += 1;
     console.log(`Pushed ${entry.file}`);
   }

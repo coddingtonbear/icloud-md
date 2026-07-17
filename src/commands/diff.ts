@@ -1,14 +1,15 @@
 import { diffComm } from "node-diff3";
 import { resolveFolderAccount } from "../auth/folderAuth.js";
 import { lookupRecords } from "../cloudkit/databaseClient.js";
-import { NotClonedDirectoryError, NotesUnavailableError, VersionContentUnavailableError } from "../errors.js";
+import { NotClonedDirectoryError, NotesUnavailableError, UnknownVersionSnapshotError, VersionContentUnavailableError } from "../errors.js";
 import { decodeTableAttachment } from "../notes/attachmentSync.js";
-import { readCloneState } from "../notes/cloneState.js";
+import { readCloneState, type CloneState } from "../notes/cloneState.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { decodeTableMarkdown } from "../notes/decodeTableRecord.js";
+import { findEpochById, type NoteEpoch } from "../notes/noteEpoch.js";
 import { decodeNoteBodyText } from "../notes/noteText.js";
 import { findSnapshotById, historyRecordNames, resolveTrackedNote } from "../notes/trackedFile.js";
-import type { VersionSnapshot } from "../notes/versionHistory.js";
+import { listVersions, type VersionSnapshot } from "../notes/versionHistory.js";
 import type { IcloudSession } from "../session.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
@@ -36,7 +37,29 @@ export async function runDiff(
   const { recordName } = resolveTrackedNote(state, fileArg, targetDir);
   const recordNames = historyRecordNames(state, recordName);
 
-  const from = await findSnapshotById(targetDir, recordNames, fromId, fileArg);
+  let from: VersionSnapshot;
+  try {
+    from = await findSnapshotById(targetDir, recordNames, fromId, fileArg);
+  } catch (cause) {
+    if (!(cause instanceof UnknownVersionSnapshotError)) {
+      throw cause;
+    }
+    // Not a per-record snapshot id - see if it's a whole-note epoch instead
+    // (Option B from the epoch investigation: this lookup stays entirely
+    // separate from `findSnapshotById` rather than widening its return type).
+    const epoch = await findEpochById(targetDir, recordName, fromId);
+    if (!epoch) {
+      throw cause;
+    }
+    if (toId) {
+      throw new VersionContentUnavailableError(
+        `epoch-vs-epoch diff ("${fromId}..${toId}") isn't supported yet - diff a specific record's snapshots instead ` +
+          `(run "icloud-notes history ${fileArg} --records" for their ids), or diff the epoch against the current remote copy`,
+      );
+    }
+    console.log(await renderEpochDiff(targetDir, state, recordName, epoch, onLoginStatus));
+    return;
+  }
   const fromText = decodeSnapshotText(from);
 
   let toText: string;
@@ -68,6 +91,60 @@ export async function runDiff(
 export function decodeSnapshotText(snapshot: VersionSnapshot): string {
   const bytes = Buffer.from(snapshot.valueBase64, "base64");
   return snapshot.field === "TextDataEncrypted" ? decodeNoteBodyText(bytes) : decodeTableMarkdown(bytes);
+}
+
+/**
+ * Concatenates a per-record diff (each snapshot in the epoch vs. its
+ * record's current remote content) into one rendered report, labeled by
+ * record type - the epoch equivalent of `renderDiff`. Auth is resolved
+ * lazily, once, only if the epoch actually has a record worth fetching
+ * (an epoch consisting entirely of null/missing snapshots never needs it).
+ */
+async function renderEpochDiff(
+  targetDir: string,
+  state: CloneState,
+  noteRecordName: string,
+  epoch: NoteEpoch,
+  onLoginStatus?: (message: string) => void,
+): Promise<string> {
+  let resolvedAuth: { session: IcloudSession; ckdatabasewsUrl: string; dsid: string } | undefined;
+  const resolveAuth = async (): Promise<{ session: IcloudSession; ckdatabasewsUrl: string; dsid: string }> => {
+    if (!resolvedAuth) {
+      const auth = await resolveFolderAccount(targetDir, state.account, { onStatus: onLoginStatus });
+      if (!auth.ckdatabasewsUrl) {
+        throw new NotesUnavailableError();
+      }
+      resolvedAuth = { session: auth.session, ckdatabasewsUrl: auth.ckdatabasewsUrl, dsid: auth.dsid };
+    }
+    return resolvedAuth;
+  };
+
+  const sections: string[] = [];
+  for (const [recordName, snapshotId] of Object.entries(epoch.snapshots)) {
+    const label = recordName === noteRecordName ? "note text" : `table ${recordName}`;
+    if (snapshotId === null) {
+      sections.push(`=== ${label} ===\n(no snapshot was ever captured for this record at this epoch - skipped)`);
+      continue;
+    }
+    const snapshot = (await listVersions(targetDir, recordName)).find((candidate) => candidate.id === snapshotId);
+    if (!snapshot) {
+      sections.push(`=== ${label} ===\n(the recorded snapshot "${snapshotId}" no longer exists locally - skipped)`);
+      continue;
+    }
+
+    try {
+      const { session, ckdatabasewsUrl, dsid } = await resolveAuth();
+      const toText = await fetchCurrentText(session, ckdatabasewsUrl, dsid, recordName, snapshot.recordType);
+      sections.push(`=== ${label} ===\n${renderDiff(decodeSnapshotText(snapshot), toText, epoch.id, "current")}`);
+    } catch (cause) {
+      if (!(cause instanceof VersionContentUnavailableError)) {
+        throw cause;
+      }
+      sections.push(`=== ${label} ===\n(${cause.message})`);
+    }
+  }
+
+  return sections.join("\n\n");
 }
 
 async function fetchCurrentText(

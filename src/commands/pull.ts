@@ -16,6 +16,7 @@ import { mergeNoteVersions } from "../notes/mergeConflict.js";
 import { readBaseCopy, removeBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { localFileState } from "../notes/localFileState.js";
 import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
+import { recordEpoch } from "../notes/noteEpoch.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { combineUnpublishableReasons } from "../notes/unknownContent.js";
 import { recordVersion } from "../notes/versionHistory.js";
@@ -137,15 +138,20 @@ export async function runPull(
         }
 
         // decoded.status === "ok"
+        // Tracks whether any per-record snapshot below actually wrote
+        // something new this run - an epoch is only worth recording when it
+        // is (see `recordEpoch` below).
+        let recordedNewSnapshot = false;
         const textValue = record.fields.TextDataEncrypted?.value;
         if (typeof textValue === "string") {
-          await recordVersion(targetDir, {
-            recordName: record.recordName,
-            recordType: "Note",
-            field: "TextDataEncrypted",
-            recordChangeTag: record.recordChangeTag ?? "",
-            valueBase64: textValue,
-          });
+          recordedNewSnapshot =
+            (await recordVersion(targetDir, {
+              recordName: record.recordName,
+              recordType: "Note",
+              field: "TextDataEncrypted",
+              recordChangeTag: record.recordChangeTag ?? "",
+              valueBase64: textValue,
+            })) || recordedNewSnapshot;
         }
 
         let bodyText = decoded.bodyText;
@@ -182,18 +188,34 @@ export async function runPull(
           }
           Object.assign(tableAttachments, resolved.tableAttachments);
           for (const tableSnapshot of resolved.tableAttachmentSnapshots) {
-            await recordVersion(targetDir, {
-              recordName: tableSnapshot.recordName,
-              recordType: "Attachment",
-              field: "MergeableDataEncrypted",
-              recordChangeTag: tableSnapshot.recordChangeTag,
-              valueBase64: tableSnapshot.valueBase64,
-              noteRecordName: tableSnapshot.noteRecordName,
-            });
+            recordedNewSnapshot =
+              (await recordVersion(targetDir, {
+                recordName: tableSnapshot.recordName,
+                recordType: "Attachment",
+                field: "MergeableDataEncrypted",
+                recordChangeTag: tableSnapshot.recordChangeTag,
+                valueBase64: tableSnapshot.valueBase64,
+                noteRecordName: tableSnapshot.noteRecordName,
+              })) || recordedNewSnapshot;
           }
         }
         if (unpublishableReason) {
           summary.unpublishable += 1;
+        }
+
+        // Coordinated whole-note index over everything just captured above,
+        // plus the tail of any table's history that didn't change this run -
+        // see the "Whole-note coordinated version epochs" investigation.
+        // Skipped entirely when nothing changed, matching `recordVersion`'s
+        // own no-op-on-unchanged discipline.
+        if (recordedNewSnapshot) {
+          const associatedRecordNames = [
+            record.recordName,
+            ...Object.entries(tableAttachments)
+              .filter(([, entry]) => entry.noteRecordName === record.recordName)
+              .map(([tableRecordName]) => tableRecordName),
+          ];
+          await recordEpoch(targetDir, record.recordName, associatedRecordNames);
         }
 
         if (!existing) {

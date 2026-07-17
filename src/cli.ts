@@ -164,13 +164,20 @@ async function deleteNote(args: string[]): Promise<void> {
 }
 
 async function history(args: string[]): Promise<void> {
-  const [fileArg, dirArg] = args;
-  if (!fileArg) {
-    console.error("Usage: icloud-notes history <file> [directory]");
+  const flags = args.filter((arg) => arg.startsWith("--"));
+  const positional = args.filter((arg) => !arg.startsWith("--"));
+  const unknownFlag = flags.find((flag) => flag !== "--records");
+  const [fileArg, dirArg] = positional;
+  if (unknownFlag || !fileArg || positional.length > 2) {
+    console.error(
+      "Usage: icloud-notes history <file> [directory] [--records]\n" +
+        "  Without --records, shows the epoch timeline (one line per coordinated pull/push capture); " +
+        "--records shows the flat per-record snapshot listing instead.",
+    );
     process.exitCode = 1;
     return;
   }
-  await runHistory(dirArg ?? ".", fileArg);
+  await runHistory(dirArg ?? ".", fileArg, { records: flags.includes("--records") });
 }
 
 const DIFF_USAGE =
@@ -310,7 +317,8 @@ async function main(): Promise<void> {
             "  restore <file> [directory]  Discard a tracked note's local edits, reverting it to the last synced copy\n" +
             "  delete <file> [directory]  Delete a tracked note from iCloud (a real remote write, no confirmation prompt) " +
             "and stop tracking it locally; a locally-edited copy is kept on disk (untracked) rather than discarded\n" +
-            "  history <file> [directory]  List recorded version snapshots for a note (and its tables), newest first\n" +
+            "  history <file> [directory] [--records]  List a note's epoch timeline, newest first (--records for the " +
+            "flat per-record snapshot listing instead)\n" +
             "  diff <file> <ref> [directory]  Diff two snapshots, or one snapshot against the current remote copy - " +
             "<ref> is a snapshot id or <from>..<to>\n" +
             "  revert <file> <id> [directory] [--yes]  Write a historical snapshot back to the server (a real remote " +

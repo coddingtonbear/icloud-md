@@ -1,8 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decodeSnapshotText, renderDiff } from "./diff.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { writeCloneState, type CloneState } from "../notes/cloneState.js";
+import { listEpochs, recordEpoch } from "../notes/noteEpoch.js";
 import { REAL_PLAIN_NOTE } from "../notes/realFixtures.js";
-import type { VersionSnapshot } from "../notes/versionHistory.js";
+import { recordVersion, type VersionSnapshot } from "../notes/versionHistory.js";
+import { decodeSnapshotText, renderDiff, runDiff } from "./diff.js";
 
 // Same real capture attachmentSync.test.ts uses for "Test Table Note (2)"
 // (dev notes, 2026-07-14T10:46/14:41).
@@ -54,3 +59,50 @@ test("renderDiff treats an empty 'from' as everything added", () => {
   const rendered = renderDiff("", "new line", "old", "new");
   assert.match(rendered, /^\+ new line$/m);
 });
+
+async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
+  const dir = await mkdtemp(path.join(tmpdir(), "diff-test-"));
+  try {
+    await run(dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+const STATE: CloneState = {
+  syncToken: "token",
+  notes: {
+    REC1: { file: "Test Note.md", recordChangeTag: "1a", modificationDate: 100 },
+  },
+};
+
+test("diff rejects a ref that matches neither a snapshot nor an epoch", () =>
+  withTempDir(async (dir) => {
+    await writeCloneState(dir, STATE);
+    await assert.rejects(
+      () => runDiff(dir, "Test Note.md", "missing-id", undefined),
+      /No version snapshot with id "missing-id" found/,
+    );
+  }));
+
+test("diff refuses the <from>..<to> form when <from> is an epoch id, without touching the network", () =>
+  withTempDir(async (dir) => {
+    await writeCloneState(dir, STATE);
+    await recordVersion(dir, {
+      recordName: "REC1",
+      recordType: "Note",
+      field: "TextDataEncrypted",
+      recordChangeTag: "tag-1",
+      valueBase64: REAL_PLAIN_NOTE,
+    });
+    await recordEpoch(dir, "REC1", ["REC1"]);
+    const [epoch] = await listEpochs(dir, "REC1");
+
+    // No `account` on STATE, so reaching resolveFolderAccount would throw
+    // UnboundAccountError - a clean, specific rejection here proves the
+    // refusal fires before any network call.
+    await assert.rejects(
+      () => runDiff(dir, "Test Note.md", epoch!.id, "some-other-id"),
+      /epoch-vs-epoch diff .* isn't supported yet/,
+    );
+  }));

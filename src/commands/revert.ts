@@ -1,11 +1,13 @@
 import { resolveFolderAccount } from "../auth/folderAuth.js";
 import { lookupRecords, updateRecords, type RecordUpdate } from "../cloudkit/databaseClient.js";
-import { NotClonedDirectoryError, NotesUnavailableError, VersionContentUnavailableError } from "../errors.js";
+import { NotClonedDirectoryError, NotesUnavailableError, UnknownVersionSnapshotError, VersionContentUnavailableError } from "../errors.js";
 import { decodeTableMarkdown } from "../notes/decodeTableRecord.js";
-import { readCloneState } from "../notes/cloneState.js";
+import { readCloneState, type CloneState } from "../notes/cloneState.js";
 import { decompressNoteDocument } from "../notes/noteText.js";
 import { noteDocumentRoundTrips } from "../notes/noteDocument.js";
+import { findEpochById, type NoteEpoch } from "../notes/noteEpoch.js";
 import { findSnapshotById, historyRecordNames, resolveTrackedNote } from "../notes/trackedFile.js";
+import { listVersions, type VersionSnapshot } from "../notes/versionHistory.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 
@@ -26,6 +28,13 @@ export interface RevertOptions {
  * discipline `push` already applies to new edits, applied here to a
  * snapshot instead), submit via `updateRecords` with that fresh tag.
  *
+ * `id` may be a per-record snapshot id, or a whole-note epoch id (see the
+ * "Whole-note coordinated version epochs" investigation) - epoch lookup is
+ * a separate, sibling path (`findEpochById`) tried only after the ordinary
+ * snapshot lookup misses, rather than folding both into one return shape;
+ * they're different operations downstream (one write vs. a batch of them),
+ * not one operation wearing two shapes.
+ *
  * Deliberately not the same thing as the existing `restore` command -
  * `restore` is local-only (overwrites the working file from the base copy,
  * no network call); `revert` is a real remote write.
@@ -38,7 +47,23 @@ export async function runRevert(targetDir: string, fileArg: string, id: string, 
 
   const { recordName } = resolveTrackedNote(state, fileArg, targetDir);
   const recordNames = historyRecordNames(state, recordName);
-  const snapshot = await findSnapshotById(targetDir, recordNames, id, fileArg);
+
+  let snapshot: VersionSnapshot;
+  try {
+    snapshot = await findSnapshotById(targetDir, recordNames, id, fileArg);
+  } catch (cause) {
+    if (!(cause instanceof UnknownVersionSnapshotError)) {
+      throw cause;
+    }
+    const epoch = await findEpochById(targetDir, recordName, id);
+    if (!epoch) {
+      throw cause;
+    }
+    await runEpochRevert(targetDir, state, recordName, fileArg, epoch, options);
+    return;
+  }
+
+  verifySnapshotRevertible(snapshot, id);
 
   const auth = await resolveFolderAccount(targetDir, state.account, { onStatus: options.onLoginStatus });
   if (!auth.ckdatabasewsUrl) {
@@ -56,22 +81,6 @@ export async function runRevert(targetDir: string, fileArg: string, id: string, 
   const record = records[0];
   if (!record || record.deleted === true) {
     throw new VersionContentUnavailableError(`"${snapshot.recordName}" no longer exists remotely`);
-  }
-
-  const rawBytes = Buffer.from(snapshot.valueBase64, "base64");
-  if (snapshot.field === "TextDataEncrypted") {
-    const raw = new Uint8Array(decompressNoteDocument(rawBytes));
-    if (!noteDocumentRoundTrips(raw)) {
-      throw new VersionContentUnavailableError(
-        `snapshot "${id}" doesn't round-trip byte-for-byte through our model - refusing to revert`,
-      );
-    }
-  } else {
-    try {
-      decodeTableMarkdown(rawBytes);
-    } catch {
-      throw new VersionContentUnavailableError(`snapshot "${id}" doesn't decode as a valid table - refusing to revert`);
-    }
   }
 
   const targetDescription =
@@ -102,4 +111,157 @@ export async function runRevert(targetDir: string, fileArg: string, id: string, 
 
   console.log(`Reverted ${targetDescription} to the snapshot captured ${snapshot.timestamp}.`);
   console.log(`Run "icloud-notes pull" to bring this change into your local copy.`);
+}
+
+/** The safety gate `push` already applies to new edits, applied here to a
+ * historical snapshot instead - refuses to revert to bytes that don't
+ * round-trip byte-for-byte (Note text) or decode cleanly (table) through our
+ * own model. */
+function verifySnapshotRevertible(snapshot: VersionSnapshot, id: string): void {
+  const rawBytes = Buffer.from(snapshot.valueBase64, "base64");
+  if (snapshot.field === "TextDataEncrypted") {
+    const raw = new Uint8Array(decompressNoteDocument(rawBytes));
+    if (!noteDocumentRoundTrips(raw)) {
+      throw new VersionContentUnavailableError(
+        `snapshot "${id}" doesn't round-trip byte-for-byte through our model - refusing to revert`,
+      );
+    }
+  } else {
+    try {
+      decodeTableMarkdown(rawBytes);
+    } catch {
+      throw new VersionContentUnavailableError(`snapshot "${id}" doesn't decode as a valid table - refusing to revert`);
+    }
+  }
+}
+
+function recordLabel(recordName: string, noteRecordName: string): string {
+  return recordName === noteRecordName ? "the note's own text" : `table ${recordName}`;
+}
+
+/**
+ * Reverts every record covered by a whole-note epoch in one batch: fresh
+ * recordChangeTags for all of them via a single `lookupRecords` call, then
+ * one `updateRecords` call for all of them. Per the investigation's open
+ * questions: a table created after the epoch isn't touched (there's no
+ * CKRecord delete API here, and destruction is too risky); a `null` entry
+ * (predates history tracking) or a snapshot that's vanished locally is
+ * skipped with a warning; a table deleted remotely since the epoch is
+ * skipped with a warning rather than aborting the whole batch. There's no
+ * rollback on partial failure - each record's result is reported
+ * independently, matching `updateRecords`' own per-record semantics.
+ */
+async function runEpochRevert(
+  targetDir: string,
+  state: CloneState,
+  noteRecordName: string,
+  fileArg: string,
+  epoch: NoteEpoch,
+  options: RevertOptions,
+): Promise<void> {
+  const entries: Array<{ recordName: string; snapshot: VersionSnapshot }> = [];
+  const notices: string[] = [];
+
+  for (const [recordName, snapshotId] of Object.entries(epoch.snapshots)) {
+    if (snapshotId === null) {
+      notices.push(`${recordLabel(recordName, noteRecordName)}: no snapshot was ever captured for this record - skipped`);
+      continue;
+    }
+    const snapshot = (await listVersions(targetDir, recordName)).find((candidate) => candidate.id === snapshotId);
+    if (!snapshot) {
+      notices.push(`${recordLabel(recordName, noteRecordName)}: recorded snapshot "${snapshotId}" no longer exists locally - skipped`);
+      continue;
+    }
+    verifySnapshotRevertible(snapshot, snapshotId);
+    entries.push({ recordName, snapshot });
+  }
+
+  for (const recordName of historyRecordNames(state, noteRecordName)) {
+    if (!(recordName in epoch.snapshots)) {
+      notices.push(`${recordLabel(recordName, noteRecordName)}: wasn't part of this epoch (created after it was captured) - left unchanged`);
+    }
+  }
+
+  if (entries.length === 0) {
+    console.log(`Nothing to revert for ${fileArg} at epoch "${epoch.id}" - every associated record was skipped:`);
+    for (const notice of notices) {
+      console.log(`  - ${notice}`);
+    }
+    return;
+  }
+
+  if (!options.confirmed) {
+    console.log(`Would revert ${fileArg} to the whole-note epoch captured ${epoch.timestamp} (id ${epoch.id}):`);
+    for (const { recordName, snapshot } of entries) {
+      console.log(`  - ${recordLabel(recordName, noteRecordName)}, to the snapshot captured ${snapshot.timestamp}`);
+    }
+    for (const notice of notices) {
+      console.log(`  - ${notice}`);
+    }
+    console.log(`This is a real write to your iCloud account, sent as one batch. Re-run with --yes to actually do it.`);
+    return;
+  }
+
+  const auth = await resolveFolderAccount(targetDir, state.account, { onStatus: options.onLoginStatus });
+  if (!auth.ckdatabasewsUrl) {
+    throw new NotesUnavailableError();
+  }
+
+  const records = await lookupRecords(
+    auth.session,
+    auth.ckdatabasewsUrl,
+    auth.dsid,
+    "private",
+    PRIVATE_NOTES_ZONE,
+    entries.map((entry) => entry.recordName),
+  );
+  const recordsByName = new Map(records.map((record) => [record.recordName, record]));
+
+  const updates: RecordUpdate[] = [];
+  for (const { recordName, snapshot } of entries) {
+    const record = recordsByName.get(recordName);
+    if (!record || record.deleted === true) {
+      notices.push(`${recordLabel(recordName, noteRecordName)}: no longer exists remotely - skipped`);
+      continue;
+    }
+    updates.push({
+      recordName: record.recordName,
+      recordType: record.recordType,
+      recordChangeTag: record.recordChangeTag ?? "",
+      fields: { [snapshot.field]: { value: snapshot.valueBase64 } },
+      parentRecordName: record.parentRecordName,
+    });
+  }
+
+  if (updates.length === 0) {
+    console.log(`Nothing to revert for ${fileArg} - every targeted record is gone remotely:`);
+    for (const notice of notices) {
+      console.log(`  - ${notice}`);
+    }
+    return;
+  }
+
+  const results = await updateRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, PRIVATE_NOTES_ZONE, updates);
+  console.log(`Reverting ${fileArg} to the whole-note epoch captured ${epoch.timestamp}:`);
+  for (let i = 0; i < updates.length; i += 1) {
+    const update = updates[i];
+    const result = results[i];
+    if (!update) {
+      continue;
+    }
+    const label = recordLabel(update.recordName, noteRecordName);
+    if (!result) {
+      console.log(`  - ${label}: the server returned no result`);
+    } else if (result.ok) {
+      console.log(`  - ${label}: reverted`);
+    } else {
+      const detail = result.reason ? ` (${result.reason})` : "";
+      console.log(`  - ${label}: FAILED - ${result.serverErrorCode}${detail}`);
+    }
+  }
+  for (const notice of notices) {
+    console.log(`  - ${notice}`);
+  }
+  console.log(`No rollback is performed on partial failure - check each line above.`);
+  console.log(`Run "icloud-notes pull" to bring these changes into your local copy.`);
 }

@@ -86,6 +86,13 @@ test("recordVersion keeps snapshots for different records separate", () =>
     assert.equal((await listVersions(dir, "REC-2")).length, 1);
   }));
 
+test("recordVersion returns true when it writes a new snapshot, false when it's a no-op", () =>
+  withTempDir(async (dir) => {
+    assert.equal(await recordVersion(dir, noteInput({ valueBase64: "AAAA" })), true);
+    assert.equal(await recordVersion(dir, noteInput({ valueBase64: "AAAA", recordChangeTag: "tag-unchanged" })), false);
+    assert.equal(await recordVersion(dir, noteInput({ valueBase64: "BBBB" })), true);
+  }));
+
 test("recordVersion tracks a table Attachment snapshot with its noteRecordName", () =>
   withTempDir(async (dir) => {
     await recordVersion(dir, {

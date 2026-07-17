@@ -38,12 +38,16 @@ export type VersionSnapshotInput = Omit<VersionSnapshot, "id" | "timestamp">;
  * snapshot (not the full history) means a real revert-and-forward transition
  * (A -> B -> A) still records both edges; only exact, consecutive repeats -
  * e.g. from a no-op pull/push - get skipped.
+ *
+ * Returns whether a new snapshot was actually written - `pull`/`push` use
+ * this to decide whether anything changed for a note this run at all, and so
+ * whether a coordinated epoch is worth recording (see `noteEpoch.ts`).
  */
-export async function recordVersion(targetDir: string, input: VersionSnapshotInput): Promise<void> {
+export async function recordVersion(targetDir: string, input: VersionSnapshotInput): Promise<boolean> {
   const existing = await listVersions(targetDir, input.recordName);
   const last = existing[existing.length - 1];
   if (last && last.valueBase64 === input.valueBase64) {
-    return;
+    return false;
   }
 
   const capturedAt = new Date();
@@ -63,6 +67,7 @@ export async function recordVersion(targetDir: string, input: VersionSnapshotInp
   const seq = String(existing.length).padStart(6, "0");
   const fileName = `${capturedAt.getTime()}-${seq}-${shortId}.json`;
   await writeFile(path.join(dir, fileName), JSON.stringify(snapshot, null, 2) + "\n", "utf-8");
+  return true;
 }
 
 /** Every snapshot recorded for `recordName`, oldest first (filenames sort
