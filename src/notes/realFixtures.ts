@@ -163,6 +163,93 @@ export const TABLE_WRITE_PATH_REVISIONS: readonly { tag: string; base64: string 
 ];
 
 /**
+ * Real `MergeableDataEncrypted` payloads of a *long-lived* table - Attachment
+ * `92df3572-94a6-48f5-be27-075e91f80a2c` (owning note
+ * `66d82a2c-b6dd-47e8-abc7-7c219608f846`, "Test Table Note (2)"), preserved
+ * from two local history snapshots after Adam cleared the source note from
+ * the account (dev notes, 2026-07-16, "Table write engine (2/4)"). Unlike
+ * all ten `TABLE_WRITE_PATH_REVISIONS` above, this table's months of real
+ * accumulated edit history carries `MergeableDataObjectData`'s
+ * `unknown_field_2` (always zero-length) and `unknown_field_7` (a repeated
+ * `{16-byte UUID, two single-varint submessages}` shape) - which Apple emits
+ * in field-number order, so leaving them undeclared broke the byte
+ * round-trip gate on ordering alone (protobuf-es re-emits unknown fields
+ * last). These two fixtures are the regression proof for declaring them.
+ * `2AV` -> `2AX` is one real Apple-client edit apart (a row removed, and one
+ * of `unknown_field_7`'s varints incremented).
+ */
+export const TABLE_LONG_LIVED_REV_2AV =
+  "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";
+
+export const TABLE_LONG_LIVED_REV_2AX =
+  "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";
+
+export const TABLE_LONG_LIVED_SNAPSHOTS: readonly { tag: string; base64: string }[] = [
+  { tag: "2av", base64: TABLE_LONG_LIVED_REV_2AV },
+  { tag: "2ax", base64: TABLE_LONG_LIVED_REV_2AX },
+];
+
+/**
  * Real `TextDataEncrypted` from the very first `records/modify` of a
  * brand-new note - the captured create (recordName
  * `94fce331-9068-41a5-a56e-1244c82bc392`, "Test Note (2026-07-16)", from

@@ -11,6 +11,8 @@ import { buildFreshTableDocument } from "./tableEdit.js";
 import {
   TABLE_FIRST_REVISION,
   TABLE_FINAL_REVISION,
+  TABLE_LONG_LIVED_REV_2AX,
+  TABLE_LONG_LIVED_SNAPSHOTS,
   TABLE_REV_BASELINE,
   TABLE_REV_CELL_EDIT_2,
   TABLE_WRITE_PATH_REVISIONS,
@@ -45,6 +47,27 @@ for (const revision of TABLE_WRITE_PATH_REVISIONS) {
     assert.equal(tableDocumentRoundTrips(Buffer.from(revision.base64, "base64")), true);
   });
 }
+
+// The long-lived-table snapshots are the regression proof for
+// MergeableDataObjectData's unknown_field_2/unknown_field_7 (see
+// realFixtures.ts): before those were declared, both failed this exact gate
+// on field ordering alone, blocking every kind of push edit on that table.
+for (const revision of TABLE_LONG_LIVED_SNAPSHOTS) {
+  test(`tableDocumentRoundTrips is true for long-lived table revision ${revision.tag}`, () => {
+    assert.equal(tableDocumentRoundTrips(Buffer.from(revision.base64, "base64")), true);
+  });
+}
+
+test("long-lived table revision 2ax (carrying unknown fields 2 and 7) still decodes to the expected grid", () => {
+  const doc = parseTableDocument(Buffer.from(TABLE_LONG_LIVED_REV_2AX, "base64"));
+  assert.deepEqual(gridFromTableDocument(doc), [
+    ["A0", "B0", "B0-new", "C0"],
+    ["A1", "B1", "B1-new", "C1"],
+    ["A2", "B2", "B2-new", "C2"],
+    ["A3", "B3", "B3-new", "C3-edited"],
+    ["A4", "B4", "B4-new", "C4"],
+  ]);
+});
 
 test("real revision 29z decodes to the expected 4x5 grid", () => {
   const doc = parseTableDocument(Buffer.from(TABLE_REV_BASELINE, "base64"));

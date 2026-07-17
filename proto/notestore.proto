@@ -306,10 +306,29 @@ message MergeableDataObjectData {
   // Declared as opaque bytes since its internal shape isn't understood;
   // see file header.
   repeated bytes unknown_field_1 = 1;
+  // Found 2026-07-16 on a real, long-lived table (Attachment
+  // 92df3572-94a6-48f5-be27-075e91f80a2c, preserved as two history
+  // snapshots) - absent from all 10 HAR-mined fixtures, so likely written
+  // only by newer Apple clients or only once a table accumulates history.
+  // Always observed zero-length (`12 00`); leaving it undeclared broke the
+  // byte round-trip purely by *ordering*: Apple emits this message's fields
+  // in field-number order, while @bufbuild/protobuf re-emits unknown fields
+  // after all known ones. Same opaque-bytes/`repeated` reasoning as
+  // unknown_field_1 above.
+  repeated bytes unknown_field_2 = 2;
   repeated MergeableDataObjectEntry mergeable_data_object_entry = 3;
   repeated string mergeable_data_object_key_item = 4;
   repeated string mergeable_data_object_type_item = 5;
   repeated bytes mergeable_data_object_uuid_item = 6;
+  // Found alongside unknown_field_2 (same snapshots, same ordering-only
+  // round-trip breakage; trails the UUID table at the end of the message).
+  // Internal shape (hand-decoded, semantics unknown): repeated submessage
+  // `1 { 1: 16-byte UUID, 2 {1: varint}, 2 {1: varint} }` - both observed
+  // UUIDs exist in mergeable_data_object_uuid_item but are NOT live
+  // row/column identities, and one varint incremented across two saves.
+  // Kept opaque for the usual reason: declaring a wrong submessage shape
+  // risks misreading a future sibling field as its continuation.
+  repeated bytes unknown_field_7 = 7;
 }
 
 message MergableDataObject {
