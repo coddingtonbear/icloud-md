@@ -38,7 +38,7 @@ test("decodeSnapshotText decodes an Attachment MergeableDataEncrypted (table) sn
     valueBase64: TABLE_MERGEABLE_DATA_BASE64,
     noteRecordName: "REC1",
   };
-  assert.equal(decodeSnapshotText(snapshot), ["| A0 | B0 |", "| --- | --- |", "|  |  |"].join("\n"));
+  assert.equal(decodeSnapshotText(snapshot), ["| A0 | B0 |", "| - | - |", "| | |"].join("\n"));
 });
 
 test("renderDiff shows no differences for identical text", () => {

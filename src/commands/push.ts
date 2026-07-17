@@ -17,7 +17,7 @@ import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEn
 import { classifyNoteRecord, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { buildNoteCreateFields, buildNoteTrashFields, buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
-import { findMarkdownTableBlocks } from "../notes/decodeTableRecord.js";
+import { findMarkdownTableBlocks } from "../notes/markdownTable.js";
 import { isEnoent } from "../fsUtil.js";
 import { mergeNoteVersions } from "../notes/mergeConflict.js";
 import { hasAttachmentReference, isTableUti } from "../notes/noteAttachments.js";

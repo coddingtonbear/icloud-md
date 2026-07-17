@@ -7,12 +7,8 @@
 
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { OBJECT_REPLACEMENT_CHARACTER } from "./noteAttachments.js";
-import {
-  gridFromTableDocument,
-  parseTableDocument,
-  tableDocumentRoundTrips,
-  type MarkdownTableBlock,
-} from "./decodeTableRecord.js";
+import { gridFromTableDocument, parseTableDocument, tableDocumentRoundTrips } from "./decodeTableRecord.js";
+import type { MarkdownTableBlock } from "./markdownTable.js";
 
 /**
  * Un-splices each located table block back out of a locally-edited note's

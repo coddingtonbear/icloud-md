@@ -309,7 +309,7 @@ test("matchAttachmentRecords disambiguates a filename collision the same way not
 
 test("decodeTableAttachment renders a real captured table's MergeableDataEncrypted as markdown", () => {
   const markdown = decodeTableAttachment(TABLE_ATTACHMENT_RECORD);
-  assert.equal(markdown, ["| A0 | B0 |", "| --- | --- |", "|  |  |"].join("\n"));
+  assert.equal(markdown, ["| A0 | B0 |", "| - | - |", "| | |"].join("\n"));
 });
 
 test("decodeTableAttachment refuses when the record is missing", () => {

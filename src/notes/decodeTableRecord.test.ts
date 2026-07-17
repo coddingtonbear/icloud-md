@@ -6,9 +6,6 @@ import {
   encodeTableDocument,
   tableDocumentRoundTrips,
   gridFromTableDocument,
-  parseMarkdownTable,
-  findMarkdownTableBlocks,
-  renderMarkdownTable,
 } from "./decodeTableRecord.js";
 import { buildFreshTableDocument } from "./tableEdit.js";
 import {
@@ -21,7 +18,7 @@ import {
 
 test("decodeTableMarkdown renders a real captured 2x2 grid, one row still blank", () => {
   const markdown = decodeTableMarkdown(Buffer.from(TABLE_FIRST_REVISION, "base64"));
-  assert.equal(markdown, ["| A0 | B0 |", "| --- | --- |", "|  |  |"].join("\n"));
+  assert.equal(markdown, ["| A0 | B0 |", "| - | - |", "| | |"].join("\n"));
 });
 
 test("decodeTableMarkdown renders a real captured 5x4 grid, verified against the live table", () => {
@@ -30,7 +27,7 @@ test("decodeTableMarkdown renders a real captured 5x4 grid, verified against the
     markdown,
     [
       "| A0 | B0 | B0-new | C0 |",
-      "| --- | --- | --- | --- |",
+      "| - | - | - | - |",
       "| A1 | B1 | B1-new | C1 |",
       "| A2 | B2 | B2-new | C2 |",
       "| A3 | B3 | B3-new | C3-edited |",
@@ -98,63 +95,3 @@ for (let i = 1; i < TABLE_WRITE_PATH_REVISIONS.length; i += 1) {
   });
 }
 
-// --- parseMarkdownTable / findMarkdownTableBlocks (push's markdown side) ---
-
-test("parseMarkdownTable is the exact inverse of renderMarkdownTable for a real decoded grid", () => {
-  const grid = [
-    ["A0", "B0"],
-    ["A1", "B1"],
-  ];
-  assert.deepEqual(parseMarkdownTable(renderMarkdownTable(grid)), grid);
-});
-
-test("parseMarkdownTable unescapes pipes, backslashes, and <br> line breaks", () => {
-  const grid = [["a|b", "line1\nline2"], ["back\\slash", "plain"]];
-  assert.deepEqual(parseMarkdownTable(renderMarkdownTable(grid)), grid);
-});
-
-test("parseMarkdownTable throws on a row with the wrong column count", () => {
-  const markdown = ["| A | B |", "| --- | --- |", "| only-one |"].join("\n");
-  assert.throws(() => parseMarkdownTable(markdown), /column count/);
-});
-
-test("parseMarkdownTable throws when the separator row isn't a GFM separator", () => {
-  const markdown = ["| A | B |", "| not a separator |"].join("\n");
-  assert.throws(() => parseMarkdownTable(markdown));
-});
-
-test("findMarkdownTableBlocks finds a single table surrounded by prose", () => {
-  const text = ["Some intro text.", "", renderMarkdownTable([["A", "B"]]), "", "Some trailing text."].join("\n");
-  const blocks = findMarkdownTableBlocks(text);
-  assert.equal(blocks.length, 1);
-  assert.deepEqual(blocks[0]?.grid, [["A", "B"]]);
-});
-
-test("findMarkdownTableBlocks finds multiple tables in document order", () => {
-  const text = [
-    "Intro",
-    renderMarkdownTable([["First"]]),
-    "Middle text",
-    renderMarkdownTable([["Second", "Table"]]),
-    "Outro",
-  ].join("\n");
-  const blocks = findMarkdownTableBlocks(text);
-  assert.equal(blocks.length, 2);
-  assert.deepEqual(blocks[0]?.grid, [["First"]]);
-  assert.deepEqual(
-    blocks[1]?.grid,
-    [["Second", "Table"]],
-  );
-});
-
-test("findMarkdownTableBlocks finds nothing in plain prose with no tables", () => {
-  assert.deepEqual(findMarkdownTableBlocks("Just a normal note.\nWith a few lines.\nNo tables here."), []);
-});
-
-test("findMarkdownTableBlocks reports correct line ranges for splicing back out", () => {
-  const text = ["line0", "| A |", "| --- |", "| B |", "line4"].join("\n");
-  const blocks = findMarkdownTableBlocks(text);
-  assert.equal(blocks.length, 1);
-  assert.equal(blocks[0]?.startLine, 1);
-  assert.equal(blocks[0]?.endLine, 4);
-});

@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { OBJECT_REPLACEMENT_CHARACTER } from "./noteAttachments.js";
-import { findMarkdownTableBlocks, gridFromTableDocument, parseTableDocument, renderMarkdownTable } from "./decodeTableRecord.js";
+import { gridFromTableDocument, parseTableDocument } from "./decodeTableRecord.js";
+import { findMarkdownTableBlocks, renderMarkdownTable } from "./markdownTable.js";
 import { prepareTableAttachmentUpdate, reconstructBodyTextWithPlaceholders } from "./tablePushEdit.js";
 import { TABLE_FIRST_REVISION } from "./realFixtures.js";
 
