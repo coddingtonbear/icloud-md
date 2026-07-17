@@ -7,6 +7,14 @@ export interface CloudKitFieldValue {
   type: string;
 }
 
+/** CloudKit's record-level bookkeeping for who wrote a record and when -
+ * distinct from the Notes-app-level CreationDate/ModificationDate fields. */
+export interface CloudKitRecordStamp {
+  /** ms epoch. */
+  timestamp: number;
+  deviceID?: string | undefined;
+}
+
 export interface CloudKitRecord {
   recordName: string;
   recordType: string;
@@ -16,6 +24,8 @@ export interface CloudKitRecord {
   /** The record's parent reference (for notes: the containing folder).
    * Echoed back on updates the way the web client does. */
   parentRecordName?: string | undefined;
+  created?: CloudKitRecordStamp | undefined;
+  modified?: CloudKitRecordStamp | undefined;
 }
 
 export interface ZoneChangesResult {
@@ -187,6 +197,48 @@ export async function fetchZoneNoteRecords(
   }
 
   return { records, syncToken };
+}
+
+/**
+ * Fetches *every* record in the private Notes zone, of every type and with
+ * every field - unlike `fetchZoneNoteRecords`, no `desiredRecordTypes` or
+ * `desiredKeys` filter is sent (the sync path's filter notably excludes
+ * `Attachment` and `Media` records, exactly what record-level inspection
+ * most needs to see). Always a full walk from scratch; diagnostics want the
+ * complete current picture, not an incremental delta. Read-only.
+ */
+export async function fetchAllZoneRecords(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  onPage?: (pageRecordCount: number) => void,
+): Promise<CloudKitRecord[]> {
+  const records: CloudKitRecord[] = [];
+  let syncToken: string | undefined;
+  let moreComing = true;
+
+  while (moreComing) {
+    const zoneRequest: Record<string, unknown> = { zoneID: { zoneName: "Notes" }, reverse: true };
+    if (syncToken) {
+      zoneRequest.syncToken = syncToken;
+    }
+    const body = await postDatabase(
+      "fetchAllZoneRecords:changes/zone",
+      session,
+      ckDatabaseHost,
+      dsid,
+      "private",
+      "changes/zone",
+      { zones: [zoneRequest] },
+    );
+    const zone = firstZone(body);
+    records.push(...(zone.records ?? []));
+    syncToken = zone.syncToken ?? syncToken;
+    moreComing = zone.moreComing === true;
+    onPage?.((zone.records ?? []).length);
+  }
+
+  return records;
 }
 
 /** Fetches records in the account's own (private-database) Notes zone. */
@@ -429,28 +481,62 @@ export function parseNoteUpdateResponse(body: unknown): NoteUpdateResult {
   return { ok: true, record: parseRecord(entry) };
 }
 
-export type NoteDeleteResult =
-  | { ok: true }
-  | { ok: false; serverErrorCode: string; reason: string | undefined };
-
 /**
- * Deletes one note via `records/modify`, using the same `forceDelete`
- * operation type the real web/mobile clients use (confirmed against a
- * working reference implementation - see the "Delete a note from iCloud"
- * investigation in the project notes). Per Apple's own client behavior this
- * is a server-managed soft delete (the note lands in "Recently Deleted"),
- * not a hard wipe.
+ * Creates one brand-new Note record via `records/modify`, mirroring the
+ * captured first-ever save of a fresh note (operationType "create", a
+ * client-generated recordName, no recordChangeTag - see the 2026-07-16
+ * lifecycle HAR analysis). The response is a full record carrying the
+ * note's first recordChangeTag, same shape as an update's.
  */
-export async function deleteNoteRecord(
+export async function createNoteRecord(
   session: IcloudSession,
   ckDatabaseHost: string,
   dsid: string,
   zoneID: CloudKitZoneID,
   recordName: string,
+  fields: Record<string, { value: unknown }>,
+): Promise<NoteUpdateResult> {
+  const body = await postDatabase(
+    "createNoteRecord:records/modify",
+    session,
+    ckDatabaseHost,
+    dsid,
+    "private",
+    "records/modify",
+    {
+      operations: [{ operationType: "create", record: { recordName, recordType: "Note", fields } }],
+      zoneID,
+    },
+  );
+  return parseNoteUpdateResponse(body);
+}
+
+export type NoteDeleteResult =
+  | { ok: true }
+  | { ok: false; serverErrorCode: string; reason: string | undefined };
+
+/**
+ * Deletes one record via CloudKit's `forceDelete` operation. NOT what
+ * Apple's own clients do for user-facing note deletion - both stages of
+ * that flow are ordinary updates (trash-move, then `Deleted: 1`; see the
+ * 2026-07-16 lifecycle/purge HAR analyses), and `forceDelete` on a Note is
+ * rejected with `VALIDATING_REFERENCE_ERROR` whenever an Attachment record
+ * still references it (confirmed live). Kept for record-level plumbing (the
+ * `object` command family): it's the only way to delete a *non-Note* record
+ * such as an orphaned Attachment, live-verified to work when nothing
+ * references the target.
+ */
+export async function forceDeleteRecord(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  zoneID: CloudKitZoneID,
+  recordName: string,
+  recordType: string,
   recordChangeTag: string,
 ): Promise<NoteDeleteResult> {
   const body = await postDatabase(
-    "deleteNoteRecord:records/modify",
+    "forceDeleteRecord:records/modify",
     session,
     ckDatabaseHost,
     dsid,
@@ -458,7 +544,7 @@ export async function deleteNoteRecord(
     "records/modify",
     {
       operations: [
-        { operationType: "forceDelete", record: { recordName, recordType: "Note", recordChangeTag } },
+        { operationType: "forceDelete", record: { recordName, recordType, recordChangeTag } },
       ],
       zoneID,
     },
@@ -649,6 +735,18 @@ function parseRecord(value: unknown): CloudKitRecord {
     recordChangeTag: typeof value.recordChangeTag === "string" ? value.recordChangeTag : undefined,
     deleted: typeof value.deleted === "boolean" ? value.deleted : undefined,
     parentRecordName: parent,
+    created: parseRecordStamp(value.created),
+    modified: parseRecordStamp(value.modified),
+  };
+}
+
+function parseRecordStamp(value: unknown): CloudKitRecordStamp | undefined {
+  if (!isRecord(value) || typeof value.timestamp !== "number") {
+    return undefined;
+  }
+  return {
+    timestamp: value.timestamp,
+    deviceID: typeof value.deviceID === "string" ? value.deviceID : undefined,
   };
 }
 

@@ -6,6 +6,7 @@ import { reauthenticateFolder, resolveFolderAccount } from "./auth/folderAuth.js
 import { parseSinceDuration, runBugReport } from "./commands/bugReport.js";
 import { runClone, type CloneSummary } from "./commands/clone.js";
 import { runDelete } from "./commands/delete.js";
+import { runObjectDelete, runObjectList, runObjectShow } from "./commands/object.js";
 import { runDiff } from "./commands/diff.js";
 import { runHistory } from "./commands/history.js";
 import { runPull, type PullSummary } from "./commands/pull.js";
@@ -164,13 +165,94 @@ async function restore(args: string[]): Promise<void> {
 }
 
 async function deleteNote(args: string[]): Promise<void> {
-  const [fileArg, dirArg] = args;
-  if (!fileArg) {
-    console.error("Usage: icloud-notes delete <file> [directory]");
+  const flags = args.filter((arg) => arg.startsWith("--"));
+  const positional = args.filter((arg) => !arg.startsWith("--"));
+  const unknownFlag = flags.find((flag) => flag !== "--hard");
+  const [fileArg, dirArg] = positional;
+  if (unknownFlag || !fileArg || positional.length > 2) {
+    console.error(
+      "Usage: icloud-notes delete <file> [directory] [--hard]\n" +
+        "  Without --hard, moves the note to Recently Deleted (recoverable in Notes for ~30 days); " +
+        "--hard permanently deletes it, including a note already soft-deleted by this tool.",
+    );
     process.exitCode = 1;
     return;
   }
-  await runDelete(dirArg ?? ".", fileArg, { onLoginStatus: (message) => console.log(message) });
+  await runDelete(dirArg ?? ".", fileArg, {
+    hard: flags.includes("--hard"),
+    onLoginStatus: (message) => console.log(message),
+  });
+}
+
+const OBJECT_USAGE =
+  "Usage: icloud-notes object <list|show|delete> ...\n" +
+  "  object list [directory] [--type <recordType>] [--broken] [--orphaned] [--trashed] [--untracked] [--json]\n" +
+  "      List every raw CloudKit record in the account's Notes zone (all types, including Attachment/Media\n" +
+  "      records the sync path never fetches), with lifecycle state, references, local tracking, and - for\n" +
+  "      notes - whether this tool can parse them (--broken shows only ones it can't).\n" +
+  "  object show <recordName> [directory]\n" +
+  "      Dump one record verbatim (all fields), plus the same derived summary list computes.\n" +
+  "  object delete <recordName> [directory] [--yes]\n" +
+  "      Permanently delete one record by ID - the repair tool for broken objects. Notes use Apple's own\n" +
+  "      two-stage purge (works on attachment-bearing and unparseable notes); other types use forceDelete.\n" +
+  "      Deleting a Folder requires --yes.";
+
+async function objectCommand(args: string[]): Promise<void> {
+  const [subcommand, ...subArgs] = args;
+  const flags = subArgs.filter((arg) => arg.startsWith("--"));
+  const positional = subArgs.filter((arg, i) => !arg.startsWith("--") && subArgs[i - 1] !== "--type");
+  const onLoginStatus = (message: string): void => console.log(message);
+
+  switch (subcommand) {
+    case "list": {
+      const typeIndex = subArgs.indexOf("--type");
+      const type = typeIndex !== -1 ? subArgs[typeIndex + 1] : undefined;
+      const knownFlags = ["--type", "--broken", "--orphaned", "--trashed", "--untracked", "--json"];
+      const unknownFlag = flags.find((flag) => !knownFlags.includes(flag));
+      if (unknownFlag || (typeIndex !== -1 && (type === undefined || type.startsWith("--"))) || positional.length > 1) {
+        console.error(OBJECT_USAGE);
+        process.exitCode = 1;
+        return;
+      }
+      await runObjectList(
+        positional[0] ?? ".",
+        {
+          type,
+          broken: flags.includes("--broken"),
+          orphaned: flags.includes("--orphaned"),
+          trashed: flags.includes("--trashed"),
+          untracked: flags.includes("--untracked"),
+          json: flags.includes("--json"),
+        },
+        { onLoginStatus },
+      );
+      return;
+    }
+    case "show": {
+      const [recordName, dirArg] = positional;
+      if (flags.length > 0 || !recordName || positional.length > 2) {
+        console.error(OBJECT_USAGE);
+        process.exitCode = 1;
+        return;
+      }
+      await runObjectShow(dirArg ?? ".", recordName, { onLoginStatus });
+      return;
+    }
+    case "delete": {
+      const [recordName, dirArg] = positional;
+      const unknownFlag = flags.find((flag) => flag !== "--yes");
+      if (unknownFlag || !recordName || positional.length > 2) {
+        console.error(OBJECT_USAGE);
+        process.exitCode = 1;
+        return;
+      }
+      await runObjectDelete(dirArg ?? ".", recordName, { yes: flags.includes("--yes"), onLoginStatus });
+      return;
+    }
+    default:
+      console.error(OBJECT_USAGE);
+      process.exitCode = 1;
+  }
 }
 
 async function history(args: string[]): Promise<void> {
@@ -306,6 +388,9 @@ async function main(): Promise<void> {
       case "delete":
         await deleteNote(rest);
         return;
+      case "object":
+        await objectCommand(rest);
+        return;
       case "history":
         await history(rest);
         return;
@@ -325,14 +410,19 @@ async function main(): Promise<void> {
             "  clone <directory>     Fetch all Notes into a fresh local directory; signs in via a browser window " +
             "the first time a directory (or a new account) is used\n" +
             "  pull [directory]      Fetch changes since the last clone/pull (defaults to the current directory)\n" +
-            "  push [directory]      Reconcile local disk state up to iCloud: uploads edited notes, deletes notes " +
-            "whose file was removed locally, and merges in remote changes to a note edited both places (--dry-run " +
-            'to preview). Run "status" first to see exactly what push will do, including anything it would refuse.\n' +
+            "  push [directory]      Reconcile local disk state up to iCloud: creates notes for new .md files, " +
+            "uploads edited notes, moves notes whose file was removed locally to Recently Deleted, and merges in " +
+            'remote changes to a note edited both places (--dry-run to preview). Run "status" first to see exactly ' +
+            "what push will do, including anything it would refuse.\n" +
             "  status [directory]    Preview exactly what the next push will do - creates, deletes, changes, and " +
             "any refusals - using the same live check push --dry-run performs (requires signing in)\n" +
             "  restore <file> [directory]  Discard a tracked note's local edits, reverting it to the last synced copy\n" +
-            "  delete <file> [directory]  Delete a tracked note from iCloud (a real remote write, no confirmation prompt) " +
-            "and stop tracking it locally; a locally-edited copy is kept on disk (untracked) rather than discarded\n" +
+            "  delete <file> [directory] [--hard]  Move a tracked note to Recently Deleted (a real remote write, no " +
+            "confirmation prompt) and stop tracking it locally; a locally-edited copy is kept on disk (untracked) " +
+            "rather than discarded. --hard permanently deletes instead - works on attachment-bearing and even " +
+            "unparseable notes, and on a note this tool already soft-deleted\n" +
+            "  object <list|show|delete>  Record-level plumbing: inspect and permanently delete raw CloudKit objects " +
+            'by ID - the repair kit for broken note objects. Run "icloud-notes object" for details\n' +
             "  history <file> [directory] [--records]  List a note's epoch timeline, newest first (--records for the " +
             "flat per-record snapshot listing instead)\n" +
             "  diff <file> <ref> [directory]  Diff two snapshots, or one snapshot against the current remote copy - " +

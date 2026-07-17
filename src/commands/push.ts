@@ -1,12 +1,13 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import chalk from "chalk";
 import { resolveFolderAccount } from "../auth/folderAuth.js";
 import type { IcloudSession } from "../session.js";
 import {
-  deleteNoteRecord,
+  createNoteRecord,
   lookupRecords,
+  updateNoteRecord,
   updateRecords,
   type CloudKitRecord,
   type RecordUpdate,
@@ -15,7 +16,7 @@ import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
 import { classifyNoteRecord, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
-import { buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
+import { buildNoteCreateFields, buildNoteTrashFields, buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
 import { findMarkdownTableBlocks } from "../notes/decodeTableRecord.js";
 import { isEnoent } from "../fsUtil.js";
 import { mergeNoteVersions } from "../notes/mergeConflict.js";
@@ -27,11 +28,12 @@ import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.
 import { renderPlan, stripFilePrefix, type PlanEntry } from "../notes/pushPlan.js";
 import { compressNoteDocument, decodeNoteBodyText, decompressNoteDocument } from "../notes/noteText.js";
 import { prepareTableAttachmentUpdate, reconstructBodyTextWithPlaceholders } from "../notes/tablePushEdit.js";
-import { historyRecordNames, noteHasTrackedAttachments } from "../notes/trackedFile.js";
+import { historyRecordNames } from "../notes/trackedFile.js";
 import { recordVersion } from "../notes/versionHistory.js";
-import { applyLocalNoteDeletion } from "./delete.js";
+import { applyLocalNoteDeletion, isInTrash, isPurged, rememberTrashedNote } from "./delete.js";
 import {
   applyTextEdit,
+  buildInitialNoteDocument,
   encodeNoteDocument,
   noteDocumentRoundTrips,
   parseNoteDocument,
@@ -92,9 +94,8 @@ export interface BuildPushPlanResult {
  * apart - see the "Push becomes the full reconciler" project notes.
  *
  * Login/network access is skipped entirely when there's nothing that needs
- * it (no tracked note is missing or modified) - an untracked file always
- * resolves to a "create" refusal without a live check, since note creation
- * isn't implemented yet (see the project notes' HAR-capture prerequisite).
+ * it (no tracked note is missing or modified, and no untracked file passed
+ * the local creation gates).
  */
 export async function buildPushPlan(
   targetDir: string,
@@ -107,13 +108,44 @@ export async function buildPushPlan(
 
   const entries: ExecutablePlanEntry[] = [];
 
+  // An untracked file passes the same local refusal gates a modified one
+  // does - a brand-new file containing conflict markers or unparseable
+  // content is just as unsendable as an edited one containing them.
+  const createCandidates: { file: string; localText: string }[] = [];
   for (const file of await listUntrackedTopLevelMarkdownFiles(targetDir, state)) {
-    entries.push({
-      kind: "create",
-      file,
-      resolution: "refused",
-      reason: "creating new notes isn't supported yet - this tool can only edit or delete existing notes for now",
-    });
+    const localText = await readFile(path.join(targetDir, file), "utf-8");
+    if (localText === "") {
+      entries.push({ kind: "create", file, resolution: "refused", reason: "the file is empty - nothing to create" });
+      continue;
+    }
+    if (hasConflictMarkers(localText)) {
+      entries.push({
+        kind: "create",
+        file,
+        resolution: "refused",
+        reason: "still contains diff3 conflict markers - resolve them before pushing",
+      });
+      continue;
+    }
+    if (hasUnknownContentMarker(localText)) {
+      entries.push({
+        kind: "create",
+        file,
+        resolution: "refused",
+        reason: "this file contains the unknown-content banner - remove it before pushing",
+      });
+      continue;
+    }
+    if (hasAttachmentReference(localText)) {
+      entries.push({
+        kind: "create",
+        file,
+        resolution: "refused",
+        reason: 'contains an "attachments/..." reference, but this tool can\'t upload new attachments - remove it first.',
+      });
+      continue;
+    }
+    createCandidates.push({ file, localText });
   }
 
   const updateCandidates: PushCandidate[] = [];
@@ -125,25 +157,6 @@ export async function buildPushPlan(
       continue;
     }
     if (fileState === "missing") {
-      // CloudKit refuses `forceDelete` on a Note that still has an Attachment
-      // record pointing at it (regular or table) - confirmed live 2026-07-16:
-      // both cases fail with VALIDATING_REFERENCE_ERROR, citing the
-      // attachment's own recordName as the blocking reference. Catching this
-      // locally, from state.json's own tracking, avoids surfacing that raw
-      // server error and avoids a doomed network round-trip; it also needs no
-      // live record fetch, so a delete-only plan for an attachment-bearing
-      // note stays free even when nothing else needs the network.
-      if (noteHasTrackedAttachments(state, recordName)) {
-        entries.push({
-          kind: "delete",
-          file: entry.file,
-          resolution: "refused",
-          reason:
-            "this note has an attachment - it can't be safely deleted through this tool yet. Remove the " +
-            "attachment in Notes first, or delete the note directly there.",
-        });
-        continue;
-      }
       deleteCandidates.push({ recordName, entry });
       continue;
     }
@@ -212,7 +225,7 @@ export async function buildPushPlan(
     updateCandidates.push({ recordName, entry, localText });
   }
 
-  if (updateCandidates.length === 0 && deleteCandidates.length === 0) {
+  if (updateCandidates.length === 0 && deleteCandidates.length === 0 && createCandidates.length === 0) {
     return { state, entries };
   }
 
@@ -234,14 +247,32 @@ export async function buildPushPlan(
 
   for (const { recordName, entry } of deleteCandidates) {
     const record = recordsByName.get(recordName);
-    if (!record || record.deleted === true) {
+    if (!record || record.deleted === true || isPurged(record)) {
       entries.push({
         kind: "delete",
         file: entry.file,
         resolution: "ready",
         execute: async () => {
           await applyLocalNoteDeletion(targetDir, recordName, entry, state);
+          delete state.trashed?.[recordName];
           console.log(`${entry.file}: already deleted remotely - removed from tracking`);
+          return true;
+        },
+      });
+      continue;
+    }
+    if (isInTrash(record)) {
+      // Another client (or a previous run) already moved it to Recently
+      // Deleted - nothing to send, just stop tracking it. Registered in the
+      // trash registry so `delete --hard` can still reach it.
+      entries.push({
+        kind: "delete",
+        file: entry.file,
+        resolution: "ready",
+        execute: async () => {
+          await applyLocalNoteDeletion(targetDir, recordName, entry, state);
+          rememberTrashedNote(state, recordName, entry.file);
+          console.log(`${entry.file}: already in Recently Deleted - removed from tracking`);
           return true;
         },
       });
@@ -261,21 +292,24 @@ export async function buildPushPlan(
       file: entry.file,
       resolution: "ready",
       execute: async () => {
-        const result = await deleteNoteRecord(
-          session,
-          ckdatabasewsUrl,
-          dsid,
-          PRIVATE_NOTES_ZONE,
+        // Apple's own deletion is a folder move to Trash, not a forceDelete
+        // - see the 2026-07-16 lifecycle HAR analysis. Works regardless of
+        // attachments, and stays recoverable in Recently Deleted (~30 days);
+        // `delete --hard <file>` permanently deletes from there.
+        const result = await updateNoteRecord(session, ckdatabasewsUrl, dsid, PRIVATE_NOTES_ZONE, {
           recordName,
-          record.recordChangeTag ?? "",
-        );
+          recordChangeTag: record.recordChangeTag ?? "",
+          fields: buildNoteTrashFields(record, Date.now()),
+          parentRecordName: record.parentRecordName,
+        });
         if (!result.ok) {
           const detail = result.reason ? ` (${result.reason})` : "";
           console.log(chalk.red(`${entry.file}: server rejected the delete: ${result.serverErrorCode}${detail}`));
           return false;
         }
         await applyLocalNoteDeletion(targetDir, recordName, entry, state);
-        console.log(`Deleted ${entry.file} from iCloud`);
+        rememberTrashedNote(state, recordName, entry.file);
+        console.log(`Moved ${entry.file} to Recently Deleted`);
         return true;
       },
     });
@@ -286,6 +320,80 @@ export async function buildPushPlan(
   const replicaIdBytes = new Uint8Array(Buffer.from(replicaId, "base64"));
   if (replicaIdBytes.length !== 16) {
     throw new CorruptStateFileError("state.json has a malformed replicaId (expected 16 bytes, base64-encoded)");
+  }
+
+  for (const { file, localText } of createCandidates) {
+    // The document is built and decode-verified during planning (not at
+    // execute time) so `status` shows a build failure as a refusal, with
+    // the same fidelity the update path's plan-time gates have.
+    let payloadBase64: string;
+    try {
+      const compressed = compressNoteDocument(encodeNoteDocument(buildInitialNoteDocument(localText, replicaIdBytes)));
+      if (decodeNoteBodyText(compressed) !== localText) {
+        entries.push({
+          kind: "create",
+          file,
+          resolution: "refused",
+          reason: "built document failed decode verification - refusing to create",
+        });
+        continue;
+      }
+      payloadBase64 = compressed.toString("base64");
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      entries.push({ kind: "create", file, resolution: "refused", reason: message });
+      continue;
+    }
+
+    const fileStat = await stat(path.join(targetDir, file));
+    const modificationDateMs = Math.round(fileStat.mtimeMs);
+    entries.push({
+      kind: "create",
+      file,
+      resolution: "ready",
+      execute: async () => {
+        // Client-generated lowercase-UUID recordName, matching the captured
+        // create (the live vault also has uppercase ones, so casing likely
+        // doesn't matter - but lowercase is what the capture shows).
+        const recordName = randomUUID();
+        const result = await createNoteRecord(
+          session,
+          ckdatabasewsUrl,
+          dsid,
+          PRIVATE_NOTES_ZONE,
+          recordName,
+          buildNoteCreateFields(payloadBase64, localText, modificationDateMs),
+        );
+        if (!result.ok) {
+          const detail = result.reason ? ` (${result.reason})` : "";
+          console.log(chalk.red(`${file}: server rejected the create: ${result.serverErrorCode}${detail}`));
+          return false;
+        }
+        // Mirror what pull's "added" branch establishes for a newly-seen
+        // remote note: tracking entry, base copy, file times, and the
+        // version/epoch capture of what just landed.
+        state.notes[recordName] = {
+          file,
+          recordChangeTag: result.record.recordChangeTag ?? "",
+          modificationDate: modificationDateOf(result.record) || modificationDateMs,
+        };
+        await writeBaseCopy(targetDir, recordName, localText);
+        await applyNoteFileTimes(path.join(targetDir, file), result.record);
+        const textValue = result.record.fields.TextDataEncrypted?.value;
+        if (typeof textValue === "string") {
+          await recordVersion(targetDir, {
+            recordName,
+            recordType: "Note",
+            field: "TextDataEncrypted",
+            recordChangeTag: result.record.recordChangeTag ?? "",
+            valueBase64: textValue,
+          });
+        }
+        await recordEpoch(targetDir, recordName, historyRecordNames(state, recordName));
+        console.log(`Created ${file}`);
+        return true;
+      },
+    });
   }
 
   for (const candidate of updateCandidates) {
@@ -472,12 +580,14 @@ export async function buildPushPlan(
  *  3. Verification: the rebuilt document is decoded again and must yield
  *     exactly the intended content before it's uploaded.
  *
- * As of the "full reconciler" work, `push` also deletes the remote note for
- * any tracked file that's gone missing locally - the everyday deletion
- * workflow is now "remove the file, run push", with `delete <file>` staying
- * around as a fast, explicit single-file escape hatch. Run `status` first
- * to preview exactly what a push will do (including anything it would
- * refuse) before running it for real.
+ * As of the "full reconciler" work, `push` also creates a note for any
+ * untracked top-level `.md` file, and deletes the remote note for any
+ * tracked file that's gone missing locally (moving it to Recently Deleted,
+ * exactly like Apple's own delete) - the everyday workflow is now "edit,
+ * add, or remove files, run push", with `delete <file>` staying around as a
+ * fast, explicit single-file escape hatch (and `delete --hard` for
+ * permanent deletion). Run `status` first to preview exactly what a push
+ * will do (including anything it would refuse) before running it for real.
  */
 export async function runPush(targetDir: string, options: PushOptions = {}): Promise<void> {
   const dryRun = options.dryRun === true;

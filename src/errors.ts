@@ -45,9 +45,9 @@ export class SilentReauthFailedError extends IcloudNotesSyncError {
 }
 
 export class UntrackedFileError extends IcloudNotesSyncError {
-  constructor(fileName: string, targetDir: string) {
+  constructor(fileName: string, targetDir: string, options: { hint?: string } = {}) {
     super(`"${fileName}" isn't a tracked note in ${targetDir}.`, {
-      hint: "Check the file name (it's case-sensitive) and try again.",
+      hint: options.hint ?? "Check the file name (it's case-sensitive) and try again.",
     });
   }
 }
@@ -190,20 +190,26 @@ export class NoteDeleteRejectedError extends IcloudNotesSyncError {
   }
 }
 
-/**
- * CloudKit refuses `forceDelete` on a Note record that still has an
- * Attachment record referencing it (regular or table) - confirmed live
- * 2026-07-16, `records/modify` rejects with `VALIDATING_REFERENCE_ERROR`
- * citing the attachment's own recordName. Caught locally (from state.json's
- * own attachment tracking) so the user sees this instead of that raw
- * server error.
- */
-export class NoteHasAttachmentsError extends IcloudNotesSyncError {
-  constructor(fileName: string) {
-    super(
-      `Can't delete "${fileName}": it still has an attachment, and CloudKit refuses to delete a note that does.`,
-      { hint: "Remove the attachment in Notes first, or delete the note directly there." },
-    );
+/** `object show`/`object delete` looked up a recordName that doesn't
+ * resolve to anything in the zone. */
+export class UnknownObjectError extends IcloudNotesSyncError {
+  constructor(recordName: string, options: { maybeDeleted?: boolean } = {}) {
+    super(`No object named "${recordName}" exists in the Notes zone.`, {
+      hint: options.maybeDeleted
+        ? 'It may already be permanently deleted. Run "icloud-notes object list" to see what exists.'
+        : 'Run "icloud-notes object list" to see what exists (recordNames are case-sensitive).',
+    });
+  }
+}
+
+/** Deleting a structural record (a Folder) detaches everything under it -
+ * unlike a Note or Attachment, where naming the ID is intent enough, this
+ * needs an explicit --yes. */
+export class ObjectDeleteNeedsConfirmationError extends IcloudNotesSyncError {
+  constructor(recordType: string, recordName: string) {
+    super(`Deleting a ${recordType} record affects everything under it, not just the record itself.`, {
+      hint: `Re-run with --yes if you really mean it: "icloud-notes object delete ${recordName} --yes".`,
+    });
   }
 }
 

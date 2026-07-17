@@ -21,6 +21,7 @@ import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.
 import { combineUnpublishableReasons } from "../notes/unknownContent.js";
 import { recordVersion } from "../notes/versionHistory.js";
 import type { SyncProgress } from "../progress.js";
+import { isPurged } from "./delete.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 
@@ -81,6 +82,7 @@ export async function runPull(
   const notes: CloneState["notes"] = { ...state.notes };
   const attachments: NonNullable<CloneState["attachments"]> = { ...state.attachments };
   const tableAttachments: NonNullable<CloneState["tableAttachments"]> = { ...state.tableAttachments };
+  const trashed: NonNullable<CloneState["trashed"]> = { ...state.trashed };
   const usedFileNames = new Set(Object.values(state.notes).map((entry) => entry.file));
   const usedAttachmentFileNames = new Set(Object.values(attachments).map((entry) => path.basename(entry.file)));
   const attachmentAuth: AttachmentAuth = { session: auth.session, ckdatabasewsUrl: auth.ckdatabasewsUrl, dsid: auth.dsid };
@@ -121,6 +123,14 @@ export async function runPull(
         const decoded = classifyNoteRecord(record);
 
         if (decoded.status === "deleted") {
+          // A note this tool soft-deleted stays in the trash registry until
+          // the server actually removes it (a real tombstone or Apple's
+          // stage-2 `Deleted: 1` mark) - merely sitting in Recently Deleted
+          // is exactly the state the registry exists to track, so that
+          // doesn't prune. See `CloneState.trashed`.
+          if (trashed[record.recordName] && (record.deleted === true || isPurged(record))) {
+            delete trashed[record.recordName];
+          }
           if (!existing) {
             continue;
           }
@@ -292,9 +302,14 @@ export async function runPull(
     account: state.account,
     syncToken,
     sharedZoneSyncTokens,
+    // Carried through untouched - omitting this here used to silently wipe
+    // the vault's replica identity on every pull, forcing the next push to
+    // mint a fresh replica.
+    replicaId: state.replicaId,
     notes,
     attachments,
     tableAttachments,
+    trashed,
   });
 
   return summary;

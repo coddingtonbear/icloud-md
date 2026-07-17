@@ -78,6 +78,126 @@ const NULL_FIELDS = ["FirstAttachmentThumbnail", "FirstAttachmentUTIEncrypted", 
  * re-encoded and zlib-compressed, passed base64), freshly derived display
  * metadata, and everything else echoed verbatim from the looked-up record.
  */
+/**
+ * The Folder reference every deletion stage points at. Apple's own client
+ * never `forceDelete`s a note the user deletes - both stages of its deletion
+ * flow are ordinary updates (see the 2026-07-16 lifecycle + purge HAR
+ * captures in har_captures/): stage 1 reparents the note here, stage 2 sets
+ * `Deleted: 1` with the note still parented here.
+ */
+export const TRASH_FOLDER_RECORD_NAME = "TrashFolder-CloudKit";
+
+function trashFolderReference(): unknown {
+  // Bare zoneName, no ownerRecordName - matching what the captured client
+  // sends on writes (the fuller zone identity only appears on the read side).
+  return { recordName: TRASH_FOLDER_RECORD_NAME, action: "VALIDATE", zoneID: { zoneName: "Notes" } };
+}
+
+/**
+ * Fields the captured deletion updates send as literal empty objects `{}`
+ * (not `null` - unlike edit updates, see NULL_FIELDS), even on a note that
+ * has a table attachment. `{value: undefined}` serializes to exactly `{}`.
+ */
+const DELETION_EMPTY_FIELDS = ["FirstAttachmentThumbnail", "FirstAttachmentUTIEncrypted", "TextDataAsset"] as const;
+
+/**
+ * Stage 1 of Apple's two-stage deletion: the field set that moves a note to
+ * Recently Deleted, byte-matching the captured web-client request (see
+ * har_captures/2026-07-16_note-lifecycle-create-table-delete.har, entry 56).
+ * Works regardless of attachments - nothing is deleted, so no reference
+ * validation can fail.
+ */
+export function buildNoteTrashFields(current: CloudKitRecord, nowMs: number): Record<string, UpdateFieldValue> {
+  return buildNoteDeletionFields(current, nowMs, { markDeleted: false });
+}
+
+/**
+ * Stage 2: the field set that permanently deletes an already-trashed note
+ * (`Deleted: 1`; the server garbage-collects the record, its attachments,
+ * and backing media asynchronously) - byte-matching the captured request
+ * (har_captures/2026-07-16_purge-from-recently-deleted.har). Also moves the
+ * note to Trash in the same update, so callers may run it directly against
+ * a live note; the capture shows both fields together.
+ */
+export function buildNotePurgeFields(current: CloudKitRecord, nowMs: number): Record<string, UpdateFieldValue> {
+  return buildNoteDeletionFields(current, nowMs, { markDeleted: true });
+}
+
+function buildNoteDeletionFields(
+  current: CloudKitRecord,
+  nowMs: number,
+  options: { markDeleted: boolean },
+): Record<string, UpdateFieldValue> {
+  // Field order and echo-vs-override choices match the captured requests.
+  // Echoed fields are copied value-verbatim, never decoded - a deletion must
+  // work on a note too broken to parse; echo-if-present tolerates a broken
+  // record that's missing them entirely.
+  const fields: Record<string, UpdateFieldValue> = {};
+  const echo = (name: string): void => {
+    const field = current.fields[name];
+    if (field !== undefined) {
+      fields[name] = { value: field.value };
+    }
+  };
+
+  echo("CreationDate");
+  fields.ModificationDate = { value: nowMs };
+  echo("TitleEncrypted");
+  fields.Folders = { value: [trashFolderReference()] };
+  fields.FoldersModificationDate = { value: nowMs };
+  fields.Folder = { value: trashFolderReference() };
+  echo("SnippetEncrypted");
+  if (options.markDeleted) {
+    fields.Deleted = { value: 1 };
+  }
+  for (const name of DELETION_EMPTY_FIELDS) {
+    fields[name] = { value: undefined };
+  }
+  echo("TextDataEncrypted");
+  return fields;
+}
+
+/**
+ * The field set for a brand-new note's `create` operation, byte-matching
+ * the captured first-ever save (see
+ * har_captures/2026-07-16_note-lifecycle-create-table-delete.har, entry 2,
+ * analyzed in the 2026-07-16T10:50 dev notes): real date values (nothing to
+ * echo on a create), both folder references at the default folder, derived
+ * display metadata, the placeholder trio as literal `{}`, and notably NO
+ * ReplicaIDToNotesVersionDataEncrypted - the capture simply omits it.
+ */
+export function buildNoteCreateFields(
+  newTextDataBase64: string,
+  newText: string,
+  nowMs: number,
+): Record<string, UpdateFieldValue> {
+  const defaultFolder = {
+    recordName: "DefaultFolder-CloudKit",
+    action: "VALIDATE",
+    zoneID: { zoneName: "Notes" },
+  };
+  const fields: Record<string, UpdateFieldValue> = {
+    CreationDate: { value: nowMs },
+    Folders: { value: [defaultFolder] },
+    Folder: { value: defaultFolder },
+    ModificationDate: { value: nowMs },
+    TitleEncrypted: { value: Buffer.from(deriveNoteTitle(newText), "utf-8").toString("base64") },
+    SnippetEncrypted: { value: Buffer.from(deriveNoteSnippet(newText), "utf-8").toString("base64") },
+  };
+  for (const name of DELETION_EMPTY_FIELDS) {
+    // Same literal-`{}` trio the deletion updates send - the captured
+    // create sends them empty too.
+    fields[name] = { value: undefined };
+  }
+  fields.TextDataEncrypted = { value: newTextDataBase64 };
+  return fields;
+}
+
+/**
+ * Assembles the full update field set: the new text data (already
+ * re-encoded and zlib-compressed, passed base64), freshly derived display
+ * metadata, and everything else echoed verbatim from the looked-up record.
+ */
 export function buildNoteUpdateFields(
   current: CloudKitRecord,
   newTextDataBase64: string,

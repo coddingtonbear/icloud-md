@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { writeBaseCopy } from "../notes/baseCopy.js";
 import { writeCloneState, type CloneState } from "../notes/cloneState.js";
-import { NoteHasAttachmentsError, UntrackedFileError } from "../errors.js";
+import { UnboundAccountError, UntrackedFileError } from "../errors.js";
 import { applyLocalNoteDeletion, runDelete } from "./delete.js";
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
@@ -43,23 +43,41 @@ test("runDelete refuses a file that isn't a tracked note, without touching the n
     await assert.rejects(() => runDelete(dir, "Nonexistent.md"), UntrackedFileError);
   }));
 
-// state() has no `account` - if either of these reached resolveFolderAccount
-// it would throw UnboundAccountError instead, proving CloudKit's
-// VALIDATING_REFERENCE_ERROR (confirmed live 2026-07-16: forceDelete refuses
-// a Note that still has an Attachment record pointing at it) is caught
-// locally, before any network round-trip.
-test("runDelete refuses locally when the note has a tracked (regular) attachment", () =>
+// state() has no `account`, so reaching resolveFolderAccount throws
+// UnboundAccountError - here that's the *desired* signal: an
+// attachment-bearing note is no longer refused locally (deletion is now a
+// trash-move update, which works regardless of attachments - see the
+// 2026-07-16 lifecycle HAR analysis), so the delete proceeds toward the
+// network.
+test("runDelete no longer refuses a note with attachments locally - it proceeds to the network", () =>
   withTempDir(async (dir) => {
     await writeCloneState(dir, state());
-    await assert.rejects(() => runDelete(dir, "Test Note.md"), NoteHasAttachmentsError);
+    await assert.rejects(() => runDelete(dir, "Test Note.md"), UnboundAccountError);
   }));
 
-test("runDelete refuses locally when the note has a tracked table attachment", () =>
+// The trash registry: a note this tool already soft-deleted has no file and
+// no notes entry left, but stays resolvable...
+test("runDelete --hard resolves a note through the trash registry and proceeds to the network", () =>
   withTempDir(async (dir) => {
     const s = state();
-    s.attachments = {};
+    s.notes = {};
+    s.trashed = { REC1: { file: "Test Note.md", trashedAt: 123 } };
     await writeCloneState(dir, s);
-    await assert.rejects(() => runDelete(dir, "Test Note.md"), NoteHasAttachmentsError);
+    await assert.rejects(() => runDelete(dir, "Test Note.md", { hard: true }), UnboundAccountError);
+  }));
+
+// ...but only for --hard: a plain delete of an already-trashed note is a
+// no-op the user should be told about, not a resolvable target.
+test("runDelete without --hard refuses a note that's only in the trash registry, with a --hard hint", () =>
+  withTempDir(async (dir) => {
+    const s = state();
+    s.notes = {};
+    s.trashed = { REC1: { file: "Test Note.md", trashedAt: 123 } };
+    await writeCloneState(dir, s);
+    await assert.rejects(
+      () => runDelete(dir, "Test Note.md"),
+      (error: unknown) => error instanceof UntrackedFileError && /delete --hard/.test(error.hint ?? ""),
+    );
   }));
 
 test("applyLocalNoteDeletion removes a clean local file and drops all tracking for the note", () =>

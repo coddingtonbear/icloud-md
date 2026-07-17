@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { create, toBinary } from "@bufbuild/protobuf";
 import {
   applyTextEdit,
+  buildInitialNoteDocument,
   computeSplice,
   encodeNoteDocument,
+  isSentinel,
   noteDocumentRoundTrips,
   parseNoteDocument,
   validateDocumentInvariants,
@@ -313,4 +315,45 @@ test("computeSplice finds minimal edits", () => {
   assert.deepEqual(computeSplice("abc", "aXc"), { start: 1, deleteLength: 1, insertText: "X" });
   assert.deepEqual(computeSplice("abc", "abc def"), { start: 3, deleteLength: 0, insertText: " def" });
   assert.deepEqual(computeSplice("", "new"), { start: 0, deleteLength: 0, insertText: "new" });
+});
+
+test("buildInitialNoteDocument builds a first-save document whose encoding decodes back to the text", () => {
+  const replicaId = new Uint8Array(16).fill(7);
+  const doc = buildInitialNoteDocument("Grocery list\nEggs\nMilk\n", replicaId);
+
+  validateDocumentInvariants(doc);
+  assert.equal(doc.text, "Grocery list\nEggs\nMilk\n");
+  // One replica: ours, counters [clocks consumed, one edit event] - the
+  // same shape the captured first save has (see REAL_FIRST_SAVE_NOTE).
+  assert.equal(doc.replicas.length, 1);
+  assert.deepEqual(doc.replicas[0]?.counters, [doc.text.length, 1]);
+  // Structure: the zero-length replica-0 lead run, our content run, the end
+  // sentinel - and nothing else.
+  assert.equal(doc.runs.length, 3);
+  assert.equal(doc.runs[1]?.coord.replica, 1);
+  assert.equal(doc.runs[1]?.length, doc.text.length);
+  assert.equal(isSentinel(doc.runs[2]!), true);
+
+  const reparsed = parseNoteDocument(encodeNoteDocument(doc));
+  assert.equal(reparsed.text, "Grocery list\nEggs\nMilk\n");
+});
+
+test("buildInitialNoteDocument output survives the same round-trip gate push applies to real documents", () => {
+  const doc = buildInitialNoteDocument("One line\n", new Uint8Array(16).fill(3));
+  assert.equal(noteDocumentRoundTrips(encodeNoteDocument(doc)), true);
+});
+
+test("buildInitialNoteDocument refuses empty text", () => {
+  assert.throws(() => buildInitialNoteDocument("", new Uint8Array(16)), /refusing to create an empty document/);
+});
+
+test("a document built by buildInitialNoteDocument accepts a follow-up applyTextEdit like any pulled document", () => {
+  const replicaId = new Uint8Array(16).fill(9);
+  const doc = buildInitialNoteDocument("Title\nBody\n", replicaId);
+
+  const changed = applyTextEdit(doc, "Title\nBody with more\n", { replicaId });
+
+  assert.equal(changed, true);
+  validateDocumentInvariants(doc);
+  assert.equal(parseNoteDocument(encodeNoteDocument(doc)).text, "Title\nBody with more\n");
 });

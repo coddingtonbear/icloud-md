@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { decodeNoteBodyText, decompressNoteDocument } from "./noteText.js";
 import { noteDocumentRoundTrips, parseNoteDocument } from "./noteDocument.js";
-import { REAL_FORMATTED_MULTI_EDIT_NOTE, REAL_PLAIN_NOTE, REAL_UNICODE_NOTE } from "./realFixtures.js";
+import { REAL_FIRST_SAVE_NOTE, REAL_FORMATTED_MULTI_EDIT_NOTE, REAL_PLAIN_NOTE, REAL_UNICODE_NOTE } from "./realFixtures.js";
 
 test("REAL_PLAIN_NOTE decodes and round-trips", () => {
   const buf = Buffer.from(REAL_PLAIN_NOTE, "base64");
@@ -39,4 +39,16 @@ test("REAL_FORMATTED_MULTI_EDIT_NOTE decodes and round-trips, including the repe
   assert.equal(multiSequenceRuns.length, 1);
   assert.deepEqual(multiSequenceRuns[0]?.sequence, [14, 16]);
   assert.equal(noteDocumentRoundTrips(raw), true);
+});
+
+test("REAL_FIRST_SAVE_NOTE (a brand-new note's first save) decodes and round-trips with no code changes", () => {
+  const raw = decompressNoteDocument(Buffer.from(REAL_FIRST_SAVE_NOTE, "base64"));
+  const doc = parseNoteDocument(new Uint8Array(raw));
+
+  assert.equal(doc.text, "Test Note (2026\n");
+  // One replica, counters [total clocks consumed, one edit event] - the
+  // shape buildInitialNoteDocument reproduces for synthetic creates.
+  assert.equal(doc.replicas.length, 1);
+  assert.deepEqual(doc.replicas[0]?.counters, [17, 1]);
+  assert.equal(noteDocumentRoundTrips(new Uint8Array(raw)), true);
 });

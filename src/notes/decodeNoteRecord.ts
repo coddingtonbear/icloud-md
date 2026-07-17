@@ -1,4 +1,5 @@
 import type { CloudKitFieldValue, CloudKitRecord } from "../cloudkit/databaseClient.js";
+import { TRASH_FOLDER_RECORD_NAME } from "./encodeNoteRecord.js";
 import { decodeNoteAttachmentRefs, OBJECT_REPLACEMENT_CHARACTER, type AttachmentReference } from "./noteAttachments.js";
 import { decodeNoteBodyText } from "./noteText.js";
 import { UNKNOWN_CONTENT_BANNER } from "./unknownContent.js";
@@ -17,8 +18,6 @@ export type NoteDecodeResult =
       publishable: boolean;
       unpublishableReason?: string | undefined;
     };
-
-const TRASH_FOLDER_RECORD_NAME = "TrashFolder-CloudKit";
 
 /** Shared skip/decode rules used by `clone`, `pull`, and `push` so they can't drift apart. */
 export function classifyNoteRecord(record: CloudKitRecord): NoteDecodeResult {

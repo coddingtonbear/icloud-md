@@ -45,24 +45,51 @@ test("buildPushPlan refuses when there's no cloned state at all", () =>
     await assert.rejects(() => buildPushPlan(dir), NotClonedDirectoryError);
   }));
 
-test("buildPushPlan detects an untracked top-level .md file as a refused \"create\" entry, without touching the network", () =>
+test("buildPushPlan treats an untracked top-level .md file as a real create candidate - it proceeds to the network", () =>
   withTempDir(async (dir) => {
-    // No `account` on state - if this reached resolveFolderAccount it would
-    // throw UnboundAccountError, proving the network was never touched for
-    // a create-only plan.
+    // No `account` on state - the UnboundAccountError proves the file passed
+    // every local gate and the plan went on to need a session for the create.
     await writeCloneState(dir, { syncToken: "token", notes: {} });
     await writeFile(path.join(dir, "New Note.md"), "Hello", "utf-8");
+
+    await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
+  }));
+
+test("buildPushPlan refuses an empty untracked file locally, without touching the network", () =>
+  withTempDir(async (dir) => {
+    await writeCloneState(dir, { syncToken: "token", notes: {} });
+    await writeFile(path.join(dir, "Empty.md"), "", "utf-8");
 
     const { entries } = await buildPushPlan(dir);
 
     assert.deepEqual(entries, [
-      {
-        kind: "create",
-        file: "New Note.md",
-        resolution: "refused",
-        reason: "creating new notes isn't supported yet - this tool can only edit or delete existing notes for now",
-      },
+      { kind: "create", file: "Empty.md", resolution: "refused", reason: "the file is empty - nothing to create" },
     ]);
+  }));
+
+test("buildPushPlan refuses an untracked file with conflict markers locally - same gate as a modified file", () =>
+  withTempDir(async (dir) => {
+    await writeCloneState(dir, { syncToken: "token", notes: {} });
+    await writeFile(path.join(dir, "Conflicted.md"), "a\n<<<<<<< local\nb\n=======\nc\n>>>>>>> remote\n", "utf-8");
+
+    const { entries } = await buildPushPlan(dir);
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.kind, "create");
+    assert.equal(entries[0]?.resolution, "refused");
+    assert.match(entries[0]?.reason ?? "", /conflict markers/);
+  }));
+
+test("buildPushPlan refuses an untracked file referencing attachments locally", () =>
+  withTempDir(async (dir) => {
+    await writeCloneState(dir, { syncToken: "token", notes: {} });
+    await writeFile(path.join(dir, "HasAttachment.md"), "Look:\n\n![pic](attachments/pic.jpg)\n", "utf-8");
+
+    const { entries } = await buildPushPlan(dir);
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.resolution, "refused");
+    assert.match(entries[0]?.reason ?? "", /attachments/);
   }));
 
 test("buildPushPlan ignores a file already tracked in state.notes", () =>
@@ -98,12 +125,12 @@ test("buildPushPlan requires a live check for a missing tracked file (a delete c
     await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
   }));
 
-// CloudKit's forceDelete refuses a Note that still has an Attachment record
-// pointing at it (regular or table) - confirmed live 2026-07-16
-// (VALIDATING_REFERENCE_ERROR). state() has no `account`, so if this reached
-// resolveFolderAccount it would throw UnboundAccountError instead of
-// resolving to a plan entry - proving the refusal is caught locally.
-test("buildPushPlan refuses a missing tracked file locally, without touching the network, when the note has a tracked attachment", () =>
+// Deletion is a trash-move update as of the 2026-07-16 HAR analysis, which
+// works regardless of attachments - so an attachment-bearing delete
+// candidate is no longer refused locally. state() has no `account`, so the
+// UnboundAccountError proves the plan proceeds toward the network instead
+// of resolving to a local refusal.
+test("buildPushPlan no longer refuses deleting a note with a tracked attachment - it proceeds to the network", () =>
   withTempDir(async (dir) => {
     const s = state();
     s.attachments = {
@@ -112,32 +139,17 @@ test("buildPushPlan refuses a missing tracked file locally, without touching the
     await writeBaseCopy(dir, "REC1", "Synced text");
     await writeCloneState(dir, s);
 
-    const { entries } = await buildPushPlan(dir);
-
-    assert.deepEqual(entries, [
-      {
-        kind: "delete",
-        file: "Tracked.md",
-        resolution: "refused",
-        reason:
-          "this note has an attachment - it can't be safely deleted through this tool yet. Remove the " +
-          "attachment in Notes first, or delete the note directly there.",
-      },
-    ]);
+    await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
   }));
 
-test("buildPushPlan refuses a missing tracked file locally when the note has a tracked table attachment", () =>
+test("buildPushPlan no longer refuses deleting a note with a tracked table attachment - it proceeds to the network", () =>
   withTempDir(async (dir) => {
     const s = state();
     s.tableAttachments = { "ATT-TABLE-1": { noteRecordName: "REC1" } };
     await writeBaseCopy(dir, "REC1", "Synced text");
     await writeCloneState(dir, s);
 
-    const { entries } = await buildPushPlan(dir);
-
-    assert.equal(entries.length, 1);
-    assert.equal(entries[0]?.kind, "delete");
-    assert.equal(entries[0]?.resolution, "refused");
+    await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
   }));
 
 test("runPush prints \"Nothing to push.\" and doesn't rewrite state.json when the plan is empty", () =>

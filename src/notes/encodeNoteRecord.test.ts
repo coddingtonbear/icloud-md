@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildNoteUpdateFields, deriveNoteSnippet, deriveNoteTitle } from "./encodeNoteRecord.js";
+import { buildNoteCreateFields, buildNotePurgeFields, buildNoteTrashFields, buildNoteUpdateFields, deriveNoteSnippet, deriveNoteTitle } from "./encodeNoteRecord.js";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 
 test("title is the first line for short notes", () => {
@@ -75,4 +75,82 @@ test("buildNoteUpdateFields overrides content fields and echoes the rest", () =>
   assert.equal("PaperStyleType" in fields, false);
   // No read-side type wrappers on the write path.
   assert.equal(Object.values(fields).every((field) => !("type" in field)), true);
+});
+
+test("buildNoteTrashFields repoints the folder references at Trash and echoes content verbatim", () => {
+  const record = makeRecord({
+    TitleEncrypted: { value: "dGl0bGU=", type: "ENCRYPTED_BYTES" },
+    SnippetEncrypted: { value: "c25pcHBldA==", type: "ENCRYPTED_BYTES" },
+    CreationDate: { value: 100, type: "TIMESTAMP" },
+    ModificationDate: { value: 111, type: "TIMESTAMP" },
+    Folder: { value: { recordName: "DefaultFolder-CloudKit" }, type: "REFERENCE" },
+    Folders: { value: [{ recordName: "DefaultFolder-CloudKit" }], type: "REFERENCE_LIST" },
+    TextDataEncrypted: { value: "RE9D", type: "ENCRYPTED_BYTES" },
+  });
+
+  const fields = buildNoteTrashFields(record, 999);
+
+  const trashRef = { recordName: "TrashFolder-CloudKit", action: "VALIDATE", zoneID: { zoneName: "Notes" } };
+  assert.deepEqual(fields.Folder?.value, trashRef);
+  assert.deepEqual(fields.Folders?.value, [trashRef]);
+  assert.equal(fields.ModificationDate?.value, 999);
+  assert.equal(fields.FoldersModificationDate?.value, 999);
+  // Content fields echoed verbatim, never decoded or re-derived - the
+  // deletion path must work on a note too broken to parse.
+  assert.equal(fields.TitleEncrypted?.value, "dGl0bGU=");
+  assert.equal(fields.SnippetEncrypted?.value, "c25pcHBldA==");
+  assert.equal(fields.TextDataEncrypted?.value, "RE9D");
+  assert.equal(fields.CreationDate?.value, 100);
+  // Stage 1 never marks Deleted - that's the purge's job.
+  assert.equal("Deleted" in fields, false);
+  // The captured requests send these as literal `{}` (not null) - which is
+  // exactly what `{value: undefined}` serializes to.
+  assert.equal(JSON.stringify(fields.FirstAttachmentThumbnail), "{}");
+  assert.equal(JSON.stringify(fields.FirstAttachmentUTIEncrypted), "{}");
+  assert.equal(JSON.stringify(fields.TextDataAsset), "{}");
+});
+
+test("buildNotePurgeFields additionally sets Deleted: 1, matching the captured permanent delete", () => {
+  const record = makeRecord({
+    CreationDate: { value: 100, type: "TIMESTAMP" },
+    TextDataEncrypted: { value: "RE9D", type: "ENCRYPTED_BYTES" },
+  });
+
+  const fields = buildNotePurgeFields(record, 999);
+
+  assert.deepEqual(fields.Deleted, { value: 1 });
+  assert.equal(fields.Folder !== undefined, true);
+  assert.equal(fields.TextDataEncrypted?.value, "RE9D");
+});
+
+test("deletion field builders tolerate a broken record missing echoable fields entirely", () => {
+  const fields = buildNotePurgeFields(makeRecord({}), 999);
+
+  assert.equal("TitleEncrypted" in fields, false);
+  assert.equal("SnippetEncrypted" in fields, false);
+  assert.equal("TextDataEncrypted" in fields, false);
+  assert.equal("CreationDate" in fields, false);
+  assert.deepEqual(fields.Deleted, { value: 1 });
+  assert.equal(fields.ModificationDate?.value, 999);
+});
+
+test("buildNoteCreateFields matches the captured first-save request shape", () => {
+  const fields = buildNoteCreateFields("RE9D", "Title line\nBody line", 555);
+
+  assert.equal(fields.CreationDate?.value, 555);
+  assert.equal(fields.ModificationDate?.value, 555);
+  const defaultRef = { recordName: "DefaultFolder-CloudKit", action: "VALIDATE", zoneID: { zoneName: "Notes" } };
+  assert.deepEqual(fields.Folder?.value, defaultRef);
+  assert.deepEqual(fields.Folders?.value, [defaultRef]);
+  assert.equal(Buffer.from(String(fields.TitleEncrypted?.value), "base64").toString(), "Title line");
+  assert.equal(Buffer.from(String(fields.SnippetEncrypted?.value), "base64").toString(), "Body line");
+  assert.equal(fields.TextDataEncrypted?.value, "RE9D");
+  // The placeholder trio goes out as literal `{}`, like the capture.
+  assert.equal(JSON.stringify(fields.FirstAttachmentThumbnail), "{}");
+  assert.equal(JSON.stringify(fields.FirstAttachmentUTIEncrypted), "{}");
+  assert.equal(JSON.stringify(fields.TextDataAsset), "{}");
+  // The capture omits ReplicaIDToNotesVersionDataEncrypted and
+  // FoldersModificationDate entirely on a create - so do we.
+  assert.equal("ReplicaIDToNotesVersionDataEncrypted" in fields, false);
+  assert.equal("FoldersModificationDate" in fields, false);
 });

@@ -232,6 +232,48 @@ export function applyTextEdit(doc: NoteDocument, newText: string, options: Apply
   return true;
 }
 
+/**
+ * Builds the document for a brand-new note's very first save. A truly blank
+ * document never crosses the wire - the captured create (see
+ * har_captures/2026-07-16_note-lifecycle-create-table-delete.har, entry 2,
+ * analyzed in the 2026-07-16T10:50 dev notes) is already an ordinary
+ * one-replica document carrying the typed text - so this seeds the minimal
+ * empty skeleton that capture implies (the zero-length replica-0 lead run,
+ * the end sentinel, an empty replica table) and lets `applyTextEdit`, the
+ * same machinery every push edit goes through, insert the actual content.
+ *
+ * One deliberate difference from the capture: no paragraph styling on the
+ * first line (Apple's client styles it as a Title). Purely cosmetic - the
+ * list-view title comes from the TitleEncrypted field, not from styling.
+ */
+export function buildInitialNoteDocument(text: string, replicaId: Uint8Array): NoteDocument {
+  if (text.length === 0) {
+    throw new Error("A new note needs some text - refusing to create an empty document");
+  }
+  const doc: NoteDocument = {
+    rootUnknownField1: 0,
+    documentUnknownField1: 0,
+    documentVersion: 0,
+    text: "",
+    runs: [
+      // The captured document leads with this zero-length replica-0 run
+      // (sequence 1) ahead of all real content.
+      { coord: { replica: 0, clock: 0 }, length: 0, anchor: { replica: 0, clock: 0 }, tombstone: false, sequence: [] },
+      {
+        coord: { replica: 0, clock: SENTINEL_CLOCK },
+        length: 0,
+        anchor: { replica: 0, clock: SENTINEL_CLOCK },
+        tombstone: false,
+        sequence: [],
+      },
+    ],
+    replicas: [],
+    attributeRuns: [],
+  };
+  applyTextEdit(doc, text, { replicaId });
+  return doc;
+}
+
 function renumberSequences(doc: NoteDocument): void {
   let sequence = 1;
   for (const run of doc.runs) {

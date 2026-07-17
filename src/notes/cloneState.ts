@@ -43,6 +43,15 @@ export interface CloneStateTableAttachmentEntry {
   noteRecordName: string;
 }
 
+export interface CloneStateTrashedEntry {
+  /** The vault file this note lived at before it was trashed - what
+   * `delete --hard <file>` resolves against once the file itself and the
+   * `notes` entry are gone. */
+  file: string;
+  /** ms epoch of when this tool moved the note to Recently Deleted. */
+  trashedAt: number;
+}
+
 export interface CloneStateAccount {
   appleId: string;
   dsid: string;
@@ -86,6 +95,16 @@ export interface CloneState {
    * scope (version history lookups, staleness cleanup). Absent entirely in
    * state files written before this tracking existed. */
   tableAttachments?: Record<string, CloneStateTableAttachmentEntry> | undefined;
+  /**
+   * Notes this tool moved to Recently Deleted (via `delete` or `push`),
+   * keyed by recordName. Kept so a soft-deleted note stays reachable for
+   * `delete --hard <file>` after its file and `notes` entry are gone - see
+   * the "trash registry" design in the project notes (2026-07-16T11:10).
+   * Entries prune when a hard delete completes or a later `pull` sees the
+   * record's real server-side deletion tombstone. Absent entirely in state
+   * files written before the trash registry existed.
+   */
+  trashed?: Record<string, CloneStateTrashedEntry> | undefined;
 }
 
 export const STATE_DIR_NAME = ".icloud-notes-sync";
@@ -185,6 +204,17 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
     }
   }
 
+  let trashed: Record<string, CloneStateTrashedEntry> | undefined;
+  if (isRecord(value.trashed)) {
+    trashed = {};
+    for (const [recordName, entry] of Object.entries(value.trashed)) {
+      if (!isRecord(entry) || typeof entry.file !== "string" || typeof entry.trashedAt !== "number") {
+        throw new CorruptStateFileError(`${filePath} has a malformed entry for trashed note "${recordName}".`);
+      }
+      trashed[recordName] = { file: entry.file, trashedAt: entry.trashedAt };
+    }
+  }
+
   let account: CloneStateAccount | undefined;
   if (value.account !== undefined) {
     if (!isRecord(value.account) || typeof value.account.appleId !== "string" || typeof value.account.dsid !== "string") {
@@ -193,7 +223,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
     account = { appleId: value.account.appleId, dsid: value.account.dsid };
   }
 
-  return { account, syncToken, sharedZoneSyncTokens, replicaId, notes, attachments, tableAttachments };
+  return { account, syncToken, sharedZoneSyncTokens, replicaId, notes, attachments, tableAttachments, trashed };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

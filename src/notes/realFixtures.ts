@@ -161,3 +161,16 @@ export const TABLE_WRITE_PATH_REVISIONS: readonly { tag: string; base64: string 
   { tag: "2ag", base64: TABLE_REV_COLUMN_INSERTED },
   { tag: "2ai", base64: TABLE_REV_CELL_EDIT_2 },
 ];
+
+/**
+ * Real `TextDataEncrypted` from the very first `records/modify` of a
+ * brand-new note - the captured create (recordName
+ * `94fce331-9068-41a5-a56e-1244c82bc392`, "Test Note (2026-07-16)", from
+ * har_captures/2026-07-16_note-lifecycle-create-table-delete.har entry 2;
+ * analyzed in the 2026-07-16T10:50 dev notes). The evidence behind
+ * `buildInitialNoteDocument`: a first save is an ordinary one-replica
+ * document (text "Test Note (2026\n", counters [17, 1], a zero-length
+ * replica-0 lead run, an end sentinel), not some special blank shape.
+ */
+export const REAL_FIRST_SAVE_NOTE =
+  "eJzjYBBazMjBIMAgNYdRSCAktbhEwS+/JFVBw8jAyIxLSoCLBSQJlAbTGoxgEUagCL8UmNZgkhICi/ALMEJEFBg1mKGqBGBiGixSYlwcQBP+AwE/0DQ4W0mGS4pLQOhmTvQBo7BH/HxR04r2WnEJMXEIAjGjFgeHgBDIZhYAbhYZ1Q==";

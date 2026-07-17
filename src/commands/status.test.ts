@@ -49,10 +49,10 @@ test("runStatus renders \"Nothing to push.\" for an already-clean, untracked-fil
     assert.deepEqual(lines, ["Nothing to push."]);
   }));
 
-test("runStatus renders an untracked file's refusal exactly like push --dry-run would, without needing a bound account", () =>
+test("runStatus renders an untracked file's local refusal exactly like push --dry-run would, without needing a bound account", () =>
   withTempDir(async (dir) => {
     await writeCloneState(dir, { syncToken: "token", notes: {} });
-    await writeFile(path.join(dir, "New Note.md"), "Hello", "utf-8");
+    await writeFile(path.join(dir, "Empty Note.md"), "", "utf-8");
 
     const { lines, restore } = captureLogs();
     try {
@@ -62,9 +62,17 @@ test("runStatus renders an untracked file's refusal exactly like push --dry-run 
     }
 
     assert.equal(lines.length, 3);
-    assert.match(lines[0] ?? "", /New Note\.md/);
-    assert.match(lines[1] ?? "", /creating new notes isn't supported yet/);
+    assert.match(lines[0] ?? "", /Empty Note\.md/);
+    assert.match(lines[1] ?? "", /the file is empty - nothing to create/);
     assert.match(lines[2] ?? "", /0 to create, 0 changed, 0 to delete\./);
+  }));
+
+test("runStatus requires the same live check push does for a creatable untracked file - reaches the network and fails without a bound account", () =>
+  withTempDir(async (dir) => {
+    await writeCloneState(dir, { syncToken: "token", notes: {} });
+    await writeFile(path.join(dir, "New Note.md"), "Hello", "utf-8");
+
+    await assert.rejects(() => runStatus(dir), UnboundAccountError);
   }));
 
 test("runStatus requires the same live check push does for a missing tracked file - reaches the network and fails without a bound account", () =>

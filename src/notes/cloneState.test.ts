@@ -157,3 +157,38 @@ test("throws CorruptStateFileError for a malformed table attachment entry", () =
 
     await assert.rejects(readCloneState(dir), CorruptStateFileError);
   }));
+
+test("round-trips the trash registry", () =>
+  withTempDir(async (dir) => {
+    const state: CloneState = {
+      syncToken: "token",
+      notes: {},
+      trashed: { "REC-1": { file: "Gone.md", trashedAt: 1784216572571 } },
+    };
+    await writeCloneState(dir, state);
+
+    const readBack = await readCloneState(dir);
+    assert.deepEqual(readBack?.trashed, { "REC-1": { file: "Gone.md", trashedAt: 1784216572571 } });
+  }));
+
+test("reads a pre-trash-registry state file (no trashed field) without error", () =>
+  withTempDir(async (dir) => {
+    const legacy: CloneState = { syncToken: "old-token", notes: {} };
+    await writeCloneState(dir, legacy);
+
+    const readBack = await readCloneState(dir);
+    assert.equal(readBack?.trashed, undefined);
+  }));
+
+test("throws CorruptStateFileError for a malformed trashed entry", () =>
+  withTempDir(async (dir) => {
+    const stateDir = path.join(dir, ".icloud-notes-sync");
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(
+      path.join(stateDir, "state.json"),
+      JSON.stringify({ notes: {}, trashed: { "REC-1": { file: "Gone.md" } } }),
+      "utf-8",
+    );
+
+    await assert.rejects(readCloneState(dir), CorruptStateFileError);
+  }));

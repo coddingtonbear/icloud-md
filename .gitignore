@@ -8,6 +8,11 @@ dist/
 *.local.json
 *.local.*
 
+# Archive of HAR captures used to reverse-engineer the CloudKit wire format,
+# plus a .md description alongside each one. Untracked in its entirety since
+# the .har files carry live session data - see har_captures/README.md.
+/har_captures/
+
 # Cloned test vaults (real note content) - never commit these. Anchored to
 # the repo root so it doesn't also swallow src/notes/.
 /notes/
