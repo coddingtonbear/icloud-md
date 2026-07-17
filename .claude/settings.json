@@ -11,7 +11,8 @@
       "Bash(npm run *)",
       "Bash(npx tsx *)",
       "Bash(git -C /home/acoddington/Documents/Projects/icloud-notes-sync status --short)",
-      "Bash(git -C /home/acoddington/Documents/Projects/icloud-notes-sync diff --stat)"
+      "Bash(git -C /home/acoddington/Documents/Projects/icloud-notes-sync diff --stat)",
+      "mcp__obsidian__vault_list"
     ]
   }
 }
