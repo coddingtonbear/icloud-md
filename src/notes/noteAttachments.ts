@@ -2,10 +2,11 @@ import path from "node:path";
 import { fromBinary, isFieldSet } from "@bufbuild/protobuf";
 import type { CloudKitFieldValue } from "../cloudkit/databaseClient.js";
 import { decompressNoteDocument } from "./noteText.js";
-import { AttachmentInfoSchema, NoteStoreProtoSchema } from "./gen/notestore_pb.js";
+import { AttachmentInfoSchema, StringSchema } from "./gen/topotext_pb.js";
+import { parseVersionedDocument } from "./versionedDocument.js";
 
 const ATTACHMENT_IDENTIFIER_FIELD = AttachmentInfoSchema.fields.find((f) => f.localName === "attachmentIdentifier")!;
-const TYPE_UTI_FIELD = AttachmentInfoSchema.fields.find((f) => f.localName === "typeUti")!;
+const TYPE_UTI_FIELD = AttachmentInfoSchema.fields.find((f) => f.localName === "typeUTI")!;
 
 /** One embedded attachment reference found in a note's body, in document order. */
 export interface AttachmentReference {
@@ -17,27 +18,24 @@ export interface AttachmentReference {
 
 /**
  * Extracts, in document order, every embedded attachment reference from a
- * note's protobuf body: `NoteStoreProto.document.note.attribute_run[].
- * attachment_info`, when present. Each occurrence corresponds 1:1, in the
- * same order, with one U+FFFC placeholder character in the plain note_text -
- * both walk the same document left-to-right. Verified against real captured
- * audio- and image-attachment notes (dev notes, 2026-07-13/14).
+ * note's protobuf body: `topotext.String.attributeRun[].attachmentInfo`,
+ * when present. Each occurrence corresponds 1:1, in the same order, with one
+ * U+FFFC placeholder character in the plain visible text - both walk the
+ * same document left-to-right. Verified against real captured audio- and
+ * image-attachment notes (dev notes, 2026-07-13/14).
  */
 export function decodeNoteAttachmentRefs(compressedProtobuf: Buffer): AttachmentReference[] {
   const raw = decompressNoteDocument(compressedProtobuf);
-  const message = fromBinary(NoteStoreProtoSchema, raw);
-  const note = message.document?.note;
-  if (!note) {
-    return [];
-  }
+  const { data } = parseVersionedDocument(raw);
+  const str = fromBinary(StringSchema, data);
 
   const refs: AttachmentReference[] = [];
-  for (const run of note.attributeRun) {
+  for (const run of str.attributeRun) {
     const info = run.attachmentInfo;
     if (!info || !isFieldSet(info, ATTACHMENT_IDENTIFIER_FIELD) || !isFieldSet(info, TYPE_UTI_FIELD)) {
       continue;
     }
-    refs.push({ attachmentIdentifier: info.attachmentIdentifier, typeUti: info.typeUti });
+    refs.push({ attachmentIdentifier: info.attachmentIdentifier, typeUti: info.typeUTI });
   }
   return refs;
 }

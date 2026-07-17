@@ -1,0 +1,50 @@
+syntax = "proto2";
+
+package versioned_document;
+
+// The outermost wrapper around every mergeable payload this project touches:
+// a note body's TextDataEncrypted and a table's MergeableDataEncrypted are
+// both, once decompressed, a `versioned_document.Document` - they differ only
+// in how `Version.data` is interpreted (a `topotext.String` for note bodies,
+// a `CRDT.Document` for mergeable data like tables).
+//
+// Field names/numbers/types cross-checked against Apple's first-party schema
+// recovered from the Notes web-app bundle (dev log 2026-07-16T15:18; the
+// recovered source itself is reference-only and never vendored - this file is
+// this project's own schema, matching it on the wire). Before that recovery,
+// this pair was modeled twice over as `NoteStoreProto`/`Document` (note side,
+// with the String inlined at field 3) and `MergableDataProto`/
+// `MergableDataObject` (table side, with the CRDT document inlined) - the
+// recurring "unknown always-0 varint at field 1 of every wrapper level"
+// turned out to be `serializationVersion` each time.
+//
+// `data` is deliberately `bytes`, exactly as Apple declares it: the inner
+// document is parsed/encoded as its own layer (see `noteDocument.ts` /
+// `decodeTableRecord.ts`), which also splits the byte-for-byte round-trip
+// gate cleanly per layer.
+//
+// proto2 with explicit presence throughout, same reasoning as the previous
+// schema: zero values are encoded explicitly on the real wire, and the
+// round-trip gate depends on reproducing that.
+
+message Document {
+  // Always observed 0; preserved verbatim, never interpreted.
+  optional uint32 serializationVersion = 1;
+  // Apple declares this repeated; every real capture has exactly one entry,
+  // and the parsers refuse anything else rather than guess which version
+  // wins (see `parseVersionedDocument`).
+  repeated Version version = 2;
+}
+
+message Version {
+  // Always observed 0; preserved verbatim.
+  optional uint32 serializationVersion = 1;
+  // The previous schema called this `version` (note side: always 0 observed;
+  // table side: small ints) - it's a minimum-supported-version marker, not a
+  // revision counter.
+  optional uint32 minimumSupportedVersion = 2;
+  // A serialized `topotext.String` (note bodies) or `CRDT.Document`
+  // (mergeable data). Kept as bytes for bit-perfect pass-through; the inner
+  // parse is a separate layer.
+  optional bytes data = 3;
+}

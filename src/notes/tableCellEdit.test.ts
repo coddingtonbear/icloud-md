@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fromBinary, toBinary } from "@bufbuild/protobuf";
-import { NoteSchema } from "./gen/notestore_pb.js";
+import { StringSchema } from "./gen/topotext_pb.js";
 import {
   applyCellTextEdit,
   encodeCellDocument,
@@ -12,28 +12,29 @@ import {
 } from "./tableCellEdit.js";
 
 /**
- * A real cell-text object (text "A1", 7 `text_run`s including 3 tombstoned)
- * extracted from the committed `TABLE_FINAL_REVISION` table fixture
- * (`decodeTableRecord.test.ts`) at grid position [row 1, col 0] - the best
- * stress case for tombstone-splitting per the write-path plan. Re-extract
- * via `toBinary(NoteSchema, doc.objects[resolveTable(doc).cells.get("1,0").textRef].note)`
+ * A real cell-text object (text "A1", 7 `substring` runs including 3
+ * tombstoned) extracted from the committed `TABLE_FINAL_REVISION` table
+ * fixture (`decodeTableRecord.test.ts`) at grid position [row 1, col 0] -
+ * the best stress case for tombstone-splitting per the write-path plan.
+ * Re-extract via
+ * `toBinary(StringSchema, doc.objects[resolveTable(doc).cells.get("1,0").textRef].string)`
  * against that same fixture if this ever needs regenerating.
  */
 const REAL_MULTI_TOMBSTONE_A1_CELL =
   "EgJBMRoQCgQIABAAEAAaBAgAEAAoARoQCgQIARAuEAEaBAgBEAAoAhoSCgQIARAvEAEaBAgBEAAgASgDGhIKBAgBEAIQAhoECAEQCSABKAQaEgoECAEQMBADGgQIARAAIAEoBRoQCgQIARAzEAEaBAgBEAAoBhoWCggIABD/////DxAAGggIABD/////DyoCCAI=";
 
 function loadRealCell(): TableCellDocument {
-  return parseCellDocument(fromBinary(NoteSchema, Buffer.from(REAL_MULTI_TOMBSTONE_A1_CELL, "base64")));
+  return parseCellDocument(fromBinary(StringSchema, Buffer.from(REAL_MULTI_TOMBSTONE_A1_CELL, "base64")));
 }
 
 test("parseCellDocument/encodeCellDocument round-trips the real multi-tombstone cell byte-for-byte", () => {
   const raw = Buffer.from(REAL_MULTI_TOMBSTONE_A1_CELL, "base64");
-  const note = fromBinary(NoteSchema, raw);
-  const cell = parseCellDocument(note);
+  const str = fromBinary(StringSchema, raw);
+  const cell = parseCellDocument(str);
   assert.equal(cell.text, "A1");
   assert.equal(cell.runs.length, 7);
   assert.equal(cell.runs.filter((run) => run.tombstone).length, 3);
-  const reencoded = toBinary(NoteSchema, encodeCellDocument(cell));
+  const reencoded = toBinary(StringSchema, encodeCellDocument(cell));
   assert.deepEqual(reencoded, new Uint8Array(raw));
 });
 

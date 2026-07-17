@@ -229,8 +229,11 @@ would corrupt other devices' ability to merge. So push:
 2. requires it to re-encode **byte-for-byte** from our parsed model (any
    structure we don't fully understand → the note stays read-only) — the
    encoder here is [`@bufbuild/protobuf`](https://github.com/bufbuild/protobuf-es)
-   (protobuf-es), generated from this project's own reverse-engineered
-   `.proto` schema (`proto/notestore.proto`) and configured for proto2
+   (protobuf-es), generated from this project's own `.proto` schemas
+   (`proto/versioned_document.proto`, `proto/topotext.proto`,
+   `proto/crdt.proto` — reverse-engineered from real captures, with
+   names/shapes aligned to Apple's own schema as recovered from the Notes
+   web-app bundle) and configured for proto2
    explicit field presence, not a hand-written byte-exact ordered-token
    encoder as in earlier versions of this tool — validated against real
    captures before the switch (see the dev notes),

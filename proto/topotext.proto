@@ -1,0 +1,170 @@
+syntax = "proto2";
+
+package topotext;
+
+// Apple Notes' CRDT text layer ("topotext"): the mergeable string that backs
+// a note's body, a table cell's text, and an OrderedSet's hidden
+// per-character ordering mirror.
+//
+// Field names/numbers/types cross-checked against Apple's first-party schema
+// recovered from the Notes web-app bundle (dev log 2026-07-16T15:18; the
+// recovered source is reference-only and never vendored - this file is this
+// project's own schema, matching it on the wire). The pre-recovery
+// reverse-engineered names live on in comments where the rename is a real
+// semantic unlock. Deliberate deviations from Apple's declarations:
+//
+//  - `required` is kept wherever this project's byte-verified schema had it
+//    (Apple declares nearly everything optional for forward-compat; every
+//    real capture sets these, and the stronger declaration preserves the
+//    encode-always behavior the round-trip gate was verified against).
+//  - No enums: Apple's `WritingDirection`/`Alignment` enums are declared as
+//    plain integers here, because proto2 routes an unrecognized enum value
+//    into unknown fields, which protobuf-es re-emits after all declared
+//    fields - a silent reordering break for the byte round-trip gate.
+//  - Messages this project has never seen on the wire (Selection, the
+//    Attachment/Media/PreviewImage family, BoxedValue, ...) are not modeled;
+//    same for `String.attachment` (field 6) - never observed, and as the
+//    highest field number its unknown-field re-emission position is correct
+//    anyway.
+
+// A note body / cell text / ordering mirror. Previously `Note`.
+message String {
+  // The visible text (title is its first line). Previously `note_text`.
+  required string string = 2;
+  // The CRDT edit history behind `string`. Previously `TextRun text_run`.
+  repeated Substring substring = 3;
+  // Per-replica clock table. Present on note bodies; absent on table cells
+  // and ordering mirrors (confirmed via real captures - see
+  // `tableCellEdit.ts`). Previously `ReplicaTable replica_table`.
+  optional VectorTimestamp timestamp = 4;
+  // Formatting spans over the visible text.
+  repeated AttributeRun attributeRun = 5;
+}
+
+// A CRDT character coordinate. Previously `Coord {replica, clock}`.
+message CharID {
+  required uint32 replicaID = 1;
+  required uint32 clock = 2;
+}
+
+// One run of the CRDT string history. Previously `TextRun`.
+message Substring {
+  required CharID charID = 1;
+  // Length in UTF-16 code units (surrogate pairs are two units).
+  required uint32 length = 2;
+  // Previously `anchor`, semantics unknown at the time - Apple's schema
+  // names it the run's *style timestamp*.
+  required CharID timestamp = 3;
+  // Apple declares `bool`; kept as an integer so a value other than the
+  // observed literal 1 is surfaced (and refused) rather than silently
+  // squashed to `true` and re-encoded differently.
+  optional uint32 tombstone = 4;
+  // Previously `sequence`, semantics unknown at the time - Apple's schema
+  // says it's an index into `String.substring` (a child-run link). Genuinely
+  // `repeated`: a real 2026-07-15 capture had two occurrences in one run; a
+  // proto2 `optional` would silently drop all but the last on decode.
+  repeated uint32 child = 5;
+}
+
+// Per-replica clock table. Previously `ReplicaTable {entry: ReplicaEntry}`.
+message VectorTimestamp {
+  message Clock {
+    // 16-byte replica UUID. Previously `uuid`.
+    required bytes replicaUUID = 1;
+    message ReplicaClock {
+      // First entry's clock is the replica's text clock (total UTF-16 units
+      // it has inserted); later entries' meanings are still unknown and
+      // preserved verbatim. Previously `ReplicaCounter.value`.
+      required uint32 clock = 1;
+      // Never observed set in this project's captures; `noteDocument.ts`
+      // refuses a document that sets it rather than guess (its domain model
+      // doesn't carry it through an edit).
+      optional uint32 subclock = 2;
+    }
+    repeated ReplicaClock replicaClock = 2;
+  }
+  repeated Clock clock = 1;
+}
+
+message Color {
+  required float red = 1;
+  required float green = 2;
+  required float blue = 3;
+  required float alpha = 4;
+}
+
+message AttachmentInfo {
+  optional string attachmentIdentifier = 1;
+  optional string typeUTI = 2;
+  // Never observed; declared for field-ordering safety.
+  optional string systemAttachmentClassName = 3;
+  optional bytes systemAttachmentData = 4;
+}
+
+message Font {
+  // Previously `font_name`.
+  optional string name = 1;
+  // Previously `point_size`.
+  optional float pointSize = 2;
+  // Previously `font_hints`.
+  optional uint32 fontHints = 3;
+}
+
+// A checklist item's state. Previously `Checklist {uuid, done}`.
+message Todo {
+  required bytes todoUUID = 1;
+  // Apple declares `bool`; kept integer - same reasoning as
+  // `Substring.tombstone`.
+  required uint32 done = 2;
+}
+
+message ParagraphStyle {
+  // Previously `style_type`.
+  optional uint32 style = 1;
+  // Apple: enum Alignment {Left, Center, Right, Justified, Natural}.
+  optional uint32 alignment = 2;
+  // Previously `unknown_field_3` (found via the 2026-07-15 round-trip
+  // spike). Apple: enum WritingDirection {Natural, LTR, RTL, LTROverride,
+  // RTLOverride}.
+  optional uint32 writingDirection = 3;
+  // Previously `indent_amount`.
+  optional int32 indent = 4;
+  // Previously `checklist`.
+  optional Todo todo = 5;
+  // Never observed; declared for field-ordering safety (an undeclared field
+  // in the *middle* of a message re-emits after all declared ones - the
+  // exact break the 2026-07-15 spike hit on what's now `writingDirection`).
+  optional uint32 paragraphHints = 6;
+  optional uint32 startingListItemNumber = 7;
+  // Previously `block_quote`.
+  optional uint32 blockQuoteLevel = 8;
+  // Previously `unknown_field_9` ("looks like another 16-byte UUID" - it is
+  // one).
+  optional bytes uuid = 9;
+}
+
+message AttributeRun {
+  // Length in UTF-16 code units.
+  required uint32 length = 1;
+  optional ParagraphStyle paragraphStyle = 2;
+  // Overrides bold/italic and paragraph styles.
+  optional Font font = 3;
+  // Previously `font_weight` - Apple's schema says these are style modifier
+  // bits (bold, italic, ...) applied on top of the paragraph style.
+  optional uint32 fontHints = 5;
+  // Previously `underlined`.
+  optional uint32 underline = 6;
+  optional uint32 strikethrough = 7;
+  optional int32 superscript = 8;
+  optional string link = 9;
+  optional Color color = 10;
+  // Never observed; Apple: enum WritingDirection (see ParagraphStyle).
+  optional uint32 writingDirection = 11;
+  optional AttachmentInfo attachmentInfo = 12;
+  // Previously `unknown_identifier`.
+  optional uint64 timestamp = 13;
+  // Previously `emphasis_style`.
+  optional uint32 emphasis = 14;
+  // Never observed; declared for field-ordering safety.
+  optional AttachmentInfo systemAttachmentInfo = 15;
+}

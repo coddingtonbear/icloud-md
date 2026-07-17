@@ -53,15 +53,15 @@ import {
 } from "./mergeableDataPool.js";
 import {
   DictionarySchema,
-  MapEntrySchema,
-  MergeableDataObjectEntrySchema,
-  MergeableDataObjectMapSchema,
+  Document_CustomObjectSchema,
+  Document_CustomObject_MapEntrySchema,
+  Document_DocObjectSchema,
   ObjectIDSchema,
   RegisterLatestSchema,
-} from "./gen/notestore_pb.js";
+} from "./gen/crdt_pb.js";
 
 const TABLE_OBJECT_INDEX = 0;
-/** `pool[0]`'s own `customMap.type` (confirmed via real captures). */
+/** `pool[0]`'s own `custom.type` (confirmed via real captures). */
 const TABLE_OBJECT_TYPE = 4;
 /** The direction marker's own `customMap.type` (confirmed via real
  * captures) - distinct from `IDENTITY_OBJECT_TYPE`. */
@@ -111,28 +111,33 @@ export function buildFreshTableDocument(doc: TableDocument, desiredGrid: readonl
   if (!directionRegisterLatest) {
     throw new Error("Table's column-direction marker isn't the expected RegisterLatest shape - refusing to guess");
   }
-  const directionMarkerUnknownBytes = directionRegisterLatest.unknownField1;
+  const directionMarkerTimestamp = directionRegisterLatest.timestamp;
 
   const stamp = nextGenerationStamp(doc);
   let dictionaryElementCount = 0;
 
   doc.objects.length = 0;
-  pushObject(doc, create(MergeableDataObjectEntrySchema, {})); // reserve pool[0] for the table object, filled in last
+  pushObject(doc, create(Document_DocObjectSchema, {})); // reserve pool[0] for the table object, filled in last
 
   const directionMarkerRef = pushObject(
     doc,
-    create(MergeableDataObjectEntrySchema, {
-      customMap: create(MergeableDataObjectMapSchema, {
+    create(Document_DocObjectSchema, {
+      custom: create(Document_CustomObjectSchema, {
         type: DIRECTION_MARKER_TYPE,
-        mapEntry: [create(MapEntrySchema, { key: selfKey, value: create(ObjectIDSchema, { stringValue: LEFT_TO_RIGHT_DIRECTION }) })],
+        mapEntry: [
+          create(Document_CustomObject_MapEntrySchema, {
+            key: selfKey,
+            value: create(ObjectIDSchema, { stringValue: LEFT_TO_RIGHT_DIRECTION }),
+          }),
+        ],
       }),
     }),
   );
   const directionRegisterRef = pushObject(
     doc,
-    create(MergeableDataObjectEntrySchema, {
+    create(Document_DocObjectSchema, {
       registerLatest: create(RegisterLatestSchema, {
-        unknownField1: directionMarkerUnknownBytes,
+        timestamp: directionMarkerTimestamp,
         contents: refTo(directionMarkerRef),
       }),
     }),
@@ -145,12 +150,12 @@ export function buildFreshTableDocument(doc: TableDocument, desiredGrid: readonl
     const rowMapElements = rowIdentities.map((row, rowIndex) => {
       const cellRef = pushObject(
         doc,
-        create(MergeableDataObjectEntrySchema, { note: encodeCellDocument(newCellDocument(desiredGrid[rowIndex]?.[colIndex] ?? "")) }),
+        create(Document_DocObjectSchema, { string: encodeCellDocument(newCellDocument(desiredGrid[rowIndex]?.[colIndex] ?? "")) }),
       );
       dictionaryElementCount += 1;
       return stampedDictionaryElement(row.ref, cellRef, stamp);
     });
-    return pushObject(doc, create(MergeableDataObjectEntrySchema, { dictionary: create(DictionarySchema, { element: rowMapElements }) }));
+    return pushObject(doc, create(Document_DocObjectSchema, { dictionary: create(DictionarySchema, { element: rowMapElements }) }));
   });
 
   const cellColumnsElements = columnIdentities.map((column, colIndex) => {
@@ -159,26 +164,26 @@ export function buildFreshTableDocument(doc: TableDocument, desiredGrid: readonl
   });
   const cellColumnsRef = pushObject(
     doc,
-    create(MergeableDataObjectEntrySchema, { dictionary: create(DictionarySchema, { element: cellColumnsElements }) }),
+    create(Document_DocObjectSchema, { dictionary: create(DictionarySchema, { element: cellColumnsElements }) }),
   );
 
-  const crRowsRef = pushObject(doc, create(MergeableDataObjectEntrySchema, { orderedSet: buildFreshOrderedSet(rowIdentities, stamp) }));
+  const crRowsRef = pushObject(doc, create(Document_DocObjectSchema, { tsOrderedSet: buildFreshOrderedSet(rowIdentities, stamp) }));
   dictionaryElementCount += rowIdentities.length;
   const crColumnsRef = pushObject(
     doc,
-    create(MergeableDataObjectEntrySchema, { orderedSet: buildFreshOrderedSet(columnIdentities, stamp) }),
+    create(Document_DocObjectSchema, { tsOrderedSet: buildFreshOrderedSet(columnIdentities, stamp) }),
   );
   dictionaryElementCount += columnIdentities.length;
 
-  doc.objects[TABLE_OBJECT_INDEX] = create(MergeableDataObjectEntrySchema, {
-    customMap: create(MergeableDataObjectMapSchema, {
+  doc.objects[TABLE_OBJECT_INDEX] = create(Document_DocObjectSchema, {
+    custom: create(Document_CustomObjectSchema, {
       type: TABLE_OBJECT_TYPE,
       mapEntry: [
-        create(MapEntrySchema, { key: identityKey, value: identityValue }),
-        create(MapEntrySchema, { key: directionKey, value: refTo(directionRegisterRef) }),
-        create(MapEntrySchema, { key: crRowsKey, value: refTo(crRowsRef) }),
-        create(MapEntrySchema, { key: crColumnsKey, value: refTo(crColumnsRef) }),
-        create(MapEntrySchema, { key: cellColumnsKey, value: refTo(cellColumnsRef) }),
+        create(Document_CustomObject_MapEntrySchema, { key: identityKey, value: identityValue }),
+        create(Document_CustomObject_MapEntrySchema, { key: directionKey, value: refTo(directionRegisterRef) }),
+        create(Document_CustomObject_MapEntrySchema, { key: crRowsKey, value: refTo(crRowsRef) }),
+        create(Document_CustomObject_MapEntrySchema, { key: crColumnsKey, value: refTo(crColumnsRef) }),
+        create(Document_CustomObject_MapEntrySchema, { key: cellColumnsKey, value: refTo(cellColumnsRef) }),
       ],
     }),
   });
@@ -196,10 +201,15 @@ function buildFreshIdentities(doc: TableDocument, count: number, uuidIndexKey: n
     const uuidIndex = pushUuid(doc, uuid);
     const ref = pushObject(
       doc,
-      create(MergeableDataObjectEntrySchema, {
-        customMap: create(MergeableDataObjectMapSchema, {
+      create(Document_DocObjectSchema, {
+        custom: create(Document_CustomObjectSchema, {
           type: IDENTITY_OBJECT_TYPE,
-          mapEntry: [create(MapEntrySchema, { key: uuidIndexKey, value: create(ObjectIDSchema, { unsignedIntegerValue: BigInt(uuidIndex) }) })],
+          mapEntry: [
+            create(Document_CustomObject_MapEntrySchema, {
+              key: uuidIndexKey,
+              value: create(ObjectIDSchema, { unsignedIntegerValue: BigInt(uuidIndex) }),
+            }),
+          ],
         }),
       }),
     );

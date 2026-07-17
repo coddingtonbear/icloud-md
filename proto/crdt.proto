@@ -1,0 +1,220 @@
+syntax = "proto2";
+
+package CRDT;
+
+import "topotext.proto";
+
+// Apple Notes' generic mergeable-object layer: the object-pool CRDT document
+// behind a table's MergeableDataEncrypted (and, per Apple's schema, any other
+// mergeable data type).
+//
+// Field names/numbers/types cross-checked against Apple's first-party schema
+// recovered from the Notes web-app bundle (dev log 2026-07-16T15:18; the
+// recovered source is reference-only and never vendored - this file is this
+// project's own schema, matching it on the wire). The big semantic unlock
+// from that recovery: the whole reverse-engineered "generation-stamp
+// mechanism" (dev log 2026-07-15T20:04) is simply CRDT version vectors -
+// `Document.version` is the document's vector clock, and
+// `Dictionary.Element.timestamp` stamps each element with the vector time of
+// its last write.
+//
+// Deliberate deviations from Apple's declarations (same reasoning as
+// `topotext.proto`):
+//
+//  - `required` is kept wherever this project's byte-verified schema had it.
+//  - Apple's `oneof`s (`ObjectID.contents`, `Document.DocObject.contents`)
+//    are declared as sibling optional fields - wire-identical, and it keeps
+//    the "exactly one is set" checks explicit in code (`resolveRef` etc.)
+//    instead of changing every call site's shape.
+//
+// Members Apple declares that this project has never seen on the wire are
+// declared anyway (they cost nothing and protect field ordering); each is
+// marked "never observed".
+
+// A union of value shapes - real captures set exactly one member (a pool
+// ref via `objectIndex`, an inline number, or an inline string).
+message ObjectID {
+  // Never observed. Note sint64: zigzag, not plain varint.
+  optional sint64 integerValue = 1;
+  optional uint64 unsignedIntegerValue = 2;
+  // Never observed.
+  optional double doubleValue = 3;
+  optional string stringValue = 4;
+  // Never observed.
+  optional bytes bytesValue = 5;
+  // Index into `Document.object` ("ref N" throughout this codebase).
+  optional uint32 objectIndex = 6;
+}
+
+// A single replica's logical time. Previously `ListEntryDetailsKey
+// {list_entry_details_type_index, list_entry_details_key}`.
+message Timestamp {
+  optional uint64 replicaIndex = 1;
+  optional int64 counter = 2;
+}
+
+// Last-writer-wins register. Previously both `RegisterLatest` (the table's
+// column-direction marker) and `ListEntryDetails` - the two reverse-
+// engineered shapes were the same message all along.
+message RegisterLatest {
+  // Previously `RegisterLatest.unknown_field_1` (opaque bytes).
+  optional Timestamp timestamp = 1;
+  optional ObjectID contents = 2;
+}
+
+// A version vector: one element per replica. Previously the opaque
+// "generation-stamp registry" (`MergeableDataObjectData.unknown_field_1`,
+// repeated bytes) and each element's opaque 8-byte `generation_stamp` -
+// the "8-byte three-varint records" are exactly one `Element` each.
+message VectorTimestamp {
+  message Element {
+    optional uint64 replicaIndex = 1;
+    optional uint64 clock = 2;
+    optional uint64 subclock = 3;
+  }
+  repeated Element element = 1;
+}
+
+// Previously `Dictionary {DictionaryElement element}`, and *also* previously
+// `List {ListEntry list_entry}` - Apple's schema revealed the field-5 "list"
+// payload is this same Dictionary message (see `Document.DocObject.orderedSet`).
+message Dictionary {
+  message Element {
+    // Optional (unlike the old `DictionaryElement`'s required): the
+    // dictionaries behind `DocObject.orderedSet` (field 5, the old `List`)
+    // never set a key on the wire.
+    optional ObjectID key = 1;
+    required ObjectID value = 2;
+    // Previously `generation_stamp` (opaque 8-byte record): the vector time
+    // of this element's last write.
+    optional VectorTimestamp timestamp = 3;
+    // Previously `ListEntry.additional_details`.
+    optional RegisterLatest index = 4;
+  }
+  repeated Element element = 1;
+}
+
+// Previously `MergeableDataObjectEntry.unknown_message = 9` (opaque bytes) -
+// even apple_cloud_notes_parser hadn't named it.
+message Index {
+  message Element {
+    optional uint64 replicaIndex = 1;
+    optional int64 integer = 2;
+  }
+  repeated Element element = 1;
+}
+
+// Never observed.
+message OneOf {
+  message Element {
+    optional ObjectID value = 1;
+    optional Timestamp timestamp = 2;
+  }
+  repeated Element element = 1;
+}
+
+// An ordered list backed by a mergeable string: one attachment entry per
+// list position, mirrored by one U+FFFC character in `contents`. Previously
+// `OrderedSetOrderingArray {contents: Note, attachment}`.
+message StringArray {
+  required topotext.String contents = 1;
+  message ArrayAttachment {
+    // Previously `index` (int32); redundant with list position, ignored on
+    // read.
+    required uint64 attachmentIndex = 1;
+    // Previously `uuid`: in every table capture, a 16-byte row/column
+    // identity UUID (the join key into `Document.uuidItem`).
+    required bytes contents = 2;
+  }
+  repeated ArrayAttachment attachments = 2;
+}
+
+// Previously `OrderedSetOrdering {array, contents}`.
+message Array {
+  required StringArray array = 1;
+  // The identity-redirect dictionary: resolves stale/duplicate identities
+  // from concurrent edits onto their canonical counterpart. Previously
+  // `OrderedSetOrdering.contents`.
+  required Dictionary dictionary = 2;
+}
+
+// Previously `OrderedSet {ordering, elements}` (the `crRows`/`crColumns`
+// shape, `DocObject.tsOrderedSet` = old field-16 `ordered_set`).
+message OrderedSet {
+  required Array array = 1;
+  // One trivial `{key: ref, value: ref}` self-pair per live array entry.
+  // Previously `elements`.
+  required Dictionary set = 2;
+}
+
+// The object-pool document. Previously `MergeableDataObjectData`.
+message Document {
+  // A typed key/value object. Previously `MergeableDataObjectMap`.
+  message CustomObject {
+    // Index into `Document.typeItem`.
+    required int32 type = 1;
+    message MapEntry {
+      // Index into `Document.keyItem`.
+      required int32 key = 1;
+      required ObjectID value = 2;
+    }
+    repeated MapEntry mapEntry = 3;
+  }
+
+  // One pool object - a union; real entries set exactly one member.
+  // Previously `MergeableDataObjectEntry`.
+  message DocObject {
+    optional RegisterLatest registerLatest = 1;
+    // Never observed.
+    optional RegisterLatest registerGreatest = 2;
+    // Never observed.
+    optional RegisterLatest registerLeast = 3;
+    // Never observed.
+    optional Dictionary set = 4;
+    // Previously `List list = 5` - it's a Dictionary on the wire (see
+    // `Dictionary`'s comment).
+    optional Dictionary orderedSet = 5;
+    optional Dictionary dictionary = 6;
+    // Never observed.
+    optional Timestamp timestamp = 7;
+    // Never observed.
+    optional VectorTimestamp vectorTimestamp = 8;
+    // Previously `unknown_message` (opaque bytes).
+    optional Index index = 9;
+    // A cell-text / mergeable-string object. Previously `note`.
+    optional topotext.String string = 10;
+    // Never observed.
+    optional uint64 weakReference = 11;
+    // Never observed.
+    optional OneOf oneof = 12;
+    // Previously `custom_map`.
+    optional CustomObject custom = 13;
+    // Never observed.
+    optional StringArray stringArray = 14;
+    // Never observed.
+    optional Array array = 15;
+    // Previously `ordered_set`.
+    optional OrderedSet tsOrderedSet = 16;
+  }
+
+  // The document's version vector. Previously `unknown_field_1` (repeated
+  // opaque bytes; the single observed occurrence's "concatenated 8-byte
+  // records" are this message's repeated `element` entries).
+  optional VectorTimestamp version = 1;
+  // Previously `unknown_field_2` - observed only as a present-but-empty
+  // message (`12 00`) on long-lived tables.
+  optional VectorTimestamp startVersion = 2;
+  // The object pool, addressed by index via `ObjectID.objectIndex`.
+  // Previously `mergeable_data_object_entry`.
+  repeated DocObject object = 3;
+  // Previously `mergeable_data_object_key_item`.
+  repeated string keyItem = 4;
+  // Previously `mergeable_data_object_type_item`.
+  repeated string typeItem = 5;
+  // 16-byte UUIDs, plain-index addressed. Previously
+  // `mergeable_data_object_uuid_item`.
+  repeated bytes uuidItem = 6;
+  // Previously `unknown_field_7` - the 2/4 hand-decode ({replica UUID,
+  // clock, clock} per replica) matches this declaration byte-for-byte.
+  optional topotext.VectorTimestamp ttTimestamp = 7;
+}

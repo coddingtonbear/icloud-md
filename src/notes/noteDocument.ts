@@ -3,36 +3,44 @@
  * - the same protobuf `noteText.ts` reads note_text out of, but parsed
  * strictly enough to be *edited and re-encoded*, which is what `push` needs.
  *
- * Built on the generated `proto/notestore.proto` schema (protobuf-es). This
- * project's own `NoteDocument`/`TextRun`/`ReplicaEntry` stay plain domain
- * types, decoupled from the generated message shapes, so editing logic below
- * doesn't need to think in wire-format terms. `AttributeRun` is the one
- * exception: it's a direct alias for the generated message type rather than
- * a separate wrapper, since Apple's formatting fields are numerous, still
- * mostly unused by this project (rendering them is out of scope until a
- * follow-on plan), and protobuf-es's own unknown-field retention already
+ * Built on the generated `proto/topotext.proto`/`proto/versioned_document.proto`
+ * schemas (protobuf-es). This project's own `NoteDocument`/`TextRun`/
+ * `ReplicaEntry` stay plain domain types, decoupled from the generated
+ * message shapes, so editing logic below doesn't need to think in
+ * wire-format terms (their names predate the 2026-07-16 schema alignment
+ * with Apple's recovered source: domain `TextRun` = wire `Substring`,
+ * `coord` = `charID`, `anchor` = `Substring.timestamp`, `sequence` =
+ * `child`, `ReplicaEntry` = `VectorTimestamp.Clock`). `AttributeRun` is the
+ * one exception: it's a direct alias for the generated message type rather
+ * than a separate wrapper, since Apple's formatting fields are numerous,
+ * still mostly unused by this project (rendering them is out of scope until
+ * a follow-on plan), and protobuf-es's own unknown-field retention already
  * makes preserving whatever we don't understand "nearly free" - see
- * `proto/notestore.proto` and the dev notes, 2026-07-15 (Step 1 spike).
+ * `proto/topotext.proto` and the dev notes, 2026-07-15 (Step 1 spike).
  *
  * The shape here was derived empirically from real `records/modify` bodies
  * captured from www.icloud.com (see the project dev notes, 2026-07-13 "push
- * groundwork" entry), cross-checked against every note in those captures:
+ * groundwork" entry), cross-checked against every note in those captures,
+ * and since 2026-07-16 aligned with Apple's own recovered schema names
+ * (dev log 2026-07-16T15:18):
  *
- *   root:      1: varint            (always 0 so far; preserved verbatim)
- *              2: Document
- *   Document:  1: varint, 2: varint (preserved verbatim)
- *              3: Note
- *   Note:      2: note_text (UTF-8 string; title is its first line)
- *              3: repeated TextRun  - the CRDT history of the string
- *              4: replica table     - repeated { 1: 16-byte UUID, 2+: clocks }
+ *   versioned_document.Document > Version.data (see `versionedDocument.ts`)
+ *   topotext.String:
+ *              2: string (UTF-8; title is its first line)
+ *              3: repeated Substring - the CRDT history of the string
+ *              4: timestamp - per-replica clock table
+ *                 (repeated { 1: 16-byte UUID, 2+: clocks })
  *              5: repeated AttributeRun - formatting spans over visible text
- *   TextRun:   1: Coord { 1: replica index, 2: clock }
+ *   Substring: 1: charID { 1: replica index, 2: clock }
  *              2: length
- *              3: Coord (anchor; semantics not fully understood, preserved)
+ *              3: timestamp (this file's domain `anchor`; Apple calls it the
+ *                 run's style timestamp)
  *              4: tombstone flag (1 = deleted text, retained for merging)
- *              5: sequence number(s) - genuinely `repeated`: a real capture
+ *              5: child run index(es) - genuinely `repeated`: a real capture
  *                 (2026-07-15) had two occurrences in one run; see
- *                 `proto/notestore.proto`'s `TextRun.sequence` comment.
+ *                 `proto/topotext.proto`'s `Substring.child` comment. This
+ *                 file's domain model calls it `sequence` (every real save
+ *                 renumbers it 1..N in document order).
  *
  * Invariants verified against every captured note:
  *  - run lengths and clocks count UTF-16 code units;
@@ -61,20 +69,21 @@
 import { clone, create, fromBinary, isFieldSet, toBinary } from "@bufbuild/protobuf";
 import {
   AttributeRunSchema,
-  CoordSchema,
-  DocumentSchema,
-  NoteSchema,
-  NoteStoreProtoSchema,
-  ReplicaCounterSchema,
-  ReplicaEntrySchema,
-  ReplicaTableSchema,
-  TextRunSchema,
+  CharIDSchema,
+  StringSchema,
+  SubstringSchema,
+  VectorTimestampSchema,
+  VectorTimestamp_ClockSchema,
+  VectorTimestamp_Clock_ReplicaClockSchema,
   type AttributeRun as GenAttributeRun,
-  type ReplicaEntry as GenReplicaEntry,
-  type TextRun as GenTextRun,
-} from "./gen/notestore_pb.js";
+  type Substring as GenSubstring,
+  type VectorTimestamp_Clock as GenReplicaClockTable,
+} from "./gen/topotext_pb.js";
+import { DocumentSchema as VersionedDocumentSchema, VersionSchema } from "./gen/versioned_document_pb.js";
+import { parseVersionedDocument } from "./versionedDocument.js";
 
-const TOMBSTONE_FIELD = TextRunSchema.fields.find((f) => f.localName === "tombstone")!;
+const TOMBSTONE_FIELD = SubstringSchema.fields.find((f) => f.localName === "tombstone")!;
+const SUBCLOCK_FIELD = VectorTimestamp_Clock_ReplicaClockSchema.fields.find((f) => f.localName === "subclock")!;
 
 export interface RunCoord {
   replica: number;
@@ -87,7 +96,7 @@ export interface TextRun {
   anchor: RunCoord;
   tombstone: boolean;
   /** Almost always one entry; occasionally more in real captures - see
-   * `proto/notestore.proto`'s `TextRun.sequence` comment. Empty for a
+   * `proto/topotext.proto`'s `Substring.child` comment. Empty for a
    * brand-new run pending `applyTextEdit`'s renumbering pass. */
   sequence: number[];
 }
@@ -106,11 +115,14 @@ export interface ReplicaEntry {
 export type AttributeRun = GenAttributeRun;
 
 export interface NoteDocument {
-  /** Root-level field 1; always observed 0 so far, preserved verbatim. */
-  rootUnknownField1: number;
-  /** Document-level field 1; always observed 0 so far, preserved verbatim. */
-  documentUnknownField1: number;
-  documentVersion: number;
+  /** `versioned_document.Document.serializationVersion`; always observed 0,
+   * preserved verbatim. */
+  rootSerializationVersion: number;
+  /** `versioned_document.Version.serializationVersion`; always observed 0,
+   * preserved verbatim. */
+  versionSerializationVersion: number;
+  /** `versioned_document.Version.minimumSupportedVersion`. */
+  minimumSupportedVersion: number;
   text: string;
   runs: TextRun[];
   replicas: ReplicaEntry[];
@@ -120,47 +132,42 @@ export interface NoteDocument {
 const SENTINEL_CLOCK = 0xffffffff;
 
 export function parseNoteDocument(raw: Uint8Array): NoteDocument {
-  const message = fromBinary(NoteStoreProtoSchema, raw);
-  const document = message.document;
-  if (!document) {
-    throw new Error("Note document missing Document field (root field 2)");
-  }
-  const note = document.note;
-  if (!note) {
-    throw new Error("Note document missing Note field (Document field 3)");
-  }
-  if (!note.replicaTable) {
-    throw new Error("Note document is missing its replica table (Note field 4)");
+  const { wrapper, data } = parseVersionedDocument(raw);
+  const version = wrapper.version[0]!;
+  const str = fromBinary(StringSchema, data);
+  if (!str.timestamp) {
+    throw new Error("Note document is missing its replica clock table (String field 4)");
   }
 
   return {
-    rootUnknownField1: message.unknownField1,
-    documentUnknownField1: document.unknownField1,
-    documentVersion: document.version,
-    text: note.noteText,
-    runs: note.textRun.map(parseTextRun),
-    replicas: note.replicaTable.entry.map(parseReplicaEntry),
-    attributeRuns: note.attributeRun,
+    rootSerializationVersion: wrapper.serializationVersion,
+    versionSerializationVersion: version.serializationVersion,
+    minimumSupportedVersion: version.minimumSupportedVersion,
+    text: str.string,
+    runs: str.substring.map(parseTextRun),
+    replicas: str.timestamp.clock.map(parseReplicaEntry),
+    attributeRuns: str.attributeRun,
   };
 }
 
 export function encodeNoteDocument(doc: NoteDocument): Uint8Array {
-  const note = create(NoteSchema, {
-    noteText: doc.text,
-    textRun: doc.runs.map(encodeTextRun),
-    replicaTable: create(ReplicaTableSchema, { entry: doc.replicas.map(encodeReplicaEntry) }),
+  const str = create(StringSchema, {
+    string: doc.text,
+    substring: doc.runs.map(encodeTextRun),
+    timestamp: create(VectorTimestampSchema, { clock: doc.replicas.map(encodeReplicaEntry) }),
     attributeRun: doc.attributeRuns,
   });
-  const document = create(DocumentSchema, {
-    unknownField1: doc.documentUnknownField1,
-    version: doc.documentVersion,
-    note,
+  const wrapper = create(VersionedDocumentSchema, {
+    serializationVersion: doc.rootSerializationVersion,
+    version: [
+      create(VersionSchema, {
+        serializationVersion: doc.versionSerializationVersion,
+        minimumSupportedVersion: doc.minimumSupportedVersion,
+        data: toBinary(StringSchema, str),
+      }),
+    ],
   });
-  const message = create(NoteStoreProtoSchema, {
-    unknownField1: doc.rootUnknownField1,
-    document,
-  });
-  return toBinary(NoteStoreProtoSchema, message);
+  return toBinary(VersionedDocumentSchema, wrapper);
 }
 
 /** The byte-for-byte round-trip gate: true only if we can reproduce `raw`
@@ -251,9 +258,9 @@ export function buildInitialNoteDocument(text: string, replicaId: Uint8Array): N
     throw new Error("A new note needs some text - refusing to create an empty document");
   }
   const doc: NoteDocument = {
-    rootUnknownField1: 0,
-    documentUnknownField1: 0,
-    documentVersion: 0,
+    rootSerializationVersion: 0,
+    versionSerializationVersion: 0,
+    minimumSupportedVersion: 0,
     text: "",
     runs: [
       // The captured document leads with this zero-length replica-0 run
@@ -287,57 +294,68 @@ function renumberSequences(doc: NoteDocument): void {
 
 // --- parsing ---------------------------------------------------------------
 
-/** Exported for `tableCellEdit.ts`: a cell's `.note` field (field 10) reuses
- * this exact `TextRun` message shape for its own CRDT run history. */
-export function parseTextRun(run: GenTextRun): TextRun {
-  const coord = run.coord;
-  const anchor = run.anchor;
+/** Exported for `tableCellEdit.ts`: a cell's `.string` field (field 10)
+ * reuses this exact `Substring` message shape for its own CRDT run history. */
+export function parseTextRun(run: GenSubstring): TextRun {
+  const coord = run.charID;
+  const anchor = run.timestamp;
   if (!coord || !anchor) {
-    throw new Error("TextRun is missing coord, length, or anchor");
+    throw new Error("Substring is missing charID, length, or timestamp");
   }
   let tombstone = false;
   if (isFieldSet(run, TOMBSTONE_FIELD)) {
     if (run.tombstone !== 1) {
-      throw new Error(`TextRun tombstone flag has unexpected value ${run.tombstone}`);
+      throw new Error(`Substring tombstone flag has unexpected value ${run.tombstone}`);
     }
     tombstone = true;
   }
   return {
-    coord: { replica: coord.replica, clock: coord.clock },
+    coord: { replica: coord.replicaID, clock: coord.clock },
     length: run.length,
-    anchor: { replica: anchor.replica, clock: anchor.clock },
+    anchor: { replica: anchor.replicaID, clock: anchor.clock },
     tombstone,
-    sequence: run.sequence,
+    sequence: run.child,
   };
 }
 
-function parseReplicaEntry(entry: GenReplicaEntry): ReplicaEntry {
-  if (entry.uuid.length !== 16) {
-    throw new Error("Replica entry does not start with a 16-byte UUID");
+function parseReplicaEntry(entry: GenReplicaClockTable): ReplicaEntry {
+  if (entry.replicaUUID.length !== 16) {
+    throw new Error("Replica clock entry does not start with a 16-byte UUID");
   }
-  return { id: entry.uuid, counters: entry.counter.map((counter) => counter.value) };
+  return {
+    id: entry.replicaUUID,
+    counters: entry.replicaClock.map((counter) => {
+      // Never observed set; this domain model doesn't carry it through an
+      // edit, so a document that uses it must be refused, not silently
+      // re-encoded without it.
+      if (isFieldSet(counter, SUBCLOCK_FIELD)) {
+        throw new Error("Replica clock entry carries a subclock this tool doesn't understand - refusing to touch this note");
+      }
+      return counter.clock;
+    }),
+  };
 }
 
 // --- encoding --------------------------------------------------------------
 
 /** Exported for `tableCellEdit.ts`; see `parseTextRun`. */
-export function encodeTextRun(run: TextRun): GenTextRun {
-  return create(TextRunSchema, {
-    coord: create(CoordSchema, run.coord),
+export function encodeTextRun(run: TextRun): GenSubstring {
+  return create(SubstringSchema, {
+    charID: create(CharIDSchema, { replicaID: run.coord.replica, clock: run.coord.clock }),
     length: run.length,
-    anchor: create(CoordSchema, run.anchor),
+    timestamp: create(CharIDSchema, { replicaID: run.anchor.replica, clock: run.anchor.clock }),
     // Zero/absent values are encoded explicitly (Apple's encoder does the
     // same, and the round-trip gate depends on matching it) - so tombstone
     // is only ever set (to literal 1) when true, left absent otherwise.
     ...(run.tombstone ? { tombstone: 1 } : {}),
-    sequence: run.sequence,
+    child: run.sequence,
   });
 }
 
-function encodeReplicaEntry(entry: ReplicaEntry): GenReplicaEntry {
-  return create(ReplicaEntrySchema, {
-    uuid: entry.id,
-    counter: entry.counters.map((value) => create(ReplicaCounterSchema, { value })),
+function encodeReplicaEntry(entry: ReplicaEntry): GenReplicaClockTable {
+  return create(VectorTimestamp_ClockSchema, {
+    replicaUUID: entry.id,
+    replicaClock: entry.counters.map((clock) => create(VectorTimestamp_Clock_ReplicaClockSchema, { clock })),
   });
 }
 

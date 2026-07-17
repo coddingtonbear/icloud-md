@@ -169,14 +169,15 @@ export const TABLE_WRITE_PATH_REVISIONS: readonly { tag: string; base64: string 
  * from two local history snapshots after Adam cleared the source note from
  * the account (dev notes, 2026-07-16, "Table write engine (2/4)"). Unlike
  * all ten `TABLE_WRITE_PATH_REVISIONS` above, this table's months of real
- * accumulated edit history carries `MergeableDataObjectData`'s
- * `unknown_field_2` (always zero-length) and `unknown_field_7` (a repeated
- * `{16-byte UUID, two single-varint submessages}` shape) - which Apple emits
- * in field-number order, so leaving them undeclared broke the byte
+ * accumulated edit history carries `CRDT.Document`'s `startVersion` (field
+ * 2, always zero-length; `unknown_field_2` pre-alignment) and `ttTimestamp`
+ * (field 7, a `topotext.VectorTimestamp`: `{16-byte replica UUID, per-replica
+ * clock/subclock}` entries; `unknown_field_7` pre-alignment) - which Apple
+ * emits in field-number order, so leaving them undeclared broke the byte
  * round-trip gate on ordering alone (protobuf-es re-emits unknown fields
  * last). These two fixtures are the regression proof for declaring them.
  * `2AV` -> `2AX` is one real Apple-client edit apart (a row removed, and one
- * of `unknown_field_7`'s varints incremented).
+ * of `ttTimestamp`'s clocks incremented).
  */
 export const TABLE_LONG_LIVED_REV_2AV =
   "H4sIAAAAAAAAE62XDVxTVR/Hd7cxxhhwvDCQy6vjZTBgjDNARU2BpaKGugF9sjLHuMpobjo2iacsSkXNl8dSQMVApSelNAxDoh5SPr4+Vr71aGBpWu" +

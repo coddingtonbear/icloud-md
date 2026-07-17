@@ -13,7 +13,8 @@ import {
   type NoteDocument,
   type TextRun,
 } from "./noteDocument.js";
-import { AttributeRunSchema, DocumentSchema, NoteSchema, NoteStoreProtoSchema } from "./gen/notestore_pb.js";
+import { AttributeRunSchema, StringSchema } from "./gen/topotext_pb.js";
+import { DocumentSchema as VersionedDocumentSchema, VersionSchema } from "./gen/versioned_document_pb.js";
 import { decodeNoteBodyText, compressNoteDocument } from "./noteText.js";
 
 const REPLICA_A = new Uint8Array(16).fill(0xaa);
@@ -34,9 +35,9 @@ const SENTINEL: TextRun = {
  */
 function makeDocument(text: string, runs: TextRun[], replicaClocks: number[]): NoteDocument {
   const doc: NoteDocument = {
-    rootUnknownField1: 0,
-    documentUnknownField1: 0,
-    documentVersion: 0,
+    rootSerializationVersion: 0,
+    versionSerializationVersion: 0,
+    minimumSupportedVersion: 0,
     text,
     runs: [
       {
@@ -251,15 +252,18 @@ test("consecutive pushes from the same replica keep extending the same run", () 
   validateDocumentInvariants(doc);
 });
 
-test("a document missing its replica table is refused", () => {
-  const message = create(NoteStoreProtoSchema, {
-    document: create(DocumentSchema, {
-      version: 0,
-      note: create(NoteSchema, { noteText: "hi" }), // no replicaTable set
-    }),
+test("a document missing its replica clock table is refused", () => {
+  const message = create(VersionedDocumentSchema, {
+    version: [
+      create(VersionSchema, {
+        minimumSupportedVersion: 0,
+        // no String.timestamp (replica clock table) set
+        data: toBinary(StringSchema, create(StringSchema, { string: "hi" })),
+      }),
+    ],
   });
-  const raw = toBinary(NoteStoreProtoSchema, message);
-  assert.throws(() => parseNoteDocument(raw), /missing its replica table/);
+  const raw = toBinary(VersionedDocumentSchema, message);
+  assert.throws(() => parseNoteDocument(raw), /missing its replica clock table/);
   assert.equal(noteDocumentRoundTrips(raw), false);
 });
 

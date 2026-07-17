@@ -1,15 +1,15 @@
 /**
  * Per-cell, identity-preserving text edits for a table's cell-text objects
- * (`MergeableDataObjectEntry.note`, the same `Note` message field 10 used
- * elsewhere - see `decodeTableRecord.ts`'s file header).
+ * (`Document.DocObject.string`, the same `topotext.String` message field 10
+ * used elsewhere - see `decodeTableRecord.ts`'s file header).
  *
  * A cell's CRDT run history follows the exact same tombstone/splice
  * discipline as the top-level note body (`noteDocument.ts`), with one
  * structural difference confirmed against real captures (dev notes,
- * 2026-07-15T14:51): `replica_table` (`Note` field 4) is always absent, so
- * there's no stored `{replica UUID -> table index}` mapping and no
- * `replica.counters[0]` to read a "next available clock" from the way
- * `noteDocument.ts`'s `insertVisibleText` does.
+ * 2026-07-15T14:51): the per-replica clock table (`String.timestamp`, field
+ * 4) is always absent, so there's no stored `{replica UUID -> table index}`
+ * mapping and no `replica.counters[0]` to read a "next available clock" from
+ * the way `noteDocument.ts`'s `insertVisibleText` does.
  *
  * Real captures always use replica index 1 for cell edits (there's only
  * ever one editor in scope), with each brand-new cell's first insertion
@@ -44,7 +44,7 @@ import {
   type RunCoord,
   type TextRun,
 } from "./noteDocument.js";
-import { AttributeRunSchema, NoteSchema, type Note as GenNote } from "./gen/notestore_pb.js";
+import { AttributeRunSchema, StringSchema, type String as GenString } from "./gen/topotext_pb.js";
 
 /** The replica index every edit this tool makes to a cell uses; see file header. */
 const CELL_REPLICA_INDEX = 1;
@@ -56,18 +56,18 @@ export interface TableCellDocument {
   attributeRuns: AttributeRun[];
 }
 
-export function parseCellDocument(note: GenNote): TableCellDocument {
+export function parseCellDocument(str: GenString): TableCellDocument {
   return {
-    text: note.noteText,
-    runs: note.textRun.map(parseTextRun),
-    attributeRuns: note.attributeRun,
+    text: str.string,
+    runs: str.substring.map(parseTextRun),
+    attributeRuns: str.attributeRun,
   };
 }
 
-export function encodeCellDocument(doc: TableCellDocument): GenNote {
-  return create(NoteSchema, {
-    noteText: doc.text,
-    textRun: doc.runs.map(encodeTextRun),
+export function encodeCellDocument(doc: TableCellDocument): GenString {
+  return create(StringSchema, {
+    string: doc.text,
+    substring: doc.runs.map(encodeTextRun),
     attributeRun: doc.attributeRuns,
   });
 }

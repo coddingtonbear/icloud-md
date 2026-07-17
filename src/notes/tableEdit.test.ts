@@ -4,6 +4,7 @@ import { buildFreshTableDocument } from "./tableEdit.js";
 import { gridFromTableDocument, parseTableDocument, tableDocumentRoundTrips, encodeTableDocument } from "./decodeTableRecord.js";
 import { nextGenerationStamp } from "./mergeableDataPool.js";
 import { OBJECT_REPLACEMENT_CHARACTER } from "./noteAttachments.js";
+import type { Dictionary_Element } from "./gen/crdt_pb.js";
 import { TABLE_FIRST_REVISION, TABLE_WRITE_PATH_REVISIONS } from "./realFixtures.js";
 
 function rebuild(base64: string, desiredGrid: string[][]) {
@@ -135,25 +136,25 @@ for (const revision of TABLE_WRITE_PATH_REVISIONS) {
 
 // --- regression: the incident this rewrite exists to fix --------------------
 
-test("regression: array.contents' visible FFFC text length matches array.attachment's entry count for both rows and columns", () => {
+test("regression: the FFFC ordering mirror's visible text length matches the attachments entry count for both rows and columns", () => {
   const doc = rebuild(TABLE_FIRST_REVISION, [
     ["A0", "B0", "C0"],
     ["A1", "B1", "C1"],
     ["A2", "B2", "C2"],
   ]);
 
-  const rowsOrderedSet = doc.objects[doc.crRowsRef]?.orderedSet;
-  const columnsOrderedSet = doc.objects[doc.crColumnsRef]?.orderedSet;
+  const rowsOrderedSet = doc.objects[doc.crRowsRef]?.tsOrderedSet;
+  const columnsOrderedSet = doc.objects[doc.crColumnsRef]?.tsOrderedSet;
   assert.ok(rowsOrderedSet && columnsOrderedSet);
 
-  const rowContents = rowsOrderedSet.ordering?.array?.contents?.noteText ?? "";
-  const rowAttachments = rowsOrderedSet.ordering?.array?.attachment.length ?? -1;
+  const rowContents = rowsOrderedSet.array?.array?.contents?.string ?? "";
+  const rowAttachments = rowsOrderedSet.array?.array?.attachments.length ?? -1;
   assert.equal(rowContents.length, rowAttachments);
   assert.equal([...rowContents].every((char) => char === OBJECT_REPLACEMENT_CHARACTER), true);
   assert.equal(rowAttachments, 3);
 
-  const columnContents = columnsOrderedSet.ordering?.array?.contents?.noteText ?? "";
-  const columnAttachments = columnsOrderedSet.ordering?.array?.attachment.length ?? -1;
+  const columnContents = columnsOrderedSet.array?.array?.contents?.string ?? "";
+  const columnAttachments = columnsOrderedSet.array?.array?.attachments.length ?? -1;
   assert.equal(columnContents.length, columnAttachments);
   assert.equal([...columnContents].every((char) => char === OBJECT_REPLACEMENT_CHARACTER), true);
   assert.equal(columnAttachments, 3);
@@ -161,9 +162,9 @@ test("regression: array.contents' visible FFFC text length matches array.attachm
 
 // --- regression: the generation-stamp mechanism found while planning this --
 
-test("regression: every fresh DictionaryElement carries a generation_stamp, and the registry's running maximum advances", () => {
+test("regression: every fresh Dictionary.Element carries a version-vector timestamp, and the document vector's leading clock advances", () => {
   const original = parseTableDocument(Buffer.from(TABLE_FIRST_REVISION, "base64"));
-  const expectedStamp = nextGenerationStamp(original);
+  const expectedStamp = BigInt(nextGenerationStamp(original));
 
   const doc = parseTableDocument(Buffer.from(TABLE_FIRST_REVISION, "base64"));
   buildFreshTableDocument(doc, [
@@ -171,30 +172,36 @@ test("regression: every fresh DictionaryElement carries a generation_stamp, and 
     ["A1", "B1"],
   ]);
 
-  // slot 0 of the registry is the new running maximum.
-  assert.equal(doc.generationStamps[0]?.[5], expectedStamp);
-  assert.equal(doc.generationStamps[0]!.length > 8, true);
+  // The vector's leading element carries the new running maximum.
+  assert.equal(doc.version.element[0]?.clock, expectedStamp);
+  assert.equal(doc.version.element.length > 1, true);
+
+  const stampClockOf = (element: Dictionary_Element) => {
+    assert.equal(element.timestamp?.element.length, 1);
+    assert.equal(element.timestamp?.element[0]?.replicaIndex, 0n);
+    assert.equal(element.timestamp?.element[0]?.subclock, 0n);
+    return element.timestamp?.element[0]?.clock;
+  };
 
   // cellColumns' own entries, every row-map entry, and both OrderedSets'
-  // `elements` entries all carry the same stamp.
+  // `set` entries all carry the same stamp.
   const cellColumnsDict = doc.objects[doc.cellColumnsRef]?.dictionary;
   assert.ok(cellColumnsDict && cellColumnsDict.element.length > 0);
   for (const element of cellColumnsDict.element) {
-    assert.equal(element.generationStamp.length, 8);
-    assert.equal(element.generationStamp[5], expectedStamp);
+    assert.equal(stampClockOf(element), expectedStamp);
     const rowMapRef = element.value?.objectIndex;
     const rowMapDict = rowMapRef !== undefined ? doc.objects[rowMapRef]?.dictionary : undefined;
     assert.ok(rowMapDict && rowMapDict.element.length > 0);
     for (const rowElement of rowMapDict.element) {
-      assert.equal(rowElement.generationStamp[5], expectedStamp);
+      assert.equal(stampClockOf(rowElement), expectedStamp);
     }
   }
 
-  const rowsElements = doc.objects[doc.crRowsRef]?.orderedSet?.elements?.element ?? [];
-  const columnsElements = doc.objects[doc.crColumnsRef]?.orderedSet?.elements?.element ?? [];
+  const rowsElements = doc.objects[doc.crRowsRef]?.tsOrderedSet?.set?.element ?? [];
+  const columnsElements = doc.objects[doc.crColumnsRef]?.tsOrderedSet?.set?.element ?? [];
   assert.ok(rowsElements.length > 0 && columnsElements.length > 0);
   for (const element of [...rowsElements, ...columnsElements]) {
-    assert.equal(element.generationStamp[5], expectedStamp);
+    assert.equal(stampClockOf(element), expectedStamp);
   }
 });
 
@@ -204,13 +211,13 @@ test("regression: a second rebuild advances the generation stamp past the first 
     ["A0", "B0"],
     ["", ""],
   ]);
-  const firstStamp = doc.generationStamps[0]?.[5];
+  const firstStamp = doc.version.element[0]?.clock;
 
   buildFreshTableDocument(doc, [
     ["A0", "B0-again"],
     ["", ""],
   ]);
-  const secondStamp = doc.generationStamps[0]?.[5];
+  const secondStamp = doc.version.element[0]?.clock;
 
   assert.ok(firstStamp !== undefined && secondStamp !== undefined);
   assert.ok(secondStamp > firstStamp);

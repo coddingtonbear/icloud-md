@@ -4,73 +4,76 @@
  * GitHub-flavored-Markdown pipe table on one side, the object-pool CRDT
  * structure Apple's client uses on the other.
  *
- * The structure was reverse-engineered from real captures and cross-checked
+ * The structure was reverse-engineered from real captures, cross-checked
  * against threeplanetssoftware/apple_cloud_notes_parser's
  * `AppleNotesEmbeddedTable.rb` (MIT licensed) - see the project dev notes,
  * "Consolidated reference: the complete `com.apple.notes.table`
  * MergeableData structure" (2026-07-14T14:46) and "Table write path planned
- * end-to-end" (2026-07-15T14:51), and `proto/notestore.proto` for the
- * generated-schema field names used below.
+ * end-to-end" (2026-07-15T14:51) - and since 2026-07-16 aligned with
+ * Apple's own recovered schema names (dev log 2026-07-16T15:18); see
+ * `proto/crdt.proto` for the generated-schema field names used below and
+ * the old-name -> Apple-name mapping.
  *
  * Shape, once decompressed the same way `decompressNoteDocument` does:
  *
- *   MergableDataProto.mergableDataObject.mergeableDataObjectData
- *     .mergeableDataObjectEntry[]      object pool, addressed by index
- *                                      everywhere else via an ObjectID's
- *                                      `objectIndex` ("ref N" below)
- *     .mergeableDataObjectKeyItem[]    key-name table (strings)
- *     .mergeableDataObjectUuidItem[]   UUID table (16-byte UUIDs, plain-index addressed)
+ *   versioned_document.Document > Version.data (see `versionedDocument.ts`)
+ *   CRDT.Document
+ *     .object[]    object pool (`DocObject`s), addressed by index everywhere
+ *                  else via an ObjectID's `objectIndex` ("ref N" below)
+ *     .keyItem[]   key-name table (strings)
+ *     .uuidItem[]  UUID table (16-byte UUIDs, plain-index addressed)
+ *     .version     the document's version vector (see `mergeableDataPool.ts`)
  *
- * `pool[0]` is the table object: a `customMap` (field 13), repeated
+ * `pool[0]` is the table object: a `custom` object (field 13), repeated
  * `MapEntry { key: key-table-index, value: ObjectID }` pairs, with keys
  * `crRows`, `crColumns`, `cellColumns` (each a ref) resolved via the
  * key-name table.
  *
- * `crRows`/`crColumns` are `OrderedSet` objects (field 16): `.ordering.array`
- * is the true visual-order list - `.ordering.array.attachment[]` is the
- * ordered `{index (redundant, ignored on read), uuid}` entries, list
- * position = visual position; `.ordering.array.contents` is a hidden
- * per-character CRDT mirror of that same list (one U+FFFC per entry) that
- * Apple's own client apparently uses for concurrent-insert merge resolution -
- * this project's editing operations deliberately don't maintain it (see
- * `insertRowAt`/`insertColumnAt`/`deleteRowAt`/`deleteColumnAt` in
- * `tableEdit.ts`): our own decode never reads it, so it has no effect on our
- * round-trip guarantee, only a theoretical effect on how gracefully a real
- * Apple client would later merge concurrent edits against a row/column this
- * tool added or removed - flagged as a known limitation for the live-push
- * verification the write path still needs (dev notes, 2026-07-15T14:51).
- * `.ordering.contents` (of `OrderedSetOrdering`) is a translation/redirect
- * `Dictionary` resolving stale/duplicate identities from concurrent edits
- * onto their canonical counterpart - not an order signal itself, and never
- * populated for rows/columns this tool creates (see `tableEdit.ts`).
- * `.elements` (of `OrderedSet` itself) is a `Dictionary` of trivial
- * `{key: ref, value: ref}` self-pairs, one per live `array.attachment`
- * entry (confirmed via real captures) - bookkeeping this project's decode
- * never reads either, but cheap enough to keep in sync on every structural
- * edit, so `tableEdit.ts` does.
+ * `crRows`/`crColumns` are `tsOrderedSet` objects (field 16): `.array.array`
+ * (a `StringArray`) is the true visual-order list - its `.attachments[]` are
+ * the ordered `{attachmentIndex (redundant, ignored on read), contents (a
+ * 16-byte identity UUID)}` entries, list position = visual position; its
+ * `.contents` is a hidden per-character CRDT mirror of that same list (one
+ * U+FFFC per entry) that Apple's own client apparently uses for
+ * concurrent-insert merge resolution - this project's editing operations
+ * deliberately don't maintain it (see `tableEdit.ts`): our own decode never
+ * reads it, so it has no effect on our round-trip guarantee, only a
+ * theoretical effect on how gracefully a real Apple client would later merge
+ * concurrent edits against a row/column this tool added or removed - flagged
+ * as a known limitation for the live-push verification the write path still
+ * needs (dev notes, 2026-07-15T14:51).
+ * `.array.dictionary` is a translation/redirect `Dictionary` resolving
+ * stale/duplicate identities from concurrent edits onto their canonical
+ * counterpart - not an order signal itself, and never populated for
+ * rows/columns this tool creates (see `tableEdit.ts`).
+ * `.set` (of `OrderedSet` itself) is a `Dictionary` of trivial
+ * `{key: ref, value: ref}` self-pairs, one per live `attachments` entry
+ * (confirmed via real captures) - bookkeeping this project's decode never
+ * reads either, but cheap enough to keep in sync on every structural edit,
+ * so `tableEdit.ts` does.
  *
- * A row/column identity object is a `customMap` (`type` 2, confirmed via
+ * A row/column identity object is a `custom` object (`type` 2, confirmed via
  * real captures) with exactly one entry, key `UUIDIndex`, value a plain
  * inline number (`ObjectID.unsignedIntegerValue`) - the index into the
  * document-level UUID table. This value, not the object's own pool position,
  * is the join key used everywhere below. Real captures pair each row/column
  * with a second, otherwise-identical identity object plus a redirect entry
- * in `.ordering.contents` (never both referenced by the same live position -
+ * in `.array.dictionary` (never both referenced by the same live position -
  * apparently residue from Apple's own concurrent-edit history); this
  * project's own inserts create a single identity object and no redirect,
  * which decodes identically and needs no such pairing to be self-consistent
  * (see `tableEdit.ts` and the file's write-path dev note for why: the bar is
  * our own round-trip, not byte-identity with Apple's encoder).
  *
- * `cellColumns` is a `dictionary` (field 6), repeated `DictionaryElement
+ * `cellColumns` is a `dictionary` (field 6), repeated `Dictionary.Element
  * {key: ref to a column identity object, value: ref to that column's
  * row-map object}`. A row-map object has the identical shape: `{key: ref to
  * a row identity object, value: ref to a cell-text object}`. A cell-text
- * object is a `note` (field 10) whose `noteText` is the literal cell text -
- * the ground truth this project's decode reads directly, rather than
- * reconstructing visible text from `text_run` history the way the top-level
- * note body's decode does (see `tableCellEdit.ts` for why edits still have
- * to maintain that history correctly regardless).
+ * object is a `string` (a `topotext.String`, field 10) whose `.string` is
+ * the literal cell text - the ground truth this project's decode reads
+ * directly, rather than reconstructing visible text from `substring` history
+ * the way the top-level note body's decode does (see `tableCellEdit.ts` for
+ * why edits still have to maintain that history correctly regardless).
  *
  * Row 0 is not structurally special: deleting the header row goes through
  * the exact same mechanism as any other row (confirmed via a real capture,
@@ -83,13 +86,14 @@ import { compressNoteDocument, decompressNoteDocument } from "./noteText.js";
 import { renderMarkdownTable } from "./markdownTable.js";
 import type { MergeableDataPool } from "./mergeableDataPool.js";
 import {
-  MergableDataProtoSchema,
+  DocumentSchema as CrdtDocumentSchema,
   ObjectIDSchema,
-  type MergableDataProto,
-  type MergeableDataObjectEntry,
+  type Document as CrdtDocument,
+  type Document_DocObject as DocObject,
   type ObjectID,
   type OrderedSet as OrderedSetMessage,
-} from "./gen/notestore_pb.js";
+} from "./gen/crdt_pb.js";
+import { parseVersionedDocument, encodeVersionedDocument, type VersionedDocument } from "./versionedDocument.js";
 
 export const OBJECT_INDEX_FIELD = ObjectIDSchema.fields.find((f) => f.localName === "objectIndex")!;
 export const UNSIGNED_INTEGER_VALUE_FIELD = ObjectIDSchema.fields.find((f) => f.localName === "unsignedIntegerValue")!;
@@ -106,14 +110,17 @@ export const IDENTITY_OBJECT_TYPE = 2;
  * pool consistent through edits. */
 export type TablePool = MergeableDataPool;
 
-/** A parsed, editable table document: the full protobuf message (mutable in
- * place via `@bufbuild/protobuf`'s `create`), plus the three top-level pool
- * refs every table-editing operation needs. Deliberately does *not* cache a
- * resolved rows/columns/cells snapshot as document fields - those go stale
- * the moment a structural edit runs, which is every edit `tableEdit.ts`
- * makes; `resolveTable` below computes a fresh one on demand instead. */
+/** A parsed, editable table document: the outer `versioned_document` wrapper
+ * (kept so re-encoding preserves it verbatim), the inner `CRDT.Document`
+ * protobuf message (mutable in place via `@bufbuild/protobuf`'s `create`),
+ * plus the three top-level pool refs every table-editing operation needs.
+ * Deliberately does *not* cache a resolved rows/columns/cells snapshot as
+ * document fields - those go stale the moment a structural edit runs, which
+ * is every edit `tableEdit.ts` makes; `resolveTable` below computes a fresh
+ * one on demand instead. */
 export interface TableDocument extends TablePool {
-  message: MergableDataProto;
+  wrapper: VersionedDocument;
+  document: CrdtDocument;
   crRowsRef: number;
   crColumnsRef: number;
   cellColumnsRef: number;
@@ -186,18 +193,19 @@ export function cellKey(rowPosition: number, columnPosition: number): string {
 
 export function parseTableDocument(compressedMergeableData: Buffer): TableDocument {
   const raw = decompressNoteDocument(compressedMergeableData);
-  const message = fromBinary(MergableDataProtoSchema, raw);
-  const pool = poolFromMessage(message);
+  const wrapper = parseVersionedDocument(raw);
+  const document = fromBinary(CrdtDocumentSchema, wrapper.data);
+  const pool = poolFromMessage(document);
   assertLeftToRight(pool);
   const refs = resolveTableRefs(pool);
-  return { ...pool, message, ...refs };
+  return { ...pool, wrapper, document, ...refs };
 }
 
-/** `parseTableDocument` + `toBinary`/compress - always reflects `doc.message`
+/** `parseTableDocument` + `toBinary`/compress - always reflects `doc.document`
  * as currently mutated, since `doc.objects`/`.keyNames`/`.uuidTable` are the
  * same array references embedded in it. */
 export function encodeTableDocument(doc: TableDocument): Buffer {
-  const raw = toBinary(MergableDataProtoSchema, doc.message);
+  const raw = encodeVersionedDocument(doc.wrapper, toBinary(CrdtDocumentSchema, doc.document));
   return compressNoteDocument(raw);
 }
 
@@ -213,27 +221,28 @@ export function tableDocumentRoundTrips(compressedMergeableData: Buffer): boolea
     return false;
   }
   try {
-    const message = fromBinary(MergableDataProtoSchema, raw);
-    const pool = poolFromMessage(message);
+    const wrapper = parseVersionedDocument(raw);
+    const document = fromBinary(CrdtDocumentSchema, wrapper.data);
+    const pool = poolFromMessage(document);
     assertLeftToRight(pool);
     resolveTableRefs(pool);
-    const reencoded = toBinary(MergableDataProtoSchema, message);
+    const reencoded = encodeVersionedDocument(wrapper, toBinary(CrdtDocumentSchema, document));
     return bytesEqual(raw, reencoded);
   } catch {
     return false;
   }
 }
 
-function poolFromMessage(message: MergableDataProto): TablePool {
-  const data = message.mergableDataObject?.mergeableDataObjectData;
-  if (!data) {
-    throw new Error("Table MergeableData missing the object data field");
+function poolFromMessage(document: CrdtDocument): TablePool {
+  const version = document.version;
+  if (!version) {
+    throw new Error("Table document is missing its version vector (CRDT.Document field 1)");
   }
   return {
-    objects: data.mergeableDataObjectEntry,
-    keyNames: data.mergeableDataObjectKeyItem,
-    uuidTable: data.mergeableDataObjectUuidItem,
-    generationStamps: data.unknownField1,
+    objects: document.object,
+    keyNames: document.keyItem,
+    uuidTable: document.uuidItem,
+    version,
   };
 }
 
@@ -299,10 +308,10 @@ export function identityOf(pool: TablePool, uuidIndex: number): TableRowColumn {
   const uuidIndexKeyIndex = pool.keyNames.indexOf("UUIDIndex");
   for (let ref = 0; ref < pool.objects.length; ref += 1) {
     const entry = pool.objects[ref];
-    if (!entry?.customMap || entry.customMap.mapEntry.length !== 1) {
+    if (!entry?.custom || entry.custom.mapEntry.length !== 1) {
       continue;
     }
-    const [mapEntry] = entry.customMap.mapEntry;
+    const [mapEntry] = entry.custom.mapEntry;
     if (
       mapEntry &&
       mapEntry.key === uuidIndexKeyIndex &&
@@ -362,13 +371,14 @@ function assertLeftToRight(pool: TablePool): void {
   throw new Error("Table is missing its column-direction marker");
 }
 
-/** Resolves a `customMap` object (field 13) into its key-name -> ObjectID
- * pairs. Exported for `tableEdit.ts`: rebuilding pool[0] from scratch needs
- * to read its current `identity`/`crTableColumnDirection` entries first. */
-export function parseDictByName(pool: TablePool, entry: MergeableDataObjectEntry, label: string): Map<string, ObjectID> {
-  const customMap = entry.customMap;
+/** Resolves a `custom` object (a `CustomObject`, field 13) into its
+ * key-name -> ObjectID pairs. Exported for `tableEdit.ts`: rebuilding
+ * pool[0] from scratch needs to read its current `identity`/
+ * `crTableColumnDirection` entries first. */
+export function parseDictByName(pool: TablePool, entry: DocObject, label: string): Map<string, ObjectID> {
+  const customMap = entry.custom;
   if (!customMap) {
-    throw new Error(`Expected ${label} to be a dict (field 13)`);
+    throw new Error(`Expected ${label} to be a custom object (field 13)`);
   }
   const result = new Map<string, ObjectID>();
   for (const pair of customMap.mapEntry) {
@@ -437,30 +447,30 @@ export function parseOrderedSet(pool: TablePool, poolRef: number): ParsedOrdered
   if (!entry) {
     throw new Error(`Table pool reference ${poolRef} is out of range`);
   }
-  const orderedSet: OrderedSetMessage | undefined = entry.orderedSet;
+  const orderedSet: OrderedSetMessage | undefined = entry.tsOrderedSet;
   if (!orderedSet) {
     throw new Error(`Expected pool[${poolRef}] to be an OrderedSet (field 16)`);
   }
-  const ordering = orderedSet.ordering;
+  const ordering = orderedSet.array;
   if (!ordering) {
-    throw new Error("OrderedSet is missing its ordering field");
+    throw new Error("OrderedSet is missing its array (ordering) field");
   }
-  const array = ordering.array;
-  if (!array) {
-    throw new Error("OrderedSet ordering is missing its array field");
+  const stringArray = ordering.array;
+  if (!stringArray) {
+    throw new Error("OrderedSet ordering is missing its string-array field");
   }
 
-  const arrayUuidIndexes = array.attachment.map((attachment) => findUuidTableIndex(pool, attachment.uuid));
+  const arrayUuidIndexes = stringArray.attachments.map((attachment) => findUuidTableIndex(pool, attachment.contents));
 
   const contents: ParsedOrderedSet["contents"] = [];
-  if (ordering.contents) {
-    for (const pair of ordering.contents.element) {
+  if (ordering.dictionary) {
+    for (const pair of ordering.dictionary.element) {
       if (!pair.key || !pair.value) {
-        throw new Error("OrderedSet contents pair is missing its key or value");
+        throw new Error("OrderedSet redirect pair is missing its key or value");
       }
       contents.push({
-        keyRef: resolveRef(pair.key, "contents key"),
-        valueRef: resolveRef(pair.value, "contents value"),
+        keyRef: resolveRef(pair.key, "redirect key"),
+        valueRef: resolveRef(pair.value, "redirect value"),
       });
     }
   }
@@ -483,7 +493,7 @@ export function computePositions(pool: TablePool, orderedSet: ParsedOrderedSet):
 // --- cellColumns / row-map / cell text ----------------------------------
 
 /** `cellColumns` and each column's row-map share the same `dictionary`
- * (field 6), repeated `DictionaryElement {key: ref, value: ref}` shape. */
+ * (field 6), repeated `Dictionary.Element {key: ref, value: ref}` shape. */
 export function parseRefPairList(pool: TablePool, poolRef: number, label: string): Array<{ a: ObjectID; b: ObjectID }> {
   const entry = pool.objects[poolRef];
   if (!entry) {
@@ -507,11 +517,11 @@ export function resolveCellText(pool: TablePool, poolRef: number): string {
   if (!entry) {
     throw new Error(`Table pool reference ${poolRef} is out of range`);
   }
-  const note = entry.note;
-  if (!note) {
+  const str = entry.string;
+  if (!str) {
     throw new Error(`Expected pool[${poolRef}] to be a cell-text object (field 10)`);
   }
-  return note.noteText;
+  return str.string;
 }
 
 // --- small shared helpers -------------------------------------------------

@@ -49,9 +49,10 @@ for (const revision of TABLE_WRITE_PATH_REVISIONS) {
 }
 
 // The long-lived-table snapshots are the regression proof for
-// MergeableDataObjectData's unknown_field_2/unknown_field_7 (see
-// realFixtures.ts): before those were declared, both failed this exact gate
-// on field ordering alone, blocking every kind of push edit on that table.
+// CRDT.Document's startVersion/ttTimestamp (fields 2/7, the pre-alignment
+// unknown_field_2/unknown_field_7 - see realFixtures.ts): before those were
+// declared, both failed this exact gate on field ordering alone, blocking
+// every kind of push edit on that table.
 for (const revision of TABLE_LONG_LIVED_SNAPSHOTS) {
   test(`tableDocumentRoundTrips is true for long-lived table revision ${revision.tag}`, () => {
     assert.equal(tableDocumentRoundTrips(Buffer.from(revision.base64, "base64")), true);
