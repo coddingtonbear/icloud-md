@@ -596,12 +596,32 @@ export function firstZone(body: unknown): ParsedZone {
     throw new CloudKitRequestFailedError(`changes/zone failed for a zone: ${zone.serverErrorCode} (${reason})`);
   }
 
-  const records = Array.isArray(zone.records) ? zone.records.map(parseRecord) : undefined;
+  const records = Array.isArray(zone.records) ? zone.records.map(parseZoneRecord) : undefined;
   return {
     moreComing: typeof zone.moreComing === "boolean" ? zone.moreComing : undefined,
     syncToken: typeof zone.syncToken === "string" ? zone.syncToken : undefined,
     records,
   };
+}
+
+/**
+ * `changes/zone` reports a deletion that happened since the last sync token
+ * the same way `records/modify`'s `forceDelete` reports success (see
+ * `parseNoteDeleteResponse`): `{"recordName": "...", "deleted": true}`, with
+ * no `recordType`/`fields` at all - confirmed live 2026-07-16 after deleting
+ * a note and then pulling. `parseRecord` requires those fields for a live
+ * record and throws on this shape. We don't know the deleted record's
+ * original `recordType` from the tombstone alone, but `pull` only acts on a
+ * deletion when the `recordName` matches something it already tracks as a
+ * Note, so tagging it "Note" here is harmless even if the tombstone was for
+ * something else - the lookup by `recordName` just won't match and it's
+ * skipped, same as it would be if not "Note" going in.
+ */
+function parseZoneRecord(value: unknown): CloudKitRecord {
+  if (isRecord(value) && typeof value.recordName === "string" && value.deleted === true && !isRecord(value.fields)) {
+    return { recordName: value.recordName, recordType: "Note", fields: {}, deleted: true };
+  }
+  return parseRecord(value);
 }
 
 function parseRecord(value: unknown): CloudKitRecord {

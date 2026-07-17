@@ -63,6 +63,25 @@ test("firstZone throws on a zone-level server error instead of returning an empt
   assert.throws(() => firstZone(body), /BAD_REQUEST.*Reverse sync of share db is unsupported/);
 });
 
+test("firstZone parses a deletion tombstone record instead of throwing on its missing recordType/fields", () => {
+  // Real shape observed live 2026-07-16: a note deleted since the last sync
+  // token comes back in `changes/zone` as `{recordName, deleted: true}`,
+  // with no `recordType`/`fields` - the same shape `forceDelete` returns on
+  // a successful delete (see parseNoteDeleteResponse).
+  const body = {
+    zones: [
+      {
+        zoneID: { zoneName: "Notes", zoneType: "REGULAR_CUSTOM_ZONE" },
+        syncToken: "AQAAAZ9XZ9gy",
+        records: [{ recordName: "deleted-note-1", deleted: true }],
+      },
+    ],
+  };
+
+  const zone = firstZone(body);
+  assert.deepEqual(zone.records, [{ recordName: "deleted-note-1", recordType: "Note", fields: {}, deleted: true }]);
+});
+
 function makeRecord(recordName: string, fields: CloudKitRecord["fields"], changeTag?: string): CloudKitRecord {
   return { recordName, recordType: "Note", fields, recordChangeTag: changeTag };
 }
