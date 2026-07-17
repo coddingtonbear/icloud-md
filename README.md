@@ -372,6 +372,15 @@ a standalone CLI.
 
 ## Caveats
 
+- **Apple Notes' own folder structure is deliberately ignored.** Whatever
+  folders you've organized notes into inside the Notes app itself (Notes'
+  `Folder` records) are flattened away — `clone`/`pull` write every note
+  from every one of your Notes folders into one single local directory, with
+  no subdirectories mirroring that structure. The `Folder` reference on a
+  note record is only consulted to detect Trash (so trashed notes can be
+  skipped); it's never used to group output. This is intentional behavior
+  today, though mirroring the account's folder tree as nested directories is
+  under consideration (see the project's dev notes).
 - This relies entirely on an undocumented, private API that Apple can change
   without notice.
 - It very likely depends on **Advanced Data Protection being disabled** for
