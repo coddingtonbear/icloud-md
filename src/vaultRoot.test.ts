@@ -15,8 +15,8 @@ async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
 }
 
 async function makeVault(root: string): Promise<void> {
-  await mkdir(path.join(root, ".icloud-notes-sync"), { recursive: true });
-  await writeFile(path.join(root, ".icloud-notes-sync", "state.json"), "{}", "utf-8");
+  await mkdir(path.join(root, ".icloud-md"), { recursive: true });
+  await writeFile(path.join(root, ".icloud-md", "state.json"), "{}", "utf-8");
 }
 
 test("findVaultRoot finds the vault from a nested directory", () =>

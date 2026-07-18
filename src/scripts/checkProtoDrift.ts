@@ -22,7 +22,7 @@ async function generatedFileNames(dir: string): Promise<string[]> {
 }
 
 async function main(): Promise<void> {
-  const tmpDir = await mkdtemp(path.join(tmpdir(), "icloud-notes-sync-proto-check-"));
+  const tmpDir = await mkdtemp(path.join(tmpdir(), "icloud-md-proto-check-"));
   try {
     const template = {
       version: "v2",

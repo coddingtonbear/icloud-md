@@ -24,7 +24,7 @@ export class IcloudNotesSyncError extends Error {
 export class AuthenticationExpiredError extends IcloudNotesSyncError {
   constructor(status: number, detail: string) {
     super(`Not authenticated (HTTP ${status}): ${detail}`, {
-      hint: 'Run "icloud-notes reauthenticate" to sign in again.',
+      hint: 'Run "icloud-md reauthenticate" to sign in again.',
     });
   }
 }
@@ -39,7 +39,7 @@ export class SilentReauthFailedError extends IcloudNotesSyncError {
   constructor(message: string, options: ErrorOptions = {}) {
     super(message, {
       ...options,
-      hint: 'Run "icloud-notes reauthenticate" to sign in interactively.',
+      hint: 'Run "icloud-md reauthenticate" to sign in interactively.',
     });
   }
 }
@@ -54,8 +54,8 @@ export class UntrackedFileError extends IcloudNotesSyncError {
 
 export class NotClonedDirectoryError extends IcloudNotesSyncError {
   constructor(targetDir: string) {
-    super(`${targetDir} doesn't look like a cloned notes directory (no .icloud-notes-sync/state.json).`, {
-      hint: 'Run "icloud-notes clone <directory>" first.',
+    super(`${targetDir} doesn't look like a cloned notes directory (no .icloud-md/state.json).`, {
+      hint: 'Run "icloud-md clone <directory>" first.',
     });
   }
 }
@@ -71,7 +71,7 @@ export class AmbiguousTrackedFileError extends IcloudNotesSyncError {
 export class UnsupportedVaultLayoutError extends IcloudNotesSyncError {
   constructor(targetDir: string) {
     super(`${targetDir} was cloned before folder support and uses the old flat layout, which this version no longer reads.`, {
-      hint: 'Re-clone into a fresh directory: "icloud-notes clone <new-directory>". (This tool made no changes.)',
+      hint: 'Re-clone into a fresh directory: "icloud-md clone <new-directory>". (This tool made no changes.)',
     });
   }
 }
@@ -80,7 +80,7 @@ export class MissingSessionFileError extends IcloudNotesSyncError {
   constructor(sessionPath: string, options: ErrorOptions = {}) {
     super(`No session file found at ${sessionPath}.`, {
       ...options,
-      hint: 'Run "icloud-notes reauthenticate" (or "npm run import-har -- <path-to.har>" from a browser HAR export) to create one.',
+      hint: 'Run "icloud-md reauthenticate" (or "npm run import-har -- <path-to.har>" from a browser HAR export) to create one.',
     });
   }
 }
@@ -88,7 +88,7 @@ export class MissingSessionFileError extends IcloudNotesSyncError {
 /** The session file exists but isn't (or is no longer) a valid `IcloudSession` - hand-edited, truncated, or from an incompatible version. */
 export class CorruptSessionFileError extends IcloudNotesSyncError {
   constructor(message: string) {
-    super(message, { hint: 'Run "icloud-notes reauthenticate" to regenerate it.' });
+    super(message, { hint: 'Run "icloud-md reauthenticate" to regenerate it.' });
   }
 }
 
@@ -119,13 +119,13 @@ export class NotesUnavailableError extends IcloudNotesSyncError {
   }
 }
 
-/** A tracked directory's `.icloud-notes-sync/state.json` doesn't match the shape `clone`/`pull`/`push` produce - hand-edited, truncated, or from an incompatible version. */
+/** A tracked directory's `.icloud-md/state.json` doesn't match the shape `clone`/`pull`/`push` produce - hand-edited, truncated, or from an incompatible version. */
 export class CorruptStateFileError extends IcloudNotesSyncError {
   constructor(message: string) {
     super(message, {
       hint:
         "This usually means state.json was hand-edited or written by an incompatible version. If you don't have " +
-        "local edits worth preserving, remove .icloud-notes-sync/ and run \"icloud-notes clone\" again into a fresh directory.",
+        "local edits worth preserving, remove .icloud-md/ and run \"icloud-md clone\" again into a fresh directory.",
     });
   }
 }
@@ -133,8 +133,8 @@ export class CorruptStateFileError extends IcloudNotesSyncError {
 /** `clone` only ever performs the initial export into a directory - mirrors `git clone`'s own refusal to run against a non-empty destination. */
 export class AlreadyClonedDirectoryError extends IcloudNotesSyncError {
   constructor(targetDir: string) {
-    super(`${targetDir} is already a cloned notes directory (.icloud-notes-sync/state.json exists).`, {
-      hint: 'Run "icloud-notes pull" instead to fetch changes into an existing clone.',
+    super(`${targetDir} is already a cloned notes directory (.icloud-md/state.json exists).`, {
+      hint: 'Run "icloud-md pull" instead to fetch changes into an existing clone.',
     });
   }
 }
@@ -142,10 +142,10 @@ export class AlreadyClonedDirectoryError extends IcloudNotesSyncError {
 /** A folder's state.json predates per-folder account binding (or was hand-edited to drop it) - there's no account to resolve a session for. */
 export class UnboundAccountError extends IcloudNotesSyncError {
   constructor(targetDir: string) {
-    super(`${targetDir} has no account bound to it (missing "account" in .icloud-notes-sync/state.json).`, {
+    super(`${targetDir} has no account bound to it (missing "account" in .icloud-md/state.json).`, {
       hint:
         "This folder may predate per-folder account binding. If you don't have local edits worth preserving, " +
-        'remove .icloud-notes-sync/ and run "icloud-notes clone" again into a fresh directory.',
+        'remove .icloud-md/ and run "icloud-md clone" again into a fresh directory.',
     });
   }
 }
@@ -188,7 +188,7 @@ export class CloudKitRequestFailedError extends IcloudNotesSyncError {
 export class UnknownVersionSnapshotError extends IcloudNotesSyncError {
   constructor(id: string, fileName: string) {
     super(`No version snapshot with id "${id}" found for "${fileName}".`, {
-      hint: `Run "icloud-notes history ${fileName}" to see available snapshot ids.`,
+      hint: `Run "icloud-md history ${fileName}" to see available snapshot ids.`,
     });
   }
 }
@@ -201,7 +201,7 @@ export class NoteDeleteRejectedError extends IcloudNotesSyncError {
   constructor(fileName: string, serverErrorCode: string, reason: string | undefined) {
     const detail = reason ? ` (${reason})` : "";
     super(`Can't delete "${fileName}": the server rejected it: ${serverErrorCode}${detail}.`, {
-      hint: 'Run "icloud-notes pull" to refresh local state, then try again.',
+      hint: 'Run "icloud-md pull" to refresh local state, then try again.',
     });
   }
 }
@@ -212,8 +212,8 @@ export class UnknownObjectError extends IcloudNotesSyncError {
   constructor(recordName: string, options: { maybeDeleted?: boolean } = {}) {
     super(`No object named "${recordName}" exists in the Notes zone.`, {
       hint: options.maybeDeleted
-        ? 'It may already be permanently deleted. Run "icloud-notes object list" to see what exists.'
-        : 'Run "icloud-notes object list" to see what exists (recordNames are case-sensitive).',
+        ? 'It may already be permanently deleted. Run "icloud-md object list" to see what exists.'
+        : 'Run "icloud-md object list" to see what exists (recordNames are case-sensitive).',
     });
   }
 }
@@ -225,7 +225,7 @@ export class ObjectForceDeleteBlockedError extends IcloudNotesSyncError {
   constructor(recordName: string, blockers: readonly { recordName: string; recordType: string }[]) {
     const listed = blockers.map((blocker) => `${blocker.recordType} ${blocker.recordName}`).join(", ");
     super(`Can't force-delete "${recordName}": it's referenced by record(s) --force won't delete for you: ${listed}.`, {
-      hint: 'Delete those explicitly first ("icloud-notes object delete <recordName>") if you really mean to, then retry.',
+      hint: 'Delete those explicitly first ("icloud-md object delete <recordName>") if you really mean to, then retry.',
     });
   }
 }
@@ -236,7 +236,7 @@ export class ObjectForceDeleteBlockedError extends IcloudNotesSyncError {
 export class ObjectDeleteNeedsConfirmationError extends IcloudNotesSyncError {
   constructor(recordType: string, recordName: string) {
     super(`Deleting a ${recordType} record affects everything under it, not just the record itself.`, {
-      hint: `Re-run with --yes if you really mean it: "icloud-notes object delete ${recordName} --yes".`,
+      hint: `Re-run with --yes if you really mean it: "icloud-md object delete ${recordName} --yes".`,
     });
   }
 }
@@ -248,7 +248,7 @@ export class ObjectDeleteNeedsConfirmationError extends IcloudNotesSyncError {
 export class VersionContentUnavailableError extends IcloudNotesSyncError {
   constructor(reason: string) {
     super(`Can't complete this operation: ${reason}.`, {
-      hint: 'Run "icloud-notes pull" to refresh local state, then try again.',
+      hint: 'Run "icloud-md pull" to refresh local state, then try again.',
     });
   }
 }

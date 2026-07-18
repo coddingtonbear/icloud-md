@@ -128,7 +128,7 @@ async function verifyAuth(targetDirArg: string | undefined): Promise<void> {
 
 async function clone(targetDirArg: string | undefined): Promise<void> {
   if (!targetDirArg) {
-    console.error("Usage: icloud-notes clone <directory>");
+    console.error("Usage: icloud-md clone <directory>");
     process.exitCode = 1;
     return;
   }
@@ -147,7 +147,7 @@ async function push(args: string[]): Promise<void> {
   const positional = args.filter((arg) => !arg.startsWith("--"));
   const unknownFlag = flags.find((flag) => flag !== "--dry-run");
   if (unknownFlag || positional.length > 1) {
-    console.error("Usage: icloud-notes push [directory] [--dry-run]");
+    console.error("Usage: icloud-md push [directory] [--dry-run]");
     process.exitCode = 1;
     return;
   }
@@ -161,7 +161,7 @@ async function push(args: string[]): Promise<void> {
 
 async function status(args: string[]): Promise<void> {
   if (args.length > 1) {
-    console.error("Usage: icloud-notes status [directory]");
+    console.error("Usage: icloud-md status [directory]");
     process.exitCode = 1;
     return;
   }
@@ -175,7 +175,7 @@ async function status(args: string[]): Promise<void> {
 async function restore(args: string[]): Promise<void> {
   const [fileArg, dirArg] = args;
   if (!fileArg) {
-    console.error("Usage: icloud-notes restore <file> [directory]");
+    console.error("Usage: icloud-md restore <file> [directory]");
     process.exitCode = 1;
     return;
   }
@@ -189,7 +189,7 @@ async function deleteNote(args: string[]): Promise<void> {
   const [fileArg, dirArg] = positional;
   if (unknownFlag || !fileArg || positional.length > 2) {
     console.error(
-      "Usage: icloud-notes delete <file> [directory] [--hard]\n" +
+      "Usage: icloud-md delete <file> [directory] [--hard]\n" +
         "  Without --hard, moves the note to Recently Deleted (recoverable in Notes for ~30 days); " +
         "--hard permanently deletes it, including a note already soft-deleted by this tool.",
     );
@@ -203,7 +203,7 @@ async function deleteNote(args: string[]): Promise<void> {
 }
 
 const OBJECT_USAGE =
-  "Usage: icloud-notes object <list|show|delete> ...\n" +
+  "Usage: icloud-md object <list|show|delete> ...\n" +
   "  object list [directory] [--type <recordType>] [--broken] [--orphaned] [--trashed] [--untracked] [--json]\n" +
   "      List every raw CloudKit record in the account's Notes zone (all types, including Attachment/Media\n" +
   "      records the sync path never fetches), with lifecycle state, references, local tracking, and - for\n" +
@@ -287,7 +287,7 @@ async function history(args: string[]): Promise<void> {
   const [fileArg, dirArg] = positional;
   if (unknownFlag || !fileArg || positional.length > 2) {
     console.error(
-      "Usage: icloud-notes history <file> [directory] [--records]\n" +
+      "Usage: icloud-md history <file> [directory] [--records]\n" +
         "  Without --records, shows the epoch timeline (one line per coordinated pull/push capture); " +
         "--records shows the flat per-record snapshot listing instead.",
     );
@@ -298,9 +298,9 @@ async function history(args: string[]): Promise<void> {
 }
 
 const DIFF_USAGE =
-  "Usage: icloud-notes diff <file> <ref> [directory]\n" +
+  "Usage: icloud-md diff <file> <ref> [directory]\n" +
   "  <ref> is a snapshot id (diffed against the current remote copy) or <from>..<to> (two snapshot ids) - " +
-  'ids come from "icloud-notes history <file>".';
+  'ids come from "icloud-md history <file>".';
 
 async function diff(args: string[]): Promise<void> {
   const [fileArg, refArg, dirArg] = args;
@@ -333,7 +333,7 @@ async function revert(args: string[]): Promise<void> {
   const [fileArg, idArg, dirArg] = positional;
   if (unknownFlag || !fileArg || !idArg || positional.length > 3) {
     console.error(
-      "Usage: icloud-notes revert <file> <id> [directory] [--yes]\n" +
+      "Usage: icloud-md revert <file> <id> [directory] [--yes]\n" +
         "  Without --yes, reports what would happen without writing anything - this is a real remote write.",
     );
     process.exitCode = 1;
@@ -347,13 +347,13 @@ async function revert(args: string[]): Promise<void> {
 }
 
 const BUG_REPORT_USAGE =
-  "Usage: icloud-notes bug-report --since <duration> [directory]\n" +
+  "Usage: icloud-md bug-report --since <duration> [directory]\n" +
   '  <duration> is a number followed by "m" (minutes), "h" (hours), or "d" (days) - e.g. 30m, 6h, 2d.\n' +
   "  A range is required rather than assumed, since the log is shared across every account used on this machine.\n" +
   "  Note titles, folder/sharer names, and the account's dsid/appleId are replaced with stable aliases in the\n" +
   "  report - see its \"Redacted identifiers\" section.\n" +
   "\n" +
-  "Usage: icloud-notes bug-report --identify <file> [directory]\n" +
+  "Usage: icloud-md bug-report --identify <file> [directory]\n" +
   "  Prints the alias a bug report will use for <file>, so you can reference it (e.g. \"note-14\") without\n" +
   "  sharing its real title.";
 
@@ -449,7 +449,7 @@ async function main(): Promise<void> {
         return;
       default:
         console.error(
-          "Usage: icloud-notes <command>\n\n" +
+          "Usage: icloud-md <command>\n\n" +
             "Commands:\n" +
             "  clone <directory>     Fetch all Notes into a fresh local directory; signs in via a browser window " +
             "the first time a directory (or a new account) is used\n" +
@@ -466,7 +466,7 @@ async function main(): Promise<void> {
             "rather than discarded. --hard permanently deletes instead - works on attachment-bearing and even " +
             "unparseable notes, and on a note this tool already soft-deleted\n" +
             "  object <list|show|delete>  Record-level plumbing: inspect and permanently delete raw CloudKit objects " +
-            'by ID - the repair kit for broken note objects. Run "icloud-notes object" for details\n' +
+            'by ID - the repair kit for broken note objects. Run "icloud-md object" for details\n' +
             "  history <file> [directory] [--records]  List a note's epoch timeline, newest first (--records for the " +
             "flat per-record snapshot listing instead)\n" +
             "  diff <file> <ref> [directory]  Diff two snapshots, or one snapshot against the current remote copy - " +

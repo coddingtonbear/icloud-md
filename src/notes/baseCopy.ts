@@ -8,7 +8,7 @@ import { isEnoent } from "../fsUtil.js";
  * for `pull`'s 3-way (diff3) merge - it only advances once a note is clean
  * or a conflict has been resolved, never while a conflict is outstanding.
  */
-const BASE_DIR_SEGMENTS = [".icloud-notes-sync", "base"];
+const BASE_DIR_SEGMENTS = [".icloud-md", "base"];
 
 export async function readBaseCopy(targetDir: string, recordName: string): Promise<string | undefined> {
   try {

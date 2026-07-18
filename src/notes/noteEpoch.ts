@@ -15,7 +15,7 @@ import { listVersions } from "./versionHistory.js";
  * `revert` can treat a note as one coordinated unit. See the "Whole-note
  * coordinated version epochs" investigation.
  */
-const HISTORY_DIR_SEGMENTS = [".icloud-notes-sync", "history"];
+const HISTORY_DIR_SEGMENTS = [".icloud-md", "history"];
 const EPOCH_SUBDIR = "epochs";
 
 export interface NoteEpoch {

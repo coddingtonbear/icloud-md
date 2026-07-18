@@ -121,7 +121,7 @@ export async function runBugReport(targetDir: string, since: Date, options: BugR
   await writeAliasStore(targetDir, aliasStore);
 
   const timestamp = formatFileTimestamp(generatedAt);
-  const outputPath = path.join(targetDir, `icloud-notes-bug-report-${timestamp}.md`);
+  const outputPath = path.join(targetDir, `icloud-md-bug-report-${timestamp}.md`);
   await writeFile(
     outputPath,
     renderBundle({ environment, lastError: redactedLastError, state: redactedState, logEntries: redactedLogEntries, since, targetDir, generatedAt }),
@@ -136,7 +136,7 @@ export async function runBugReport(targetDir: string, since: Date, options: BugR
   const contentPreview = buildContentPreview(logEntries);
   let contentPreviewPath: string | undefined;
   if (contentPreview.length > 0) {
-    contentPreviewPath = path.join(targetDir, `icloud-notes-bug-report-${timestamp}.content-preview.md`);
+    contentPreviewPath = path.join(targetDir, `icloud-md-bug-report-${timestamp}.content-preview.md`);
     await writeFile(contentPreviewPath, renderContentPreview(contentPreview, generatedAt), "utf-8");
     console.log(
       `Wrote a decoded-content preview to ${contentPreviewPath} - review it before sharing ${outputPath} anywhere. ` +
@@ -180,7 +180,7 @@ function renderBundle(input: {
   const { environment, lastError, state, logEntries, since, targetDir, generatedAt } = input;
   const lines: string[] = [];
 
-  lines.push("# icloud-notes-sync bug report", "", `Generated: ${generatedAt.toISOString()}`, "");
+  lines.push("# icloud-md bug report", "", `Generated: ${generatedAt.toISOString()}`, "");
 
   lines.push("## Environment");
   lines.push(`- Tool version: ${environment.toolVersion}`);
@@ -192,7 +192,7 @@ function renderBundle(input: {
     "Note titles, folder/sharer names, and this account's Apple ID/dsid have been replaced below with stable " +
       "aliases (`note-N`, `folder-N`, `sharer-N`, `attachment-N`) local to this vault - the same real item gets " +
       "the same alias every time this command runs here. To find a specific note's alias without sharing its " +
-      "title, run `icloud-notes bug-report --identify <file>`.",
+      "title, run `icloud-md bug-report --identify <file>`.",
     "",
   );
 

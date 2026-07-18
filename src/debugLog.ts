@@ -5,7 +5,7 @@ import { isEnoent } from "./fsUtil.js";
 
 /**
  * All request/response troubleshooting data lives here rather than on stdout,
- * in the same shared ~/.config/icloud-notes-sync/ directory that holds every
+ * in the same shared ~/.config/icloud-md/ directory that holds every
  * account's own subdirectory (see accountStore.ts) - this log itself stays
  * one file across all accounts, since it's just raw (redacted) HTTP traffic.
  */

@@ -1,4 +1,4 @@
-# icloud-notes-sync
+# icloud-md
 
 A command-line tool for syncing Apple Notes (via iCloud) to a local folder
 of plain files — and back again. `git`-flavored in spirit: a single binary,
@@ -7,9 +7,9 @@ background daemon. It doesn't touch git itself, but the folder it writes is
 exactly the kind of thing you'd want to put under git.
 
 ```
-$ icloud-notes clone ./my-notes
+$ icloud-md clone ./my-notes
 $ cd my-notes && $EDITOR "Grocery list.md"
-$ icloud-notes push
+$ icloud-md push
 ```
 
 ## Why
@@ -26,7 +26,7 @@ This tool exists to fix that:
 - **Built-in version history**: Every `pull`/`push` that
   changes a note snapshots it, so you can inspect or roll back *any* past
   version of a note — even ones you never `pull`ed while they existed — via
-  `icloud-notes history`/`diff`/`revert`.
+  `icloud-md history`/`diff`/`revert`.
 - **Conflict-awareness**: If a note changed in iCloud
   since your last sync *and* you edited it locally, `pull` does a real
   three-way merge and only asks you to resolve the parts that actually
@@ -72,16 +72,16 @@ This tool exists to fix that:
 Requires Node.js 20+.
 
 ```
-npm install -g icloud-notes-sync
+npm install -g icloud-md
 ```
 
-This puts the `icloud-notes` command on your `PATH`.
+This puts the `icloud-md` command on your `PATH`.
 
 Building from a clone of this repo instead:
 
 ```
-git clone https://github.com/coddingtonbear/icloud-notes-sync.git
-cd icloud-notes-sync
+git clone https://github.com/coddingtonbear/icloud-md.git
+cd icloud-md
 npm install
 npm run build && npm link
 ```
@@ -91,7 +91,7 @@ npm run build && npm link
 ## Quick start
 
 ```
-icloud-notes clone ./my-notes
+icloud-md clone ./my-notes
 ```
 
 The first run downloads a Chromium browser for sign-in automatically (a
@@ -109,18 +109,18 @@ After that:
 
 ```
 cd my-notes
-icloud-notes status        # what would `push` do right now?
-icloud-notes pull          # fetch remote changes, merging with local edits
-icloud-notes push          # send local changes back to iCloud
+icloud-md status        # what would `push` do right now?
+icloud-md pull          # fetch remote changes, merging with local edits
+icloud-md push          # send local changes back to iCloud
 ```
 
 Later sign-ins for the same Apple ID typically skip 2FA — each account gets
 its own persistent browser profile under
-`~/.config/icloud-notes-sync/accounts/<dsid>/`, which Apple treats as a
+`~/.config/icloud-md/accounts/<dsid>/`, which Apple treats as a
 trusted, returning browser. Credentials are never stored inside the vault
 folder itself (a vault is exactly the kind of thing that gets copied,
 zipped, or synced elsewhere); a cloned folder's own
-`.icloud-notes-sync/state.json` only records *which* account it's bound to.
+`.icloud-md/state.json` only records *which* account it's bound to.
 
 ## Commands
 
@@ -135,7 +135,7 @@ zipped, or synced elsewhere); a cloned folder's own
 | `history <file> [directory] [--records]` | List a note's version-history timeline, newest first. |
 | `diff <file> <ref> [directory]` | Diff two history snapshots, or one snapshot against the current remote copy. `<ref>` is a snapshot/epoch id from `history`, or `<from>..<to>`. |
 | `revert <file> <id> [directory] [--yes]` | Write a historical snapshot back to the server — the escape hatch if a note gets corrupted or a bad edit gets pushed. A real remote write; without `--yes` it only reports what it would do. |
-| `object <list\|show\|delete>` | Record-level plumbing for repairing broken notes: list every raw CloudKit record in your Notes zone with health/reference info, inspect one record in full, or permanently delete one by ID. Run `icloud-notes object` with no arguments for the full usage. |
+| `object <list\|show\|delete>` | Record-level plumbing for repairing broken notes: list every raw CloudKit record in your Notes zone with health/reference info, inspect one record in full, or permanently delete one by ID. Run `icloud-md object` with no arguments for the full usage. |
 | `reauthenticate [directory]` | Force a fresh sign-in for a directory's already-bound account. Useful if a session goes stale and silent recovery can't get back in on its own. Refuses if you sign into a different Apple ID than the one the directory was cloned for. |
 | `verify-auth [directory]` | Check whether a directory's bound account session is still valid. |
 | `bug-report --since <duration> [directory]` | Bundle version info, the last error, local sync state, and recent debug-log entries into a file to attach to a GitHub issue (e.g. `--since 2h`). |
@@ -294,7 +294,7 @@ For each of these, read more below.
 Run
 
 ```
-icloud-notes bug-report --since <duration>
+icloud-md bug-report --since <duration>
 ```
 
 (e.g. `--since 10m`, run against the affected directory).
@@ -360,7 +360,7 @@ of any files in your notes. To find relevant log entries, you will need
 to get the bug report identity for any relevant files; to do that, you can run:
 
 ```
-icloud-notes bug-report --identify FILENAME
+icloud-md bug-report --identify FILENAME
 ```
 
 identities for each file you discuss in your reproduction steps must be included

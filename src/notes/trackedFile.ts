@@ -11,7 +11,7 @@ export interface TrackedNote {
 /**
  * Matches a user-supplied file argument against tracked entries' vault-root-
  * relative `file` paths, git-style: the argument resolves against the
- * current directory first (so `icloud-notes delete Pie.md` works from inside
+ * current directory first (so `icloud-md delete Pie.md` works from inside
  * `Recipes/`, and `../Work/Standup.md` works from a sibling), with a
  * unique-basename fallback so a bare name still resolves from anywhere when
  * it's unambiguous. Returns undefined when nothing matches; throws

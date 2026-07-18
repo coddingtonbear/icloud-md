@@ -71,7 +71,7 @@ test("bundles environment info, last error, state, and in-range log entries into
 
     assert.equal(summary.logEntryCount, 1);
     const contents = await readFile(summary.outputPath, "utf-8");
-    assert.match(contents, /# icloud-notes-sync bug report/);
+    assert.match(contents, /# icloud-md bug report/);
     assert.match(contents, /push failed/);
     assert.match(contents, /"note": "inRange"/);
     assert.doesNotMatch(contents, /tooOld/);
@@ -233,7 +233,7 @@ test("handles a directory with no state.json and no recorded error gracefully", 
 
     const contents = await readFile(summary.outputPath, "utf-8");
     assert.match(contents, /No failure has been recorded/);
-    assert.match(contents, /No `\.icloud-notes-sync\/state\.json` found/);
+    assert.match(contents, /No `\.icloud-md\/state\.json` found/);
     assert.match(contents, /No debug log entries fall within this time range\./);
   }));
 
@@ -260,13 +260,13 @@ test("writes the bundle into the target directory", () =>
     const summary = await runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath });
 
     assert.equal(path.dirname(summary.outputPath), targetDir);
-    assert.match(path.basename(summary.outputPath), /^icloud-notes-bug-report-.*\.md$/);
+    assert.match(path.basename(summary.outputPath), /^icloud-md-bug-report-.*\.md$/);
   }));
 
 test("reports a corrupt state.json instead of crashing", () =>
   withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
-    await mkdir(path.join(targetDir, ".icloud-notes-sync"), { recursive: true });
-    await writeFile(path.join(targetDir, ".icloud-notes-sync", "state.json"), "{}", "utf-8");
+    await mkdir(path.join(targetDir, ".icloud-md"), { recursive: true });
+    await writeFile(path.join(targetDir, ".icloud-md", "state.json"), "{}", "utf-8");
 
     const summary = await runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath });
 

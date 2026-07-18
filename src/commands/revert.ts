@@ -120,7 +120,7 @@ export async function runRevert(targetDir: string, fileArg: string, id: string, 
   }
 
   console.log(`Reverted ${targetDescription} to the snapshot captured ${snapshot.timestamp}.`);
-  console.log(`Run "icloud-notes pull" to bring this change into your local copy.`);
+  console.log(`Run "icloud-md pull" to bring this change into your local copy.`);
 }
 
 /** The safety gate `push` already applies to new edits, applied here to a
@@ -276,5 +276,5 @@ async function runEpochRevert(
     console.log(`  - ${notice}`);
   }
   console.log(`No rollback is performed on partial failure - check each line above.`);
-  console.log(`Run "icloud-notes pull" to bring these changes into your local copy.`);
+  console.log(`Run "icloud-md pull" to bring these changes into your local copy.`);
 }

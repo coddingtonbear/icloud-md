@@ -6,7 +6,7 @@ Thanks for your interest in contributing! Contributions are welcome, but a bit o
 
 Before opening a pull request—especially for **new features or behavioral changes**—please start a discussion first:
 
-👉 [https://github.com/coddingtonbear/icloud-notes-sync/discussions](https://github.com/coddingtonbear/icloud-notes-sync/discussions)
+👉 [https://github.com/coddingtonbear/icloud-md/discussions](https://github.com/coddingtonbear/icloud-md/discussions)
 
 This helps confirm that the idea aligns with the project’s direction and avoids contributors investing time in changes that ultimately won’t be merged.
 

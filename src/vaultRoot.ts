@@ -5,7 +5,7 @@ import { STATE_DIR_NAME, STATE_FILE_NAME } from "./notes/cloneState.js";
 
 /**
  * Walks up from `startDir` looking for a cloned vault's
- * `.icloud-notes-sync/state.json` - how git finds `.git` - so every command
+ * `.icloud-md/state.json` - how git finds `.git` - so every command
  * works from anywhere inside the clone. Returns the vault root's absolute
  * path, or undefined when `startDir` isn't inside a clone (callers fall
  * back to "." so the existing not-a-cloned-directory error still names the

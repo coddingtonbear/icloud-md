@@ -279,8 +279,8 @@ export function rejectionWithBlockerHint(
   return new NoteDeleteRejectedError(
     recordName,
     serverErrorCode,
-    `${reason} - blocked by ${blocker}; "icloud-notes object show ${recordName}" lists every referrer, ` +
-      `"icloud-notes object delete ${blocker}" removes this one`,
+    `${reason} - blocked by ${blocker}; "icloud-md object show ${recordName}" lists every referrer, ` +
+      `"icloud-md object delete ${blocker}" removes this one`,
   );
 }
 

@@ -80,7 +80,7 @@ test("renderPlan re-expresses paths through formatPath, including inside reason 
       kind: "update",
       file: "Recipes/Pie.md",
       resolution: "refused",
-      reason: 'this note has an attachment - run "icloud-notes restore Recipes/Pie.md" to discard your local edit',
+      reason: 'this note has an attachment - run "icloud-md restore Recipes/Pie.md" to discard your local edit',
     },
   ];
   const lines = renderPlan(entries, (file) => `../${file}`);

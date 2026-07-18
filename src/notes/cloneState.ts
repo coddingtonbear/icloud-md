@@ -121,7 +121,7 @@ export interface CloneState {
   layoutVersion?: number | undefined;
   /**
    * Which Apple ID this folder was cloned for - resolves to that account's
-   * own session under `~/.config/icloud-notes-sync/accounts/<dsid>/` (see
+   * own session under `~/.config/icloud-md/accounts/<dsid>/` (see
    * `accountStore.ts`), never anything secret stored here. Absent only for
    * folders cloned before per-folder account binding existed; `pull`/`push`/
    * `reauthenticate` refuse to run without it (see `UnboundAccountError`).
@@ -176,7 +176,7 @@ export interface CloneState {
   trashed?: Record<string, CloneStateTrashedEntry> | undefined;
 }
 
-export const STATE_DIR_NAME = ".icloud-notes-sync";
+export const STATE_DIR_NAME = ".icloud-md";
 export const STATE_FILE_NAME = "state.json";
 
 /** The on-disk layout generation this build reads and writes - see

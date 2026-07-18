@@ -55,7 +55,7 @@ export async function runDiff(
     if (toId) {
       throw new VersionContentUnavailableError(
         `epoch-vs-epoch diff ("${fromId}..${toId}") isn't supported yet - diff a specific record's snapshots instead ` +
-          `(run "icloud-notes history ${fileArg} --records" for their ids), or diff the epoch against the current remote copy`,
+          `(run "icloud-md history ${fileArg} --records" for their ids), or diff the epoch against the current remote copy`,
       );
     }
     console.log(await renderEpochDiff(targetDir, state, recordName, zone, epoch, onLoginStatus));

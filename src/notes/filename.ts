@@ -3,7 +3,7 @@ import path from "node:path";
 /**
  * Derives a human-readable file name for a note from its title alone. The
  * CloudKit recordName that used to be suffixed onto every file for
- * uniqueness now lives only in .icloud-notes-sync/state.json (keyed by
+ * uniqueness now lives only in .icloud-md/state.json (keyed by
  * recordName, with a `file` pointer back to disk) - see uniqueFileName for
  * how title collisions are disambiguated instead.
  */

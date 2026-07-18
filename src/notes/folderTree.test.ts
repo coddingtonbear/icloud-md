@@ -113,14 +113,14 @@ test("buildFolderTree keeps 'attachments' free in every sibling group", () => {
   assert.equal(dirPath(result, "nested"), "Parent/Attachments 2");
 });
 
-test("buildFolderTree reserves '.icloud-notes-sync' at the top level only", () => {
+test("buildFolderTree reserves '.icloud-md' at the top level only", () => {
   const result = tree([
-    { recordName: "a", title: ".icloud-notes-sync" },
+    { recordName: "a", title: ".icloud-md" },
     { recordName: "p", title: "Parent" },
-    { recordName: "nested", title: ".icloud-notes-sync", parentRecordName: "p" },
+    { recordName: "nested", title: ".icloud-md", parentRecordName: "p" },
   ]);
-  assert.equal(dirPath(result, "a"), ".icloud-notes-sync 2");
-  assert.equal(dirPath(result, "nested"), "Parent/.icloud-notes-sync");
+  assert.equal(dirPath(result, "a"), ".icloud-md 2");
+  assert.equal(dirPath(result, "nested"), "Parent/.icloud-md");
 });
 
 test("buildFolderTree honors preferred names even against an earlier-sorting newcomer", () => {

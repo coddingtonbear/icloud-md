@@ -1,5 +1,5 @@
 {
-  "name": "icloud-notes-sync",
+  "name": "icloud-md",
   "version": "0.1.0",
   "type": "module",
   "description": "Sync Apple Notes to a git-backed local folder via CloudKit's private web services.",
@@ -7,11 +7,11 @@
   "author": "Adam Coddington",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/coddingtonbear/icloud-notes-sync.git"
+    "url": "git+https://github.com/coddingtonbear/icloud-md.git"
   },
-  "homepage": "https://github.com/coddingtonbear/icloud-notes-sync#readme",
+  "homepage": "https://github.com/coddingtonbear/icloud-md#readme",
   "bugs": {
-    "url": "https://github.com/coddingtonbear/icloud-notes-sync/issues"
+    "url": "https://github.com/coddingtonbear/icloud-md/issues"
   },
   "keywords": [
     "apple-notes",
@@ -25,7 +25,7 @@
     "node": ">=20"
   },
   "bin": {
-    "icloud-notes": "./dist/cli.js"
+    "icloud-md": "./dist/cli.js"
   },
   "files": [
     "dist"

@@ -10,7 +10,7 @@ import { isEnoent } from "../fsUtil.js";
  * snapshots over time), unlike `baseCopy.ts`'s single pristine copy per
  * record.
  */
-const HISTORY_DIR_SEGMENTS = [".icloud-notes-sync", "history"];
+const HISTORY_DIR_SEGMENTS = [".icloud-md", "history"];
 
 export interface VersionSnapshot {
   id: string;

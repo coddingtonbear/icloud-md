@@ -109,7 +109,7 @@ test("refuses a pre-folder-layout vault loudly, telling the user to re-clone", (
   withTempDir(async (dir) => {
     // Exactly what a real vault cloned before folder support looks like:
     // a valid state file with no layoutVersion field.
-    const stateDir = path.join(dir, ".icloud-notes-sync");
+    const stateDir = path.join(dir, ".icloud-md");
     await mkdir(stateDir, { recursive: true });
     await writeFile(
       path.join(stateDir, "state.json"),
@@ -122,7 +122,7 @@ test("refuses a pre-folder-layout vault loudly, telling the user to re-clone", (
 
 test("throws CorruptStateFileError for a malformed account field", () =>
   withTempDir(async (dir) => {
-    const stateDir = path.join(dir, ".icloud-notes-sync");
+    const stateDir = path.join(dir, ".icloud-md");
     await mkdir(stateDir, { recursive: true });
     await writeFile(
       path.join(stateDir, "state.json"),
@@ -162,7 +162,7 @@ test("reads a pre-table-history state file (no tableAttachments field) without e
 
 test("throws CorruptStateFileError for a malformed table attachment entry", () =>
   withTempDir(async (dir) => {
-    const stateDir = path.join(dir, ".icloud-notes-sync");
+    const stateDir = path.join(dir, ".icloud-md");
     await mkdir(stateDir, { recursive: true });
     await writeFile(
       path.join(stateDir, "state.json"),
@@ -223,7 +223,7 @@ test("reads a pre-folder-support state file (no folders field) without error", (
 
 test("throws CorruptStateFileError for a malformed folder entry", () =>
   withTempDir(async (dir) => {
-    const stateDir = path.join(dir, ".icloud-notes-sync");
+    const stateDir = path.join(dir, ".icloud-md");
     await mkdir(stateDir, { recursive: true });
     await writeFile(
       path.join(stateDir, "state.json"),
@@ -258,7 +258,7 @@ test("reads a pre-trash-registry state file (no trashed field) without error", (
 
 test("throws CorruptStateFileError for a malformed trashed entry", () =>
   withTempDir(async (dir) => {
-    const stateDir = path.join(dir, ".icloud-notes-sync");
+    const stateDir = path.join(dir, ".icloud-md");
     await mkdir(stateDir, { recursive: true });
     await writeFile(
       path.join(stateDir, "state.json"),

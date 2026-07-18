@@ -74,7 +74,7 @@ test("NotClonedDirectoryError names the offending directory and points at `clone
 });
 
 test("MissingSessionFileError names the session path and points at `reauthenticate`", () => {
-  const error = new MissingSessionFileError("/home/user/.config/icloud-notes-sync/accounts/1234/session.local.json");
+  const error = new MissingSessionFileError("/home/user/.config/icloud-md/accounts/1234/session.local.json");
   assert.match(error.message, /session\.local\.json/);
   assert.match(error.hint ?? "", /reauthenticate/);
 });

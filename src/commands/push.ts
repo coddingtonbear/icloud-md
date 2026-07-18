@@ -194,7 +194,7 @@ export async function buildPushPlan(
         resolution: "refused",
         reason:
           "this note contains content this tool can't parse and can never be pushed - " +
-          `run "icloud-notes restore ${entry.file}" to discard your local edit.`,
+          `run "icloud-md restore ${entry.file}" to discard your local edit.`,
       });
       continue;
     }
@@ -215,7 +215,7 @@ export async function buildPushPlan(
         resolution: "refused",
         reason:
           'contains an "attachments/..." reference, but this tool can\'t upload new attachments - ' +
-          `remove it, or run "icloud-notes restore ${entry.file}" to discard the edit.`,
+          `remove it, or run "icloud-md restore ${entry.file}" to discard the edit.`,
       });
       continue;
     }
@@ -275,7 +275,7 @@ export async function buildPushPlan(
         resolution: "refused",
         reason:
           "deleting notes shared by someone else isn't supported - " +
-          `run "icloud-notes restore ${candidate.entry.file}" to bring the file back`,
+          `run "icloud-md restore ${candidate.entry.file}" to bring the file back`,
       });
       continue;
     }
@@ -1012,7 +1012,7 @@ async function prepareUpdate(
   if (!classified.publishable) {
     summary.refused.push(
       `${entry.file}: this note ${classified.unpublishableReason ?? "contains content this tool can't parse"} - it can't be safely edited. ` +
-        `Run "icloud-notes restore ${entry.file}" to discard your local edit.`,
+        `Run "icloud-md restore ${entry.file}" to discard your local edit.`,
     );
     return undefined;
   }
@@ -1037,7 +1037,7 @@ async function prepareUpdate(
 
   const parsed = parseNoteMarkdown(localText);
   if (parsed.status !== "ok") {
-    summary.refused.push(`${entry.file}: ${parsed.reason}. Run "icloud-notes restore ${entry.file}" to discard your local edit.`);
+    summary.refused.push(`${entry.file}: ${parsed.reason}. Run "icloud-md restore ${entry.file}" to discard your local edit.`);
     return undefined;
   }
   const textUpdate = prepareNoteTextUpdate(record, classified.bodyText, parsed, classified.embedSlots, replicaId, entry, summary);
@@ -1085,14 +1085,14 @@ async function prepareEmbedCandidate(
 ): Promise<PreparedCandidate | undefined> {
   const plan = planEmbedRepresentations(localText, classified.embedSlots, trackedFileAttachmentIds);
   if (!plan.ok) {
-    summary.refused.push(`${entry.file}: ${plan.reason}. Run "icloud-notes restore ${entry.file}" to discard your local edit.`);
+    summary.refused.push(`${entry.file}: ${plan.reason}. Run "icloud-md restore ${entry.file}" to discard your local edit.`);
     return undefined;
   }
   // The placeholder-form markdown (markers and table blocks re-spliced to
   // U+FFFC) is what parses back into the desired text + formatting.
   const parsed = parseNoteMarkdown(plan.reconstructedBodyText);
   if (parsed.status !== "ok") {
-    summary.refused.push(`${entry.file}: ${parsed.reason}. Run "icloud-notes restore ${entry.file}" to discard your local edit.`);
+    summary.refused.push(`${entry.file}: ${parsed.reason}. Run "icloud-md restore ${entry.file}" to discard your local edit.`);
     return undefined;
   }
 
@@ -1140,7 +1140,7 @@ async function prepareEmbedCandidate(
     const result = prepareTableAttachmentUpdate(attachmentRecord, block.grid, replicaId);
     if (!result.ok) {
       summary.refused.push(
-        `${entry.file}: ${result.reason}. Run "icloud-notes restore ${entry.file}" to discard your local edit.`,
+        `${entry.file}: ${result.reason}. Run "icloud-md restore ${entry.file}" to discard your local edit.`,
       );
       return undefined;
     }
@@ -1249,7 +1249,7 @@ function prepareNoteTextUpdate(
   if (spliceTouchesPlaceholder) {
     summary.refused.push(
       `${entry.file}: this edit would delete or move an embedded object - embeds can only be edited in Notes itself. ` +
-        `Run "icloud-notes restore ${entry.file}" to discard your local edit.`,
+        `Run "icloud-md restore ${entry.file}" to discard your local edit.`,
     );
     return undefined;
   }
@@ -1264,7 +1264,7 @@ function prepareNoteTextUpdate(
     const reconciled = reconcileNoteFormat(doc, desired.paragraphs, replicaId);
     if (!reconciled.ok) {
       summary.refused.push(
-        `${entry.file}: ${reconciled.reason}. Run "icloud-notes restore ${entry.file}" to discard your local edit.`,
+        `${entry.file}: ${reconciled.reason}. Run "icloud-md restore ${entry.file}" to discard your local edit.`,
       );
       return undefined;
     }

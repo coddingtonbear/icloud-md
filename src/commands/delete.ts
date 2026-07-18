@@ -142,7 +142,7 @@ function resolveDeletionTarget(state: CloneState, fileArg: string, targetDir: st
     const [recordName, entry] = registered;
     if (!hard) {
       throw new UntrackedFileError(fileArg, targetDir, {
-        hint: `This note was already moved to Recently Deleted by this tool. Run "icloud-notes delete --hard ${fileArg}" to permanently delete it.`,
+        hint: `This note was already moved to Recently Deleted by this tool. Run "icloud-md delete --hard ${fileArg}" to permanently delete it.`,
       });
     }
     return { recordName, file: entry.file };

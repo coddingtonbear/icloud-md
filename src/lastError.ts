@@ -4,7 +4,7 @@ import { CONFIG_DIR } from "./configDir.js";
 import { IcloudNotesSyncError } from "./errors.js";
 import { isEnoent } from "./fsUtil.js";
 
-/** Same shared `~/.config/icloud-notes-sync/` directory as the debug log and
+/** Same shared `~/.config/icloud-md/` directory as the debug log and
  * account store - see `debugLog.ts`'s `DEFAULT_DEBUG_LOG_PATH`. */
 export const DEFAULT_LAST_ERROR_PATH = path.join(CONFIG_DIR, "last-error.json");
 

@@ -7,7 +7,7 @@ import { TRASH_FOLDER_RECORD_NAME } from "./encodeNoteRecord.js";
 export const DEFAULT_FOLDER_RECORD_NAME = "DefaultFolder-CloudKit";
 
 /** Directory names the clone reserves for itself at the top level. */
-export const RESERVED_TOP_LEVEL_DIR_NAMES: readonly string[] = [".icloud-notes-sync"];
+export const RESERVED_TOP_LEVEL_DIR_NAMES: readonly string[] = [".icloud-md"];
 
 /** Directory names the clone reserves inside *every* folder directory:
  * attachments live per-folder (decided 2026-07-16, see the folders doc), so

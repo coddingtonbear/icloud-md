@@ -145,7 +145,7 @@ test("redactLastError scrubs a real file path (and its basename) and account sca
     {
       timestamp: "2026-01-01T00:00:00.000Z",
       message: '"Secret Diary.md" was cloned for person@example.com, but the session just authenticated is for other@example.com.',
-      hint: "Run icloud-notes history Secret Diary.md to see available snapshot ids.",
+      hint: "Run icloud-md history Secret Diary.md to see available snapshot ids.",
     },
     replacements,
   );
