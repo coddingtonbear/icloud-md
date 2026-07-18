@@ -3,10 +3,33 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { create, toBinary } from "@bufbuild/protobuf";
 import { appendDebugLog } from "../debugLog.js";
 import { recordLastError } from "../lastError.js";
+import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
+import { compressNoteDocument } from "../notes/noteText.js";
+import { StringSchema } from "../notes/gen/topotext_pb.js";
+import { DocumentSchema as VersionedDocumentSchema, VersionSchema } from "../notes/gen/versioned_document_pb.js";
 import { writeCloneState, type CloneState } from "../notes/cloneState.js";
 import { parseSinceDuration, runBugReport, runBugReportIdentify, DISCLOSURE_WARNING } from "./bugReport.js";
+
+function encodedNoteRecordBody(recordName: string, title: string, text: string): unknown {
+  const message = create(VersionedDocumentSchema, {
+    version: [
+      create(VersionSchema, { minimumSupportedVersion: 0, data: toBinary(StringSchema, create(StringSchema, { string: text, attributeRun: [] })) }),
+    ],
+  });
+  const compressed = compressNoteDocument(toBinary(VersionedDocumentSchema, message));
+  const record: CloudKitRecord = {
+    recordName,
+    recordType: "Note",
+    fields: {
+      TitleEncrypted: { value: Buffer.from(title, "utf-8").toString("base64"), type: "ENCRYPTED_BYTES" },
+      TextDataEncrypted: { value: Buffer.from(compressed).toString("base64"), type: "ENCRYPTED_BYTES" },
+    },
+  };
+  return { records: [record] };
+}
 
 async function withTempDirs(
   run: (paths: { targetDir: string; debugLogPath: string; lastErrorPath: string }) => Promise<void>,
@@ -169,6 +192,39 @@ test("scrubs a real filename and appleId quoted inside lastError's message", () 
     assert.doesNotMatch(contents, /Secret Diary/);
     assert.doesNotMatch(contents, /person@example\.com/);
     assert.match(contents, /note-1\.md was cloned for account-\d+/);
+  }));
+
+test("writes a decoded-content preview companion file when a log entry decodes to readable note content", () =>
+  withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
+    await appendDebugLog(
+      { note: "records/lookup", response: { status: 200, headers: {}, body: encodedNoteRecordBody("REC1", "Bank Statement", "Balance: $42") } },
+      debugLogPath,
+    );
+
+    const summary = await runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath });
+
+    assert.ok(summary.contentPreviewPath);
+    assert.equal(path.dirname(summary.contentPreviewPath ?? ""), targetDir);
+    assert.match(path.basename(summary.contentPreviewPath ?? ""), /\.content-preview\.md$/);
+
+    const preview = await readFile(summary.contentPreviewPath ?? "", "utf-8");
+    assert.match(preview, /DO NOT ATTACH OR SHARE THIS FILE/);
+    assert.match(preview, /Bank Statement/);
+    assert.match(preview, /Balance: \$42/);
+
+    // The decoded content lives only in the companion file, never in the
+    // shareable report itself.
+    const reportContents = await readFile(summary.outputPath, "utf-8");
+    assert.doesNotMatch(reportContents, /Balance: \$42/);
+  }));
+
+test("doesn't write a content-preview file when nothing in the log window decodes", () =>
+  withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
+    await appendDebugLog({ note: "irrelevant", response: { status: 200, headers: {}, body: { ok: true } } }, debugLogPath);
+
+    const summary = await runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath });
+
+    assert.equal(summary.contentPreviewPath, undefined);
   }));
 
 test("handles a directory with no state.json and no recorded error gracefully", () =>

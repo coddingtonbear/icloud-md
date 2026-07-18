@@ -4,6 +4,7 @@ import { DEFAULT_DEBUG_LOG_PATH, readDebugLogSince, type DebugLogRecord } from "
 import { CorruptStateFileError, NotClonedDirectoryError } from "../errors.js";
 import { DEFAULT_LAST_ERROR_PATH, readLastError, type LastErrorRecord } from "../lastError.js";
 import { readAliasStore, resolveAlias, writeAliasStore } from "../notes/bugReportAliases.js";
+import { buildContentPreview, renderContentPreview } from "../notes/bugReportContentPreview.js";
 import { buildTextReplacements, discoverAccountScalars, redactCloneState, redactDebugLogEntries, redactLastError } from "../notes/bugReportRedaction.js";
 import { readCloneState, STATE_DIR_NAME, STATE_FILE_NAME, type CloneState } from "../notes/cloneState.js";
 import { resolveTrackedNote } from "../notes/trackedFile.js";
@@ -12,6 +13,10 @@ import { getEnvironmentInfo, type EnvironmentInfo } from "../version.js";
 export interface BugReportSummary {
   outputPath: string;
   logEntryCount: number;
+  /** Set only when at least one debug-log entry decoded to readable note/
+   * table content - see buildContentPreview. This file is local-only and
+   * deliberately not part of the report itself. */
+  contentPreviewPath?: string;
 }
 
 export interface BugReportOptions {
@@ -115,15 +120,31 @@ export async function runBugReport(targetDir: string, since: Date, options: BugR
 
   await writeAliasStore(targetDir, aliasStore);
 
-  const outputPath = path.join(targetDir, `icloud-notes-bug-report-${formatFileTimestamp(generatedAt)}.md`);
+  const timestamp = formatFileTimestamp(generatedAt);
+  const outputPath = path.join(targetDir, `icloud-notes-bug-report-${timestamp}.md`);
   await writeFile(
     outputPath,
     renderBundle({ environment, lastError: redactedLastError, state: redactedState, logEntries: redactedLogEntries, since, targetDir, generatedAt }),
     "utf-8",
   );
-
   console.log(`Wrote ${outputPath}`);
-  return { outputPath, logEntryCount: logEntries.length };
+
+  // Decoded from the raw (pre-redaction) log entries, not the redacted
+  // copy above - this is a local-only review aid, so there's no reason to
+  // risk redaction's scalar substitution (a coincidental dsid/appleId
+  // substring inside a compressed blob) corrupting what it decodes.
+  const contentPreview = buildContentPreview(logEntries);
+  let contentPreviewPath: string | undefined;
+  if (contentPreview.length > 0) {
+    contentPreviewPath = path.join(targetDir, `icloud-notes-bug-report-${timestamp}.content-preview.md`);
+    await writeFile(contentPreviewPath, renderContentPreview(contentPreview, generatedAt), "utf-8");
+    console.log(
+      `Wrote a decoded-content preview to ${contentPreviewPath} - review it before sharing ${outputPath} anywhere. ` +
+        "This preview file is not meant to be attached or shared; delete it once you're done.",
+    );
+  }
+
+  return { outputPath, logEntryCount: logEntries.length, ...(contentPreviewPath ? { contentPreviewPath } : {}) };
 }
 
 /**
