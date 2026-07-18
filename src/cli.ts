@@ -31,6 +31,38 @@ import { displayPath, findVaultRoot } from "./vaultRoot.js";
 import type { SyncProgress } from "./progress.js";
 
 /**
+ * `--json` mode's progress renderer: one stable, greppable line per event on
+ * stderr (`icloud-md:progress:...`), newline-terminated and never redrawn in
+ * place - unlike ora/cli-progress, which redraw the same terminal row via
+ * carriage returns and are only meaningful to a human watching live. This is
+ * for a wrapping process (e.g. the obsidian-icloud plugin, which shells out
+ * to this CLI) to get coarse progress by splitting stderr on newlines and
+ * matching the `icloud-md:progress:` prefix, without depending on ora/
+ * cli-progress's exact redraw behavior or wording. stdout stays pure JSON
+ * either way.
+ */
+function makeMachineSyncProgress(): SyncProgress {
+  let processed = 0;
+  let total = 0;
+  return {
+    onFetchPage: (recordsSoFar) => {
+      console.error(`icloud-md:progress:fetch:${recordsSoFar}`);
+    },
+    onProcessStart: (totalRecords) => {
+      total = totalRecords;
+      console.error(`icloud-md:progress:process-start:${total}`);
+    },
+    onRecordProcessed: () => {
+      processed += 1;
+      console.error(`icloud-md:progress:process:${processed}/${total}`);
+    },
+    onProcessComplete: () => {
+      console.error(`icloud-md:progress:process-done`);
+    },
+  };
+}
+
+/**
  * Live terminal rendering for `clone`/`pull` progress - the only place ora
  * or cli-progress get constructed, so `runClone`/`runPull` stay usable as a
  * library without pulling terminal UI along with them.
@@ -43,10 +75,11 @@ import type { SyncProgress } from "./progress.js";
  *
  * Both ora and cli-progress already target stderr unconditionally (ora
  * defaults there; the bar is constructed with `stream: process.stderr`
- * below), so nothing here needs to change between human and `--json` mode -
- * stdout stays free for the final JSON result either way.
+ * below). Only used for a human terminal, though: `--json` mode has no
+ * interactive display to draw on, so it uses `makeMachineSyncProgress`
+ * instead - see that function for why.
  */
-function makeSyncProgress(): SyncProgress {
+function makeHumanSyncProgress(): SyncProgress {
   let fetchedCount = 0;
   let spinner: ReturnType<typeof ora> | undefined;
   const ensureSpinner = (): ReturnType<typeof ora> => (spinner ??= ora("Fetching notes from iCloud…").start());
@@ -79,6 +112,10 @@ function makeSyncProgress(): SyncProgress {
       bar?.stop();
     },
   };
+}
+
+function makeSyncProgress(context: OutputContext): SyncProgress {
+  return context.json ? makeMachineSyncProgress() : makeHumanSyncProgress();
 }
 
 function printCloneSummary(targetDir: string, summary: CloneSummary): void {
@@ -234,7 +271,7 @@ program
   )
   .action(async (directory: string, _opts: unknown, command: Command) => {
     const context = contextFor(command);
-    const summary = await runClone(directory, makeSyncProgress(), makeStatusSink(context));
+    const summary = await runClone(directory, makeSyncProgress(context), makeStatusSink(context));
     emitResult(context, summary, (result) => printCloneSummary(directory, result));
   });
 
@@ -244,7 +281,7 @@ program
   .action(async (directory: string | undefined, _opts: unknown, command: Command) => {
     const context = contextFor(command);
     const targetDir = await resolveTargetDir(directory);
-    const summary = await runPull(targetDir, makeSyncProgress(), makeStatusSink(context));
+    const summary = await runPull(targetDir, makeSyncProgress(context), makeStatusSink(context));
     emitResult(context, summary, (result) => printPullSummary(targetDir, result));
   });
 
