@@ -53,7 +53,12 @@ message Substring {
   // Length in UTF-16 code units (surrogate pairs are two units).
   required uint32 length = 2;
   // Previously `anchor`, semantics unknown at the time - Apple's schema
-  // names it the run's *style timestamp*.
+  // names it the run's *style timestamp*. Freshly inserted text carries
+  // (ownReplica, 0); every formatting op (style, checklist toggle, deletion)
+  // restamps the substrings it covers with (opReplica, opNumber), where
+  // opNumber comes from the replica's formatting-op clock - the *second*
+  // VectorTimestamp.Clock.replicaClock entry (2026-07-17 formatting-evolution
+  // capture). Conflicts resolve LWW on (opNumber, replica sorted-UUID rank).
   required CharID timestamp = 3;
   // Apple declares `bool`; kept as an integer so a value other than the
   // observed literal 1 is surfaced (and refused) rather than silently
@@ -73,8 +78,13 @@ message VectorTimestamp {
     required bytes replicaUUID = 1;
     message ReplicaClock {
       // First entry's clock is the replica's text clock (total UTF-16 units
-      // it has inserted); later entries' meanings are still unknown and
-      // preserved verbatim. Previously `ReplicaCounter.value`.
+      // it has inserted). Second entry is the replica's formatting-op clock:
+      // the *next available* op number, bumped once per formatting operation
+      // (paragraph/inline style, checklist toggle, deletion), whose used
+      // value stamps Substring.timestamp (2026-07-17 formatting-evolution
+      // capture). A replica joining an existing document initializes both
+      // entries to the maxima observed across the table. Previously
+      // `ReplicaCounter.value`.
       required uint32 clock = 1;
       // Never observed set in this project's captures; `noteDocument.ts`
       // refuses a document that sets it rather than guess (its domain model
