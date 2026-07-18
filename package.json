@@ -2,7 +2,7 @@
   "name": "icloud-md",
   "version": "0.1.0",
   "type": "module",
-  "description": "Sync Apple Notes to a git-backed local folder via CloudKit's private web services.",
+  "description": "Your iCloud notes in Markdown, bidirectionally synced with using a `git`-flavored command-line interface",
   "license": "MIT",
   "author": "Adam Coddington",
   "repository": {
