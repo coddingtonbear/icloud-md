@@ -52,6 +52,72 @@ test("revert rejects an id that matches neither a snapshot nor an epoch", () =>
     );
   }));
 
+test("revert refuses an individually-shared note before any snapshot or network work", () =>
+  withTempDir(async (dir) => {
+    const shared: CloneState = {
+      syncToken: "token",
+      notes: {
+        LOOSE1: { file: "Pat/Travel List.md", recordChangeTag: "1a", modificationDate: 100, sharedZoneOwner: "_owner1" },
+      },
+      sharerHomes: { _owner1: { name: "Pat", dirName: "Pat" } },
+    };
+    await writeCloneState(dir, shared);
+    await assert.rejects(
+      () => runRevert(dir, "Pat/Travel List.md", "any-id", { confirmed: false }),
+      /individually-shared/,
+    );
+  }));
+
+test("revert refuses a note in a READ_ONLY shared folder before any snapshot or network work", () =>
+  withTempDir(async (dir) => {
+    const shared: CloneState = {
+      syncToken: "token",
+      notes: {
+        SH1: {
+          file: "Pat/Shared Recipes/Theirs.md",
+          recordChangeTag: "1a",
+          modificationDate: 100,
+          folderRecordName: "F-SHARED",
+          sharedZoneOwner: "_owner1",
+        },
+      },
+      folders: {
+        "F-SHARED": { name: "Shared Recipes", dirName: "Shared Recipes", sharedZoneOwner: "_owner1", permission: "READ_ONLY" },
+      },
+      sharerHomes: { _owner1: { name: "Pat", dirName: "Pat" } },
+    };
+    await writeCloneState(dir, shared);
+    await assert.rejects(
+      () => runRevert(dir, "Pat/Shared Recipes/Theirs.md", "any-id", { confirmed: false }),
+      /read-only for you/,
+    );
+  }));
+
+test("revert lets a note in a writable shared folder through the policy gate (fails later on the unknown id, not the gate)", () =>
+  withTempDir(async (dir) => {
+    const shared: CloneState = {
+      syncToken: "token",
+      notes: {
+        SH1: {
+          file: "Pat/Shared Recipes/Theirs.md",
+          recordChangeTag: "1a",
+          modificationDate: 100,
+          folderRecordName: "F-SHARED",
+          sharedZoneOwner: "_owner1",
+        },
+      },
+      folders: {
+        "F-SHARED": { name: "Shared Recipes", dirName: "Shared Recipes", sharedZoneOwner: "_owner1", permission: "READ_WRITE" },
+      },
+      sharerHomes: { _owner1: { name: "Pat", dirName: "Pat" } },
+    };
+    await writeCloneState(dir, shared);
+    await assert.rejects(
+      () => runRevert(dir, "Pat/Shared Recipes/Theirs.md", "missing-id", { confirmed: false }),
+      /No version snapshot with id "missing-id" found/,
+    );
+  }));
+
 test("revert (unconfirmed, epoch id) reports what it would do without any network call", () =>
   withTempDir(async (dir) => {
     await writeCloneState(dir, STATE);

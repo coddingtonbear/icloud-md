@@ -64,6 +64,21 @@ export interface CloudKitZoneID {
   ownerRecordName?: string | undefined;
 }
 
+/** The database + zoneID a note's reads and writes go to. */
+export interface NoteZone {
+  database: CloudKitDatabase;
+  zoneID: CloudKitZoneID;
+}
+
+/** Own notes live in the private Notes zone; a shared note lives in its
+ * sharer's zone of the shared database (same zoneName, owner-qualified).
+ * `sharedZoneOwner` is the tracked note's state field of the same name. */
+export function noteZone(sharedZoneOwner: string | undefined): NoteZone {
+  return sharedZoneOwner === undefined
+    ? { database: "private", zoneID: { zoneName: "Notes" } }
+    : { database: "shared", zoneID: { zoneName: "Notes", ownerRecordName: sharedZoneOwner } };
+}
+
 /** One shared zone's worth of note records, tagged with its owner so state
  * tracking can tell which sharer's zone each note came from. */
 export interface SharedZoneChanges {

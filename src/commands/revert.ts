@@ -1,5 +1,5 @@
 import { resolveFolderAccount } from "../auth/folderAuth.js";
-import { lookupRecords, updateRecords, type RecordUpdate } from "../cloudkit/databaseClient.js";
+import { lookupRecords, noteZone, updateRecords, type NoteZone, type RecordUpdate } from "../cloudkit/databaseClient.js";
 import { NotClonedDirectoryError, NotesUnavailableError, UnknownVersionSnapshotError, VersionContentUnavailableError } from "../errors.js";
 import { decodeTableMarkdown } from "../notes/decodeTableRecord.js";
 import { readCloneState, type CloneState } from "../notes/cloneState.js";
@@ -8,8 +8,7 @@ import { noteDocumentRoundTrips } from "../notes/noteDocument.js";
 import { findEpochById, type NoteEpoch } from "../notes/noteEpoch.js";
 import { findSnapshotById, historyRecordNames, resolveTrackedNote } from "../notes/trackedFile.js";
 import { listVersions, type VersionSnapshot } from "../notes/versionHistory.js";
-
-const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
+import { sharedNoteWriteRefusal } from "./push.js";
 
 export interface RevertOptions {
   /** The actual server-side write only fires with this set - without it,
@@ -45,8 +44,16 @@ export async function runRevert(targetDir: string, fileArg: string, id: string, 
     throw new NotClonedDirectoryError(targetDir);
   }
 
-  const { recordName } = resolveTrackedNote(state, fileArg, targetDir);
+  const { recordName, entry } = resolveTrackedNote(state, fileArg, targetDir);
   const recordNames = historyRecordNames(state, recordName);
+  // Same policy gate as push - revert is the same kind of remote write, so
+  // an individually-shared note or a READ_ONLY shared folder refuses here
+  // for the same reasons, before any snapshot or network work.
+  const refusal = sharedNoteWriteRefusal(state, entry);
+  if (refusal !== undefined) {
+    throw new Error(`"${entry.file}" can't be reverted: ${refusal}`);
+  }
+  const zone = noteZone(entry.sharedZoneOwner);
 
   let snapshot: VersionSnapshot;
   try {
@@ -59,7 +66,7 @@ export async function runRevert(targetDir: string, fileArg: string, id: string, 
     if (!epoch) {
       throw cause;
     }
-    await runEpochRevert(targetDir, state, recordName, fileArg, epoch, options);
+    await runEpochRevert(targetDir, state, recordName, zone, fileArg, epoch, options);
     return;
   }
 
@@ -74,8 +81,8 @@ export async function runRevert(targetDir: string, fileArg: string, id: string, 
     auth.session,
     auth.ckdatabasewsUrl,
     auth.dsid,
-    "private",
-    PRIVATE_NOTES_ZONE,
+    zone.database,
+    zone.zoneID,
     [snapshot.recordName],
   );
   const record = records[0];
@@ -97,10 +104,13 @@ export async function runRevert(targetDir: string, fileArg: string, id: string, 
     recordType: record.recordType,
     recordChangeTag: record.recordChangeTag ?? "",
     fields: { [snapshot.field]: { value: snapshot.valueBase64 } },
-    parentRecordName: record.parentRecordName,
+    // Shared-zone Note updates omit the record-hierarchy parent, matching
+    // push's captured-shape discipline (Attachment updates keep it).
+    parentRecordName:
+      zone.database === "shared" && record.recordType === "Note" ? undefined : record.parentRecordName,
   };
 
-  const [result] = await updateRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, "private", PRIVATE_NOTES_ZONE, [update]);
+  const [result] = await updateRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, zone.database, zone.zoneID, [update]);
   if (!result) {
     throw new VersionContentUnavailableError("the server returned no result for the revert");
   }
@@ -155,6 +165,7 @@ async function runEpochRevert(
   targetDir: string,
   state: CloneState,
   noteRecordName: string,
+  zone: NoteZone,
   fileArg: string,
   epoch: NoteEpoch,
   options: RevertOptions,
@@ -211,8 +222,8 @@ async function runEpochRevert(
     auth.session,
     auth.ckdatabasewsUrl,
     auth.dsid,
-    "private",
-    PRIVATE_NOTES_ZONE,
+    zone.database,
+    zone.zoneID,
     entries.map((entry) => entry.recordName),
   );
   const recordsByName = new Map(records.map((record) => [record.recordName, record]));
@@ -229,7 +240,9 @@ async function runEpochRevert(
       recordType: record.recordType,
       recordChangeTag: record.recordChangeTag ?? "",
       fields: { [snapshot.field]: { value: snapshot.valueBase64 } },
-      parentRecordName: record.parentRecordName,
+      // See the single-snapshot path: shared-zone Note updates omit parent.
+      parentRecordName:
+        zone.database === "shared" && record.recordType === "Note" ? undefined : record.parentRecordName,
     });
   }
 
@@ -241,7 +254,7 @@ async function runEpochRevert(
     return;
   }
 
-  const results = await updateRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, "private", PRIVATE_NOTES_ZONE, updates);
+  const results = await updateRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, zone.database, zone.zoneID, updates);
   console.log(`Reverting ${fileArg} to the whole-note epoch captured ${epoch.timestamp}:`);
   for (let i = 0; i < updates.length; i += 1) {
     const update = updates[i];

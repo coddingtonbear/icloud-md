@@ -1,6 +1,6 @@
 import { diffComm } from "node-diff3";
 import { resolveFolderAccount } from "../auth/folderAuth.js";
-import { lookupRecords } from "../cloudkit/databaseClient.js";
+import { lookupRecords, noteZone, type NoteZone } from "../cloudkit/databaseClient.js";
 import { NotClonedDirectoryError, NotesUnavailableError, UnknownVersionSnapshotError, VersionContentUnavailableError } from "../errors.js";
 import { decodeTableAttachment } from "../notes/attachmentSync.js";
 import { readCloneState, type CloneState } from "../notes/cloneState.js";
@@ -11,8 +11,6 @@ import { decodeNoteBodyText } from "../notes/noteText.js";
 import { findSnapshotById, historyRecordNames, resolveTrackedNote } from "../notes/trackedFile.js";
 import { listVersions, type VersionSnapshot } from "../notes/versionHistory.js";
 import type { IcloudSession } from "../session.js";
-
-const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 
 /**
  * Diffs two renderings of the same note or table attachment - `fromId` is
@@ -34,8 +32,11 @@ export async function runDiff(
     throw new NotClonedDirectoryError(targetDir);
   }
 
-  const { recordName } = resolveTrackedNote(state, fileArg, targetDir);
+  const { recordName, entry } = resolveTrackedNote(state, fileArg, targetDir);
   const recordNames = historyRecordNames(state, recordName);
+  // A shared note's current copy lives in its sharer's zone; its table
+  // attachments live there too, so one zone covers every record diffed here.
+  const zone = noteZone(entry.sharedZoneOwner);
 
   let from: VersionSnapshot;
   try {
@@ -57,7 +58,7 @@ export async function runDiff(
           `(run "icloud-notes history ${fileArg} --records" for their ids), or diff the epoch against the current remote copy`,
       );
     }
-    console.log(await renderEpochDiff(targetDir, state, recordName, epoch, onLoginStatus));
+    console.log(await renderEpochDiff(targetDir, state, recordName, zone, epoch, onLoginStatus));
     return;
   }
   const fromText = decodeSnapshotText(from);
@@ -78,7 +79,7 @@ export async function runDiff(
     if (!auth.ckdatabasewsUrl) {
       throw new NotesUnavailableError();
     }
-    toText = await fetchCurrentText(auth.session, auth.ckdatabasewsUrl, auth.dsid, from.recordName, from.recordType);
+    toText = await fetchCurrentText(auth.session, auth.ckdatabasewsUrl, auth.dsid, zone, from.recordName, from.recordType);
     toLabel = "current";
   }
 
@@ -104,6 +105,7 @@ async function renderEpochDiff(
   targetDir: string,
   state: CloneState,
   noteRecordName: string,
+  zone: NoteZone,
   epoch: NoteEpoch,
   onLoginStatus?: (message: string) => void,
 ): Promise<string> {
@@ -134,7 +136,7 @@ async function renderEpochDiff(
 
     try {
       const { session, ckdatabasewsUrl, dsid } = await resolveAuth();
-      const toText = await fetchCurrentText(session, ckdatabasewsUrl, dsid, recordName, snapshot.recordType);
+      const toText = await fetchCurrentText(session, ckdatabasewsUrl, dsid, zone, recordName, snapshot.recordType);
       sections.push(`=== ${label} ===\n${renderDiff(decodeSnapshotText(snapshot), toText, epoch.id, "current")}`);
     } catch (cause) {
       if (!(cause instanceof VersionContentUnavailableError)) {
@@ -151,10 +153,11 @@ async function fetchCurrentText(
   session: IcloudSession,
   ckdatabasewsUrl: string,
   dsid: string,
+  zone: NoteZone,
   recordName: string,
   recordType: VersionSnapshot["recordType"],
 ): Promise<string> {
-  const records = await lookupRecords(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, [recordName]);
+  const records = await lookupRecords(session, ckdatabasewsUrl, dsid, zone.database, zone.zoneID, [recordName]);
   const record = records[0];
   if (!record || record.deleted === true) {
     throw new VersionContentUnavailableError(`"${recordName}" no longer exists remotely`);

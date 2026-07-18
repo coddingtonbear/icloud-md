@@ -7,11 +7,11 @@ import type { IcloudSession } from "../session.js";
 import {
   createNoteRecord,
   lookupRecords,
+  noteZone,
   updateNoteRecord,
   updateRecords,
-  type CloudKitDatabase,
   type CloudKitRecord,
-  type CloudKitZoneID,
+  type NoteZone,
   type RecordUpdate,
 } from "../cloudkit/databaseClient.js";
 import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
@@ -44,20 +44,6 @@ import {
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 
-/** The database + zoneID a note's reads and writes go to. */
-interface NoteZone {
-  database: CloudKitDatabase;
-  zoneID: CloudKitZoneID;
-}
-
-/** Own notes live in the private Notes zone; a shared note lives in its
- * sharer's zone of the shared database (same zoneName, owner-qualified). */
-function noteZone(sharedZoneOwner: string | undefined): NoteZone {
-  return sharedZoneOwner === undefined
-    ? { database: "private", zoneID: PRIVATE_NOTES_ZONE }
-    : { database: "shared", zoneID: { zoneName: "Notes", ownerRecordName: sharedZoneOwner } };
-}
-
 /**
  * Why an edit to this tracked shared note can't be pushed, or undefined
  * when it can. Notes *inside* a shared folder are editable when the share's
@@ -65,9 +51,10 @@ function noteZone(sharedZoneOwner: string | undefined): NoteZone {
  * before the permission field existed - is attempted and left to the
  * server, whose rejection is benign); individually-shared notes loose in a
  * sharer's home stay read-only - probably the same wire shape, but unproven,
- * and their per-note share permission isn't tracked.
+ * and their per-note share permission isn't tracked. Exported for `revert`,
+ * which is the same kind of remote write and applies the same policy.
  */
-function sharedNoteWriteRefusal(state: CloneState, entry: CloneStateNoteEntry): string | undefined {
+export function sharedNoteWriteRefusal(state: CloneState, entry: CloneStateNoteEntry): string | undefined {
   if (entry.sharedZoneOwner === undefined) {
     return undefined;
   }
