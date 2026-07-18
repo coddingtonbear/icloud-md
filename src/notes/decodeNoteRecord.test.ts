@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { create, toBinary } from "@bufbuild/protobuf";
+import { create, toBinary, type MessageInitShape } from "@bufbuild/protobuf";
 import { classifyNoteRecord } from "./decodeNoteRecord.js";
 import { compressNoteDocument } from "./noteText.js";
 import { StringSchema } from "./gen/topotext_pb.js";
@@ -12,12 +12,15 @@ function makeRecord(fields: CloudKitRecord["fields"]): CloudKitRecord {
   return { recordName: "R1", recordType: "Note", fields, recordChangeTag: "1a" };
 }
 
-function encodeTextField(text: string): CloudKitRecord["fields"][string] {
+function encodeTextField(
+  text: string,
+  attributeRun: MessageInitShape<typeof StringSchema>["attributeRun"] = [],
+): CloudKitRecord["fields"][string] {
   const message = create(VersionedDocumentSchema, {
     version: [
       create(VersionSchema, {
         minimumSupportedVersion: 0,
-        data: toBinary(StringSchema, create(StringSchema, { string: text })),
+        data: toBinary(StringSchema, create(StringSchema, { string: text, attributeRun })),
       }),
     ],
   });
@@ -44,6 +47,7 @@ test("a plain-text note decodes as ok with no attachments", () => {
     status: "ok",
     title: "",
     bodyText: "Grocery list\nEggs\nMilk",
+    embedSlots: [],
     attachments: [],
     publishable: true,
   });
@@ -75,17 +79,52 @@ test("a real image-attachment note decodes as ok, surfacing the embedded attachm
   assert.equal(result.publishable, true);
 });
 
-test("a placeholder character with no matching attachment run is still written, banner-marked and unpublishable", () => {
-  // Synthetic: the U+FFFC placeholder with no AttachmentInfo run behind it -
-  // e.g. an embedded object type we don't parse (a table, a drawing). Can't
-  // trust a positional correlation that doesn't exist, so we can't localize
-  // exactly which placeholder is the problem - fetch it anyway with a
-  // whole-note banner, but never allow it to be pushed.
+test("a placeholder character with no matching attachment run becomes an unknown embed slot, still publishable", () => {
+  // Synthetic: a U+FFFC placeholder with no AttachmentInfo run behind it.
+  // Its *position* is still exact, so since Step 1 of the formatting plan
+  // (2026-07-17) it's localized as an `unknown` slot (pull renders an inline
+  // marker there) instead of banner-marking the whole note.
   const record = makeRecord({ TextDataEncrypted: encodeTextField("Some note\n\uFFFC") });
   assert.deepEqual(classifyNoteRecord(record), {
     status: "ok",
     title: "",
-    bodyText: `${UNKNOWN_CONTENT_BANNER}Some note\n\uFFFC`,
+    bodyText: "Some note\n\uFFFC",
+    embedSlots: [{ kind: "unknown", typeUti: undefined }],
+    attachments: [],
+    publishable: true,
+  });
+});
+
+test("a partially-identified attachment run yields an unknown slot carrying its UTI", () => {
+  const record = makeRecord({
+    TextDataEncrypted: encodeTextField("Title\n\uFFFC", [
+      { length: 6 },
+      { length: 1, attachmentInfo: { typeUTI: "com.apple.drawing.2" } },
+    ]),
+  });
+  const result = classifyNoteRecord(record);
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.deepEqual(result.embedSlots, [{ kind: "unknown", typeUti: "com.apple.drawing.2" }]);
+  assert.deepEqual(result.attachments, []);
+  assert.equal(result.publishable, true);
+});
+
+test("an attachmentInfo run not sitting on a lone placeholder banner-marks the note as unpublishable", () => {
+  // Structural weirdness: the attachment run covers two characters, so no
+  // placeholder position can be trusted - the whole-note banner remains for
+  // exactly this case.
+  const record = makeRecord({
+    TextDataEncrypted: encodeTextField("Hi\n\uFFFC", [
+      { length: 2 },
+      { length: 2, attachmentInfo: { attachmentIdentifier: "A-1", typeUTI: "public.jpeg" } },
+    ]),
+  });
+  assert.deepEqual(classifyNoteRecord(record), {
+    status: "ok",
+    title: "",
+    bodyText: `${UNKNOWN_CONTENT_BANNER}Hi\n\uFFFC`,
+    embedSlots: [],
     attachments: [],
     publishable: false,
     unpublishableReason: "contains unrecognized embedded content this tool couldn't parse or place precisely",

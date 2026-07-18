@@ -1,6 +1,6 @@
 import type { CloudKitFieldValue, CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { TRASH_FOLDER_RECORD_NAME } from "./encodeNoteRecord.js";
-import { decodeNoteAttachmentRefs, OBJECT_REPLACEMENT_CHARACTER, type AttachmentReference } from "./noteAttachments.js";
+import { decodeNoteEmbedSlots, type AttachmentReference, type EmbedSlot } from "./noteAttachments.js";
 import { decodeNoteBodyText } from "./noteText.js";
 import { UNKNOWN_CONTENT_BANNER } from "./unknownContent.js";
 
@@ -11,10 +11,20 @@ export type NoteDecodeResult =
       status: "ok";
       title: string;
       bodyText: string;
+      /** One entry per U+FFFC placeholder in `bodyText`, in document order -
+       * see `decodeNoteEmbedSlots`. Empty when `publishable` is false (the
+       * structure couldn't be mapped, so there are no trustworthy slots). */
+      embedSlots: EmbedSlot[];
+      /** The fully-identified references among `embedSlots`, in the same
+       * order - what attachment resolution and the table write path consume. */
       attachments: AttachmentReference[];
       /** False when this note contains content we can't safely push - see
        * the Safety Guarantee Audit dev notes. `push` always re-derives this
-       * itself from a fresh record fetch; it's the authoritative gate. */
+       * itself from a fresh record fetch; it's the authoritative gate.
+       * Since Step 1 of the formatting plan (2026-07-17), an embed we can't
+       * *render* no longer clears this - such notes carry inline markers and
+       * stay pushable under the marker-survival policy. Only a structure we
+       * can't *map* (no trustworthy slots) still refuses. */
       publishable: boolean;
       unpublishableReason?: string | undefined;
     };
@@ -38,33 +48,27 @@ export function classifyNoteRecord(record: CloudKitRecord): NoteDecodeResult {
     return { status: "unsyncable", reason: "undecodable" };
   }
 
-  const attachments = decodeNoteAttachmentRefs(compressed);
-  const placeholderCount = countOccurrences(bodyText, OBJECT_REPLACEMENT_CHARACTER);
   const title = decodeTitleField(record.fields.TitleEncrypted);
-  if (placeholderCount !== attachments.length) {
-    // Some embedded object we don't understand (a drawing, scanned document,
-    // ...) also uses this placeholder, or our attachment-run parse missed
-    // one - either
-    // way we can't trust a positional correlation between the two, so we
-    // can't localize *which* placeholder is the problem. Per the Safety
-    // Guarantee Audit: still fetch the note (banner up top, since we can't
-    // pinpoint the spot), but never allow it to be pushed. See dev notes,
-    // 2026-07-13/14.
+  const embedSlots = decodeNoteEmbedSlots(compressed);
+  if (embedSlots === undefined) {
+    // The embed structure defies the model verified against real captures
+    // (an attachmentInfo run not sitting on a lone U+FFFC), so no placeholder
+    // can be trusted to mean what it appears to. Per the Safety Guarantee
+    // Audit: still fetch the note (banner up top, since nothing can be
+    // localized), but never allow it to be pushed.
     return {
       status: "ok",
       title,
       bodyText: UNKNOWN_CONTENT_BANNER + bodyText,
-      attachments,
+      embedSlots: [],
+      attachments: [],
       publishable: false,
       unpublishableReason: "contains unrecognized embedded content this tool couldn't parse or place precisely",
     };
   }
 
-  return { status: "ok", title, bodyText, attachments, publishable: true };
-}
-
-function countOccurrences(text: string, needle: string): number {
-  return text.split(needle).length - 1;
+  const attachments = embedSlots.filter((slot): slot is EmbedSlot & { kind: "attachment" } => slot.kind === "attachment").map((slot) => slot.ref);
+  return { status: "ok", title, bodyText, embedSlots, attachments, publishable: true };
 }
 
 function isDeleted(record: CloudKitRecord): boolean {

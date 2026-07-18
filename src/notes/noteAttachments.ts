@@ -40,6 +40,70 @@ export function decodeNoteAttachmentRefs(compressedProtobuf: Buffer): Attachment
   return refs;
 }
 
+/**
+ * One U+FFFC placeholder's worth of embed, localized by character offset
+ * rather than count-correlation (the Step 1 fix from the formatting plan,
+ * 2026-07-17): an `attachment` slot has a fully-identified reference; an
+ * `unknown` slot is a placeholder whose `attachmentInfo` run was absent or
+ * incomplete (its `typeUti` is carried when at least that much was present).
+ */
+export type EmbedSlot =
+  | { kind: "attachment"; ref: AttachmentReference }
+  | { kind: "unknown"; typeUti?: string | undefined };
+
+/**
+ * Maps every U+FFFC placeholder in a note's body to an `EmbedSlot`, in
+ * document order, by computing each `attachmentInfo` run's character offset
+ * from the attribute-run lengths - no count-correlation assumption.
+ *
+ * Returns `undefined` when the embed structure defies the model this was
+ * verified against - an `attachmentInfo` run that isn't exactly one
+ * character long sitting on a U+FFFC, or an attribute-run table that doesn't
+ * cover the text. Those notes get the whole-note banner and stay read-only
+ * (see `classifyNoteRecord`).
+ */
+export function decodeNoteEmbedSlots(compressedProtobuf: Buffer): EmbedSlot[] | undefined {
+  const raw = decompressNoteDocument(compressedProtobuf);
+  const { data } = parseVersionedDocument(raw);
+  const str = fromBinary(StringSchema, data);
+  const text = str.string;
+
+  const infoByOffset = new Map<number, NonNullable<(typeof str.attributeRun)[number]["attachmentInfo"]>>();
+  let offset = 0;
+  for (const run of str.attributeRun) {
+    if (run.attachmentInfo !== undefined) {
+      if (run.length !== 1 || text[offset] !== OBJECT_REPLACEMENT_CHARACTER) {
+        return undefined;
+      }
+      infoByOffset.set(offset, run.attachmentInfo);
+    }
+    offset += run.length;
+  }
+  if (offset > text.length) {
+    // Run lengths overshoot the text, so every offset above is suspect. (An
+    // *under*-covering run table is tolerated - trailing characters simply
+    // carry no formatting, and a placeholder there is an unknown slot.)
+    return undefined;
+  }
+
+  const slots: EmbedSlot[] = [];
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] !== OBJECT_REPLACEMENT_CHARACTER) {
+      continue;
+    }
+    const info = infoByOffset.get(i);
+    if (info !== undefined && isFieldSet(info, ATTACHMENT_IDENTIFIER_FIELD) && isFieldSet(info, TYPE_UTI_FIELD)) {
+      slots.push({ kind: "attachment", ref: { attachmentIdentifier: info.attachmentIdentifier, typeUti: info.typeUTI } });
+    } else {
+      slots.push({
+        kind: "unknown",
+        typeUti: info !== undefined && isFieldSet(info, TYPE_UTI_FIELD) ? info.typeUTI : undefined,
+      });
+    }
+  }
+  return slots;
+}
+
 /** Apple's plain-text placeholder for any embedded object (attachment,
  * table, drawing, ...) that doesn't have its own literal text representation. */
 export const OBJECT_REPLACEMENT_CHARACTER = "\uFFFC";

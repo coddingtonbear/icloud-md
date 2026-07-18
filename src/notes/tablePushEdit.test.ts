@@ -1,11 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
-import { OBJECT_REPLACEMENT_CHARACTER } from "./noteAttachments.js";
 import { gridFromTableDocument, parseTableDocument, tableDocumentRoundTrips } from "./decodeTableRecord.js";
 import { validateTableDocumentInvariants } from "./tableEdit.js";
-import { findMarkdownTableBlocks, renderMarkdownTable } from "./markdownTable.js";
-import { prepareTableAttachmentUpdate, reconstructBodyTextWithPlaceholders } from "./tablePushEdit.js";
+import { prepareTableAttachmentUpdate } from "./tablePushEdit.js";
 import { TABLE_FIRST_REVISION } from "./realFixtures.js";
 
 const OUR_REPLICA = new Uint8Array(Array.from({ length: 16 }, (_, i) => 0xb0 + i));
@@ -38,35 +36,6 @@ function expectWritten(result: ReturnType<typeof prepareTableAttachmentUpdate>, 
   validateTableDocumentInvariants(doc);
   return doc;
 }
-
-// --- reconstructBodyTextWithPlaceholders ------------------------------------
-
-test("reconstructBodyTextWithPlaceholders replaces a single table block with the placeholder character", () => {
-  const table = renderMarkdownTable([["A", "B"]]);
-  const localText = ["Intro line.", table, "Outro line."].join("\n");
-  const blocks = findMarkdownTableBlocks(localText);
-  const reconstructed = reconstructBodyTextWithPlaceholders(localText, blocks);
-  assert.equal(reconstructed, ["Intro line.", OBJECT_REPLACEMENT_CHARACTER, "Outro line."].join("\n"));
-});
-
-test("reconstructBodyTextWithPlaceholders handles multiple table blocks, in document order", () => {
-  const first = renderMarkdownTable([["First"]]);
-  const second = renderMarkdownTable([["Second", "Table"]]);
-  const localText = ["Intro", first, "Middle", second, "Outro"].join("\n");
-  const blocks = findMarkdownTableBlocks(localText);
-  assert.equal(blocks.length, 2);
-  const reconstructed = reconstructBodyTextWithPlaceholders(localText, blocks);
-  assert.equal(
-    reconstructed,
-    ["Intro", OBJECT_REPLACEMENT_CHARACTER, "Middle", OBJECT_REPLACEMENT_CHARACTER, "Outro"].join("\n"),
-  );
-});
-
-test("reconstructBodyTextWithPlaceholders round-trips with no surrounding prose at all", () => {
-  const table = renderMarkdownTable([["Only", "Content"]]);
-  const blocks = findMarkdownTableBlocks(table);
-  assert.equal(reconstructBodyTextWithPlaceholders(table, blocks), OBJECT_REPLACEMENT_CHARACTER);
-});
 
 // --- prepareTableAttachmentUpdate --------------------------------------------
 

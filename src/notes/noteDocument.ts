@@ -584,20 +584,43 @@ function adjustAttributeRuns(doc: NoteDocument, start: number, deleteLength: num
     // so inserted text inherits its formatting (matches the captured append,
     // which extended the trailing attribute run). At position 0, the first
     // run grows instead (inheriting the following character's formatting).
+    //
+    // Exception: a run carrying `attachmentInfo` must keep covering exactly
+    // its one U+FFFC placeholder - growing it would attach the inserted text
+    // to the embed, a shape Apple's own clients never write (every captured
+    // attachmentInfo run is length 1). Inserting right next to an embed
+    // gives the text its own run instead, inheriting the embed's paragraph
+    // formatting but not the attachment linkage.
     let grown = false;
     let runEnd = 0;
-    for (const run of out) {
+    for (let i = 0; i < out.length; i += 1) {
+      const run = out[i];
+      if (!run) {
+        continue;
+      }
       runEnd += run.length;
       if (start <= runEnd) {
-        run.length += insertLength;
+        if (run.attachmentInfo === undefined) {
+          run.length += insertLength;
+        } else {
+          const piece = clone(AttributeRunSchema, run);
+          piece.attachmentInfo = undefined;
+          piece.length = insertLength;
+          out.splice(start === runEnd ? i + 1 : i, 0, piece);
+        }
         grown = true;
         break;
       }
     }
     if (!grown) {
       const lastRun = out[out.length - 1];
-      if (lastRun) {
+      if (lastRun && lastRun.attachmentInfo === undefined) {
         lastRun.length += insertLength;
+      } else if (lastRun) {
+        const piece = clone(AttributeRunSchema, lastRun);
+        piece.attachmentInfo = undefined;
+        piece.length = insertLength;
+        out.push(piece);
       } else {
         // Every attribute run was consumed by the deletion (the note was
         // fully replaced): keep a single plain run covering the new text.

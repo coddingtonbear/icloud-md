@@ -20,23 +20,24 @@ import { classifyNoteRecord, type NoteDecodeResult } from "../notes/decodeNoteRe
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { buildNoteCreateFields, buildNoteMoveFields, buildNoteTrashFields, buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
 import { noteDirOf, stateDirIndex } from "../notes/folderLayout.js";
-import { findMarkdownTableBlocks } from "../notes/markdownTable.js";
+import { planEmbedRepresentations } from "../notes/embedPushEdit.js";
 import { isEnoent } from "../fsUtil.js";
 import { mergeNoteVersions } from "../notes/mergeConflict.js";
-import { hasAttachmentReference, isTableUti } from "../notes/noteAttachments.js";
-import { hasUnknownContentMarker } from "../notes/unknownContent.js";
+import { decodeNoteEmbedSlots, hasAttachmentReference, OBJECT_REPLACEMENT_CHARACTER, type EmbedSlot } from "../notes/noteAttachments.js";
+import { hasEmbedMarker, hasUnknownContentMarker } from "../notes/unknownContent.js";
 import { localFileState } from "../notes/localFileState.js";
 import { recordEpoch } from "../notes/noteEpoch.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { renderPlan, stripFilePrefix, type PlanEntry } from "../notes/pushPlan.js";
 import { compressNoteDocument, decodeNoteBodyText, decompressNoteDocument } from "../notes/noteText.js";
-import { prepareTableAttachmentUpdate, reconstructBodyTextWithPlaceholders } from "../notes/tablePushEdit.js";
+import { prepareTableAttachmentUpdate } from "../notes/tablePushEdit.js";
 import { historyRecordNames } from "../notes/trackedFile.js";
 import { recordVersion } from "../notes/versionHistory.js";
 import { applyLocalNoteDeletion, isInTrash, isPurged, rememberTrashedNote } from "./delete.js";
 import {
   applyTextEdit,
   buildInitialNoteDocument,
+  computeSplice,
   encodeNoteDocument,
   noteDocumentRoundTrips,
   parseNoteDocument,
@@ -408,6 +409,15 @@ export async function buildPushPlan(
       });
       continue;
     }
+    if (hasEmbedMarker(localText)) {
+      entries.push({
+        kind: "create",
+        file,
+        resolution: "refused",
+        reason: "contains an embed marker, but this tool can't create embeds - remove it before pushing",
+      });
+      continue;
+    }
     if (hasAttachmentReference(localText)) {
       entries.push({
         kind: "create",
@@ -705,7 +715,11 @@ export async function buildPushPlan(
 
     if ((record.recordChangeTag ?? "") !== entry.recordChangeTag) {
       const classified = classifyNoteRecord(record);
-      if (classified.status !== "ok") {
+      // An embed-bearing note can't be eagerly merged here: its raw body
+      // text carries U+FFFC placeholders where the local file has rendered
+      // tables/links/markers, so a diff3 against it would write placeholder
+      // soup into the file. `pull` re-renders and merges properly.
+      if (classified.status !== "ok" || classified.embedSlots.length > 0) {
         entries.push({
           kind: "update",
           file: entry.file,
@@ -753,6 +767,11 @@ export async function buildPushPlan(
     const summary: PushSummary = { conflicts: [], refused: [] };
     const conflictsBefore = summary.conflicts.length;
     const refusedBefore = summary.refused.length;
+    const trackedFileAttachmentIds = new Set(
+      Object.entries(state.attachments ?? {})
+        .filter(([, attachment]) => attachment.noteRecordName === recordName)
+        .map(([attachmentRecordName]) => attachmentRecordName),
+    );
     const prepared = await prepareUpdate(
       session,
       ckdatabasewsUrl,
@@ -762,6 +781,7 @@ export async function buildPushPlan(
       record,
       entry,
       localText,
+      trackedFileAttachmentIds,
       replicaIdBytes,
       modificationDateMs,
       summary,
@@ -952,6 +972,7 @@ async function prepareUpdate(
   record: CloudKitRecord,
   entry: CloneStateNoteEntry,
   localText: string,
+  trackedFileAttachmentIds: ReadonlySet<string>,
   replicaId: Uint8Array,
   modificationDateMs: number,
   summary: PushSummary,
@@ -970,15 +991,8 @@ async function prepareUpdate(
     return undefined;
   }
 
-  if (classified.attachments.length > 0) {
-    if (!classified.attachments.every((ref) => isTableUti(ref.typeUti))) {
-      summary.refused.push(
-        `${entry.file}: this note has an attachment - it can't be safely edited through this tool and will stay ` +
-          `read-only. Run "icloud-notes restore ${entry.file}" to discard your local edit and match the synced copy.`,
-      );
-      return undefined;
-    }
-    return prepareTableCandidate(
+  if (classified.embedSlots.length > 0) {
+    return prepareEmbedCandidate(
       session,
       ckdatabasewsUrl,
       dsid,
@@ -988,13 +1002,14 @@ async function prepareUpdate(
       classified,
       entry,
       localText,
+      trackedFileAttachmentIds,
       replicaId,
       modificationDateMs,
       summary,
     );
   }
 
-  const textUpdate = prepareNoteTextUpdate(record, classified.bodyText, localText, replicaId, entry, summary);
+  const textUpdate = prepareNoteTextUpdate(record, classified.bodyText, localText, classified.embedSlots, replicaId, entry, summary);
   if (!textUpdate) {
     return undefined;
   }
@@ -1006,15 +1021,18 @@ async function prepareUpdate(
 }
 
 /**
- * The table write path: loosens the blanket attachment refusal above for
- * the "every attachment is a table" case. Locates each table's rendered
- * markdown block in the local text (by document order, matching how
- * `resolveNoteAttachments` substituted them on read - see
- * `findMarkdownTableBlocks`), diffs and applies each one that actually
- * changed, and - only if the surrounding prose changed too - also updates
- * the Note record's own text, all as one atomic `records/modify` batch.
+ * The embed-bearing note path (tables, and - since Step 1 of the formatting
+ * plan, 2026-07-17 - unrenderable embeds carried as inline markers).
+ * `planEmbedRepresentations` locates each embed slot's local representation
+ * (verbatim marker or rendered markdown table block, by document order,
+ * matching how `resolveNoteAttachments` substituted them on read) and
+ * reconstructs the placeholder-form body text. Changed tables are diffed
+ * and applied; markers pass through untouched (their placeholders and
+ * `attachmentInfo` runs stay exactly as they are); if the surrounding prose
+ * changed too, the Note record's own text updates as well - all as one
+ * atomic `records/modify` batch.
  */
-async function prepareTableCandidate(
+async function prepareEmbedCandidate(
   session: IcloudSession,
   ckdatabasewsUrl: string,
   dsid: string,
@@ -1024,27 +1042,28 @@ async function prepareTableCandidate(
   classified: OkNoteRecordResult,
   entry: CloneStateNoteEntry,
   localText: string,
+  trackedFileAttachmentIds: ReadonlySet<string>,
   replicaId: Uint8Array,
   modificationDateMs: number,
   summary: PushSummary,
 ): Promise<PreparedCandidate | undefined> {
-  const blocks = findMarkdownTableBlocks(localText);
-  if (blocks.length !== classified.attachments.length) {
-    summary.refused.push(
-      `${entry.file}: can't tell which table(s) changed (found ${blocks.length} table-shaped block(s) locally, ` +
-        `expected ${classified.attachments.length}) - run "icloud-notes restore ${entry.file}" to discard the edit.`,
-    );
+  const plan = planEmbedRepresentations(localText, classified.embedSlots, trackedFileAttachmentIds);
+  if (!plan.ok) {
+    summary.refused.push(`${entry.file}: ${plan.reason}. Run "icloud-notes restore ${entry.file}" to discard your local edit.`);
     return undefined;
   }
 
-  const attachmentRecords = await lookupRecords(
-    session,
-    ckdatabasewsUrl,
-    dsid,
-    zone.database,
-    zone.zoneID,
-    classified.attachments.map((ref) => ref.attachmentIdentifier),
-  );
+  const attachmentRecords =
+    plan.tables.length === 0
+      ? []
+      : await lookupRecords(
+          session,
+          ckdatabasewsUrl,
+          dsid,
+          zone.database,
+          zone.zoneID,
+          plan.tables.map((table) => table.ref.attachmentIdentifier),
+        );
   const attachmentByName = new Map(attachmentRecords.map((r) => [r.recordName, r]));
 
   // Snapshot every fetched table's current server-side bytes before the
@@ -1069,12 +1088,7 @@ async function prepareTableCandidate(
   }
 
   const updates: RecordUpdate[] = [];
-  for (let i = 0; i < classified.attachments.length; i += 1) {
-    const ref = classified.attachments[i];
-    const block = blocks[i];
-    if (!ref || !block) {
-      continue;
-    }
+  for (const { ref, block } of plan.tables) {
     const attachmentRecord = attachmentByName.get(ref.attachmentIdentifier);
     if (!attachmentRecord || attachmentRecord.deleted === true) {
       summary.conflicts.push(`${entry.file}: a table in this note no longer exists remotely - run "pull" to reconcile`);
@@ -1098,14 +1112,21 @@ async function prepareTableCandidate(
     }
   }
 
-  const reconstructedBodyText = reconstructBodyTextWithPlaceholders(localText, blocks);
   let noteTextUpdated = false;
-  if (reconstructedBodyText !== classified.bodyText) {
-    const textUpdate = prepareNoteTextUpdate(record, classified.bodyText, reconstructedBodyText, replicaId, entry, summary);
+  if (plan.reconstructedBodyText !== classified.bodyText) {
+    const textUpdate = prepareNoteTextUpdate(
+      record,
+      classified.bodyText,
+      plan.reconstructedBodyText,
+      classified.embedSlots,
+      replicaId,
+      entry,
+      summary,
+    );
     if (!textUpdate) {
       return undefined;
     }
-    const fields = buildNoteUpdateFields(record, textUpdate, reconstructedBodyText, modificationDateMs);
+    const fields = buildNoteUpdateFields(record, textUpdate, plan.reconstructedBodyText, modificationDateMs);
     updates.unshift(noteRecordUpdate(record, entry, fields));
     noteTextUpdated = true;
   }
@@ -1137,13 +1158,17 @@ function noteRecordUpdate(record: CloudKitRecord, entry: CloneStateNoteEntry, fi
  * text, returning it base64-encoded, or undefined (with the reason recorded
  * in `summary`) if any safety gate refuses. `currentBodyText` is what the
  * remote document is expected to currently decode to (the plain-text path
- * passes the remote's own text; the table path passes the same, since only
- * the *desired* text differs when prose around a table changed too).
+ * passes the remote's own text; the embed path passes the same, since only
+ * the *desired* text differs when prose around an embed changed too).
+ * `expectedSlots` is the note's embed structure, which the edit must leave
+ * exactly alone: the text splice may not touch a U+FFFC placeholder, and the
+ * rebuilt document must decode to the same slots it started with.
  */
 function prepareNoteTextUpdate(
   record: CloudKitRecord,
   currentBodyText: string,
   desiredBodyText: string,
+  expectedSlots: readonly EmbedSlot[],
   replicaId: Uint8Array,
   entry: CloneStateNoteEntry,
   summary: PushSummary,
@@ -1168,6 +1193,22 @@ function prepareNoteTextUpdate(
     return undefined;
   }
 
+  // The single-splice diff must steer clear of every U+FFFC placeholder:
+  // tombstoning one (or typing a literal one) would sever the CRDT character
+  // its attachmentInfo run points at, even if the visible text ends up with
+  // the right placeholder count. Embeds can't be moved through this tool.
+  const splice = computeSplice(currentBodyText, desiredBodyText);
+  const spliceTouchesPlaceholder =
+    currentBodyText.slice(splice.start, splice.start + splice.deleteLength).includes(OBJECT_REPLACEMENT_CHARACTER) ||
+    splice.insertText.includes(OBJECT_REPLACEMENT_CHARACTER);
+  if (spliceTouchesPlaceholder) {
+    summary.refused.push(
+      `${entry.file}: this edit would delete or move an embedded object - embeds can only be edited in Notes itself. ` +
+        `Run "icloud-notes restore ${entry.file}" to discard your local edit.`,
+    );
+    return undefined;
+  }
+
   try {
     const doc = parseNoteDocument(raw);
     if (doc.text !== currentBodyText) {
@@ -1180,12 +1221,40 @@ function prepareNoteTextUpdate(
       summary.refused.push(`${entry.file}: rebuilt document failed decode verification - refusing to push`);
       return undefined;
     }
+    // The embed structure must have come through the edit untouched - same
+    // slots, same order, same identities (this also backstops
+    // `adjustAttributeRuns`'s never-grow-an-attachmentInfo-run guard).
+    const rebuiltSlots = decodeNoteEmbedSlots(compressed);
+    if (rebuiltSlots === undefined || !embedSlotsEqual(rebuiltSlots, expectedSlots)) {
+      summary.refused.push(`${entry.file}: rebuilt document failed embed-structure verification - refusing to push`);
+      return undefined;
+    }
     return compressed.toString("base64");
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
     summary.refused.push(`${entry.file}: ${message}`);
     return undefined;
   }
+}
+
+function embedSlotsEqual(a: readonly EmbedSlot[], b: readonly EmbedSlot[]): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  return a.every((slot, i) => {
+    const other = b[i];
+    if (!other) {
+      return false;
+    }
+    if (slot.kind === "attachment") {
+      return (
+        other.kind === "attachment" &&
+        slot.ref.attachmentIdentifier === other.ref.attachmentIdentifier &&
+        slot.ref.typeUti === other.ref.typeUti
+      );
+    }
+    return other.kind === "unknown" && slot.typeUti === other.typeUti;
+  });
 }
 
 /** Matches the diff3 markers `pull` writes (and git's own, same format). */

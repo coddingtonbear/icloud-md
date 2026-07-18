@@ -27,7 +27,6 @@ import { localFileState } from "../notes/localFileState.js";
 import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
 import { recordEpoch } from "../notes/noteEpoch.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
-import { combineUnpublishableReasons } from "../notes/unknownContent.js";
 import { recordVersion } from "../notes/versionHistory.js";
 import type { SyncProgress } from "../progress.js";
 import { isPurged } from "./delete.js";
@@ -207,8 +206,8 @@ export async function runPull(
         const noteDir = existing ? noteDirOf(existing.file) : placement.dir;
 
         let bodyText = decoded.bodyText;
-        let unpublishableReason = decoded.unpublishableReason;
-        if (decoded.attachments.length > 0) {
+        const unpublishableReason = decoded.unpublishableReason;
+        if (decoded.embedSlots.length > 0) {
           const zoneID = source.sharedZoneOwner
             ? { zoneName: PRIVATE_NOTES_ZONE.zoneName, ownerRecordName: source.sharedZoneOwner }
             : PRIVATE_NOTES_ZONE;
@@ -219,14 +218,13 @@ export async function runPull(
             targetDir,
             record.recordName,
             decoded.bodyText,
-            decoded.attachments,
+            decoded.embedSlots,
             attachments,
             tableAttachments,
             usedNamesFor(usedAttachmentFileNames, noteDir),
             noteDir,
           );
           bodyText = resolved.bodyText;
-          unpublishableReason = combineUnpublishableReasons(unpublishableReason, resolved.unpublishableReason);
           for (const stale of resolved.staleAttachmentRecordNames) {
             const staleEntry = attachments[stale];
             if (staleEntry) {

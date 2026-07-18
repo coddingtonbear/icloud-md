@@ -19,8 +19,9 @@ import {
   parseAssetField,
   renderPlaceholders,
   type AttachmentReference,
+  type EmbedSlot,
 } from "./noteAttachments.js";
-import { formatUnknownEmbedMarker } from "./unknownContent.js";
+import { formatEmbedMarker } from "./unknownContent.js";
 
 export interface AttachmentAuth {
   session: IcloudSession;
@@ -167,12 +168,6 @@ export interface AttachmentSyncResult {
   /** One entry per table reference that resolved this call - the caller
    * (`pull`) feeds these into `versionHistory.ts`'s `recordVersion`. */
   tableAttachmentSnapshots: TableAttachmentSnapshotSource[];
-  /** Set when one or more references didn't resolve to what we've verified
-   * live (a table/file shape we couldn't parse) - those got an inline
-   * unknown-content marker instead. Per the Safety Guarantee Audit, this
-   * note must never be pushed; the caller should record this on the note's
-   * state entry. `undefined` when every reference resolved normally. */
-  unpublishableReason?: string | undefined;
 }
 
 /**
@@ -187,14 +182,16 @@ export interface AttachmentSyncResult {
  *
  * Per the Safety Guarantee Audit, a reference that doesn't match what we've
  * verified live - a file reference whose `Attachment`/`Media`/`Asset` chain
- * doesn't resolve, or a table whose `MergeableDataEncrypted` doesn't decode -
- * no longer refuses the whole note. Instead that one placeholder gets an
- * inline "unparsed content" admonition and `unpublishableReason` is set, so
- * the rest of the note (and any other, resolvable references) still comes
- * through. The actual matching (`extractMediaRecordNames`/
- * `matchAttachmentRecords`, `decodeTableMarkdown`) is pure and unit-tested
- * against real captures; this function is the thin network+fs wrapper
- * around it, verified live instead.
+ * doesn't resolve, a table whose `MergeableDataEncrypted` doesn't decode, or
+ * a placeholder with no usable `attachmentInfo` at all (an `unknown` slot) -
+ * doesn't refuse the whole note. That one placeholder gets an inline embed
+ * marker (see `formatEmbedMarker`) carrying whatever identity it has, and
+ * the rest of the note still comes through. Since Step 1 of the formatting
+ * plan (2026-07-17) a marker no longer makes the note unpublishable either -
+ * `push` verifies markers survive verbatim instead. The actual matching
+ * (`extractMediaRecordNames`/`matchAttachmentRecords`, `decodeTableMarkdown`)
+ * is pure and unit-tested against real captures; this function is the thin
+ * network+fs wrapper around it, verified live instead.
  */
 export async function resolveNoteAttachments(
   auth: AttachmentAuth,
@@ -203,7 +200,7 @@ export async function resolveNoteAttachments(
   targetDir: string,
   noteRecordName: string,
   bodyText: string,
-  refs: readonly AttachmentReference[],
+  slots: readonly EmbedSlot[],
   existingAttachments: Record<string, CloneStateAttachmentEntry>,
   existingTableAttachments: Record<string, CloneStateTableAttachmentEntry>,
   usedAttachmentFileNames: Set<string>,
@@ -216,7 +213,7 @@ export async function resolveNoteAttachments(
     (recordName) => existingTableAttachments[recordName]?.noteRecordName === noteRecordName,
   );
 
-  if (refs.length === 0) {
+  if (slots.length === 0) {
     return {
       bodyText,
       attachments: {},
@@ -227,36 +224,43 @@ export async function resolveNoteAttachments(
     };
   }
 
-  const attachmentRecords = await lookupRecords(
-    auth.session,
-    auth.ckdatabasewsUrl,
-    auth.dsid,
-    database,
-    zoneID,
-    refs.map((ref) => ref.attachmentIdentifier),
-  );
+  const identifiedRefs = slots.flatMap((slot) => (slot.kind === "attachment" ? [slot.ref] : []));
+  const attachmentRecords =
+    identifiedRefs.length === 0
+      ? []
+      : await lookupRecords(
+          auth.session,
+          auth.ckdatabasewsUrl,
+          auth.dsid,
+          database,
+          zoneID,
+          identifiedRefs.map((ref) => ref.attachmentIdentifier),
+        );
   const attachmentByName = new Map(attachmentRecords.map((record) => [record.recordName, record]));
 
-  // One entry per ref, same document order as the U+FFFC placeholders;
-  // filled in below as each ref (table or file) resolves.
-  const replacements: (string | undefined)[] = new Array(refs.length).fill(undefined);
+  // One entry per slot, same document order as the U+FFFC placeholders;
+  // filled in below as each slot (unknown, table, or file) resolves.
+  const replacements: (string | undefined)[] = new Array(slots.length).fill(undefined);
   const fileRefs: AttachmentReference[] = [];
   const fileRefIndexes: number[] = [];
-  const unresolvedTypeUtis: string[] = [];
   const tableAttachments: Record<string, CloneStateTableAttachmentEntry> = {};
   const tableAttachmentSnapshots: TableAttachmentSnapshotSource[] = [];
 
-  for (let i = 0; i < refs.length; i += 1) {
-    const ref = refs[i];
-    if (!ref) {
+  for (let i = 0; i < slots.length; i += 1) {
+    const slot = slots[i];
+    if (!slot) {
       continue;
     }
+    if (slot.kind === "unknown") {
+      replacements[i] = formatEmbedMarker({ typeUti: slot.typeUti });
+      continue;
+    }
+    const ref = slot.ref;
     if (isTableUti(ref.typeUti)) {
       const attachmentRecord = attachmentByName.get(ref.attachmentIdentifier);
       const markdown = decodeTableAttachment(attachmentRecord);
       if (markdown === undefined) {
-        replacements[i] = formatUnknownEmbedMarker(ref.typeUti);
-        unresolvedTypeUtis.push(ref.typeUti);
+        replacements[i] = formatEmbedMarker(ref);
       } else {
         replacements[i] = markdown;
         tableAttachments[ref.attachmentIdentifier] = { noteRecordName };
@@ -307,8 +311,7 @@ export async function resolveNoteAttachments(
         continue;
       }
       if (!attachment) {
-        replacements[index] = formatUnknownEmbedMarker(ref.typeUti);
-        unresolvedTypeUtis.push(ref.typeUti);
+        replacements[index] = formatEmbedMarker(ref);
         continue;
       }
       if (attachment.needsDownload) {
@@ -325,10 +328,6 @@ export async function resolveNoteAttachments(
   const staleTableAttachmentRecordNames = previousTableForNote.filter(
     (recordName) => !(recordName in tableAttachments),
   );
-  const unpublishableReason =
-    unresolvedTypeUtis.length > 0
-      ? `contains embedded content this tool can't parse (${[...new Set(unresolvedTypeUtis)].join(", ")})`
-      : undefined;
 
   return {
     bodyText: renderPlaceholders(bodyText, replacements),
@@ -337,7 +336,6 @@ export async function resolveNoteAttachments(
     tableAttachments,
     staleTableAttachmentRecordNames,
     tableAttachmentSnapshots,
-    unpublishableReason,
   };
 }
 

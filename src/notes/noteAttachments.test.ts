@@ -1,8 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { create, toBinary, type MessageInitShape } from "@bufbuild/protobuf";
+import { StringSchema } from "./gen/topotext_pb.js";
+import { DocumentSchema as VersionedDocumentSchema, VersionSchema } from "./gen/versioned_document_pb.js";
+import { compressNoteDocument } from "./noteText.js";
 import {
   decodeAttachmentFilename,
   decodeNoteAttachmentRefs,
+  decodeNoteEmbedSlots,
   formatAttachmentMarkdown,
   hasAttachmentReference,
   isImageUti,
@@ -12,6 +17,21 @@ import {
   renderPlaceholders,
   type AttachmentReference,
 } from "./noteAttachments.js";
+
+function encodeNoteBody(
+  text: string,
+  attributeRun: MessageInitShape<typeof StringSchema>["attributeRun"] = [],
+): Buffer {
+  const message = create(VersionedDocumentSchema, {
+    version: [
+      create(VersionSchema, {
+        minimumSupportedVersion: 0,
+        data: toBinary(StringSchema, create(StringSchema, { string: text, attributeRun })),
+      }),
+    ],
+  });
+  return compressNoteDocument(toBinary(VersionedDocumentSchema, message));
+}
 
 // Real `TextDataEncrypted` captured live from "Call with Janice Elkins", a
 // note with a single audio attachment (dev notes, 2026-07-13T21:54).
@@ -31,6 +51,59 @@ test("decodeNoteAttachmentRefs finds the embedded audio attachment reference", (
 test("decodeNoteAttachmentRefs finds the embedded image attachment reference", () => {
   const refs = decodeNoteAttachmentRefs(Buffer.from(IMAGE_ATTACHMENT_TEXT_DATA, "base64"));
   assert.deepEqual(refs, [{ attachmentIdentifier: "7ED80274-4400-4C02-87EA-F542F056FF02", typeUti: "public.jpeg" }]);
+});
+
+test("decodeNoteEmbedSlots localizes the real audio attachment as an attachment slot", () => {
+  const slots = decodeNoteEmbedSlots(Buffer.from(AUDIO_ATTACHMENT_TEXT_DATA, "base64"));
+  assert.deepEqual(slots, [
+    { kind: "attachment", ref: { attachmentIdentifier: "7DAFDA6F-4AC4-41D8-9958-049373B80824", typeUti: "com.apple.m4a-audio" } },
+  ]);
+});
+
+test("decodeNoteEmbedSlots maps placeholders by offset, mixing identified and unknown slots", () => {
+  // "T\n￼\nmid\n￼" - first placeholder has a full attachmentInfo run, the
+  // second has none at all. Count-correlation would have mispaired these;
+  // offsets don't.
+  const body = encodeNoteBody("T\n￼\nmid\n￼", [
+    { length: 2 },
+    { length: 1, attachmentInfo: { attachmentIdentifier: "A-1", typeUTI: "public.jpeg" } },
+    { length: 5 },
+  ]);
+  assert.deepEqual(decodeNoteEmbedSlots(body), [
+    { kind: "attachment", ref: { attachmentIdentifier: "A-1", typeUti: "public.jpeg" } },
+    { kind: "unknown", typeUti: undefined },
+  ]);
+});
+
+test("decodeNoteEmbedSlots carries a partial attachmentInfo's UTI into the unknown slot", () => {
+  const body = encodeNoteBody("x￼", [{ length: 1 }, { length: 1, attachmentInfo: { typeUTI: "com.apple.drawing.2" } }]);
+  assert.deepEqual(decodeNoteEmbedSlots(body), [{ kind: "unknown", typeUti: "com.apple.drawing.2" }]);
+});
+
+test("decodeNoteEmbedSlots returns undefined when an attachmentInfo run isn't a lone placeholder", () => {
+  const overlong = encodeNoteBody("x￼y", [
+    { length: 1 },
+    { length: 2, attachmentInfo: { attachmentIdentifier: "A", typeUTI: "public.jpeg" } },
+  ]);
+  assert.equal(decodeNoteEmbedSlots(overlong), undefined);
+
+  const offPlaceholder = encodeNoteBody("xy", [
+    { length: 1 },
+    { length: 1, attachmentInfo: { attachmentIdentifier: "A", typeUTI: "public.jpeg" } },
+  ]);
+  assert.equal(decodeNoteEmbedSlots(offPlaceholder), undefined);
+});
+
+test("decodeNoteEmbedSlots returns undefined when run lengths overshoot the text", () => {
+  const body = encodeNoteBody("hi", [{ length: 5 }]);
+  assert.equal(decodeNoteEmbedSlots(body), undefined);
+});
+
+test("decodeNoteEmbedSlots tolerates an under-covering (or absent) run table", () => {
+  assert.deepEqual(decodeNoteEmbedSlots(encodeNoteBody("plain text")), []);
+  assert.deepEqual(decodeNoteEmbedSlots(encodeNoteBody("tail ￼", [{ length: 2 }])), [
+    { kind: "unknown", typeUti: undefined },
+  ]);
 });
 
 test("isImageUti recognizes known image UTIs and rejects others", () => {

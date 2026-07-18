@@ -10,7 +10,6 @@ import { buildVaultLayout, placeNote, type SharedZoneRecords } from "../notes/fo
 import { writeBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState, writeCloneState, type CloneState } from "../notes/cloneState.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
-import { combineUnpublishableReasons } from "../notes/unknownContent.js";
 import { AlreadyClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import type { SyncProgress } from "../progress.js";
 
@@ -121,8 +120,8 @@ export async function runClone(
         const placement = placeNote(layout, record, source.sharedZoneOwner);
 
         let bodyText = decoded.bodyText;
-        let unpublishableReason = decoded.unpublishableReason;
-        if (decoded.attachments.length > 0) {
+        const unpublishableReason = decoded.unpublishableReason;
+        if (decoded.embedSlots.length > 0) {
           const zoneID = source.sharedZoneOwner
             ? { zoneName: PRIVATE_NOTES_ZONE.zoneName, ownerRecordName: source.sharedZoneOwner }
             : PRIVATE_NOTES_ZONE;
@@ -133,14 +132,13 @@ export async function runClone(
             targetDir,
             record.recordName,
             decoded.bodyText,
-            decoded.attachments,
+            decoded.embedSlots,
             attachments,
             tableAttachments,
             usedNamesFor(usedAttachmentFileNames, placement.dir),
             placement.dir,
           );
           bodyText = resolved.bodyText;
-          unpublishableReason = combineUnpublishableReasons(unpublishableReason, resolved.unpublishableReason);
           Object.assign(attachments, resolved.attachments);
           summary.attachmentsDownloaded += Object.keys(resolved.attachments).length;
           Object.assign(tableAttachments, resolved.tableAttachments);

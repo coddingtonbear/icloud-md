@@ -361,3 +361,80 @@ test("a document built by buildInitialNoteDocument accepts a follow-up applyText
   validateDocumentInvariants(doc);
   assert.equal(parseNoteDocument(encodeNoteDocument(doc)).text, "Title\nBody with more\n");
 });
+
+// --- the attachmentInfo-run insertion guard ---------------------------------
+
+/** `simpleDocument` with its single attribute run replaced by a three-run
+ * table putting an attachmentInfo run over the U+FFFC at offset 1 of "a￼b" -
+ * the shape every captured embed note has (length-1 run on the placeholder). */
+function documentWithEmbed(): NoteDocument {
+  const doc = simpleDocument("a￼b");
+  doc.attributeRuns = [
+    create(AttributeRunSchema, { length: 1 }),
+    create(AttributeRunSchema, {
+      length: 1,
+      paragraphStyle: { style: 3 },
+      attachmentInfo: { attachmentIdentifier: "A-1", typeUTI: "public.jpeg" },
+    }),
+    create(AttributeRunSchema, { length: 1 }),
+  ];
+  return doc;
+}
+
+test("inserting right after an embed never grows its attachmentInfo run", () => {
+  const doc = documentWithEmbed();
+  assert.equal(applyTextEdit(doc, "a￼Xb", { replicaId: REPLICA_A }), true);
+
+  validateDocumentInvariants(doc);
+  assert.equal(doc.attributeRuns.length, 4);
+  // The embed's own run is untouched...
+  assert.equal(doc.attributeRuns[1]?.length, 1);
+  assert.equal(doc.attributeRuns[1]?.attachmentInfo?.attachmentIdentifier, "A-1");
+  // ...and the inserted text got its own run: the embed's formatting minus
+  // the attachment linkage.
+  assert.equal(doc.attributeRuns[2]?.length, 1);
+  assert.equal(doc.attributeRuns[2]?.attachmentInfo, undefined);
+  assert.equal(doc.attributeRuns[2]?.paragraphStyle?.style, 3);
+  assert.equal(reencodeAndDecode(doc), "a￼Xb");
+});
+
+test("inserting at position 0 before a leading embed keeps its run first-class", () => {
+  const doc = simpleDocument("￼b");
+  doc.attributeRuns = [
+    create(AttributeRunSchema, {
+      length: 1,
+      attachmentInfo: { attachmentIdentifier: "A-2", typeUTI: "com.apple.notes.gallery" },
+    }),
+    create(AttributeRunSchema, { length: 1 }),
+  ];
+
+  assert.equal(applyTextEdit(doc, "X￼b", { replicaId: REPLICA_A }), true);
+
+  validateDocumentInvariants(doc);
+  assert.equal(doc.attributeRuns.length, 3);
+  assert.equal(doc.attributeRuns[0]?.length, 1);
+  assert.equal(doc.attributeRuns[0]?.attachmentInfo, undefined);
+  assert.equal(doc.attributeRuns[1]?.length, 1);
+  assert.equal(doc.attributeRuns[1]?.attachmentInfo?.attachmentIdentifier, "A-2");
+  assert.equal(reencodeAndDecode(doc), "X￼b");
+});
+
+test("appending after a trailing embed grows a fresh run, not the embed's", () => {
+  const doc = simpleDocument("a￼");
+  doc.attributeRuns = [
+    create(AttributeRunSchema, { length: 1 }),
+    create(AttributeRunSchema, {
+      length: 1,
+      attachmentInfo: { attachmentIdentifier: "A-3", typeUTI: "com.apple.paper" },
+    }),
+  ];
+
+  assert.equal(applyTextEdit(doc, "a￼ tail", { replicaId: REPLICA_A }), true);
+
+  validateDocumentInvariants(doc);
+  assert.equal(doc.attributeRuns[1]?.length, 1);
+  assert.equal(doc.attributeRuns[1]?.attachmentInfo?.attachmentIdentifier, "A-3");
+  assert.equal(doc.attributeRuns[2]?.length, 5);
+  assert.equal(doc.attributeRuns[2]?.attachmentInfo, undefined);
+  assert.equal(reencodeAndDecode(doc), "a￼ tail");
+});

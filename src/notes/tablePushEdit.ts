@@ -6,28 +6,8 @@
  */
 
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
-import { OBJECT_REPLACEMENT_CHARACTER } from "./noteAttachments.js";
 import { encodeTableDocument, gridFromTableDocument, parseTableDocument, tableDocumentRoundTrips } from "./decodeTableRecord.js";
 import { applyTableEdit } from "./tableEdit.js";
-import type { MarkdownTableBlock } from "./markdownTable.js";
-
-/**
- * Un-splices each located table block back out of a locally-edited note's
- * text, replacing it with the single placeholder character
- * (`resolveNoteAttachments`'s `renderPlaceholders` did the reverse on read) -
- * recovering the "true" note body text (the shape `TextDataEncrypted`
- * actually stores) so it can be compared against the remote note's current
- * text, and diffed/pushed the normal way if the surrounding prose changed
- * too. Blocks are expected in document order, each spanning whole lines -
- * see `findMarkdownTableBlocks`.
- */
-export function reconstructBodyTextWithPlaceholders(localText: string, blocks: readonly MarkdownTableBlock[]): string {
-  const lines = localText.split("\n");
-  for (const block of [...blocks].sort((a, b) => b.startLine - a.startLine)) {
-    lines.splice(block.startLine, block.endLine - block.startLine, OBJECT_REPLACEMENT_CHARACTER);
-  }
-  return lines.join("\n");
-}
 
 export type TableAttachmentUpdateResult =
   | { ok: true; changed: boolean; mergeableDataBase64: string }
