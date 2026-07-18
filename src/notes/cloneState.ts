@@ -50,6 +50,15 @@ export interface CloneStateFolderEntry {
    * account's own folders.
    */
   sharedZoneOwner?: string | undefined;
+  /**
+   * Shared folders only: this account's permission on the folder's share
+   * ("READ_WRITE" / "READ_ONLY"), from the `cloudkit.share` record's
+   * `currentUserParticipant` (nested folders inherit the shared root's).
+   * Absent when unknown - e.g. state written before this field existed,
+   * where an incremental pull may never re-send the share record; push then
+   * attempts the write and lets the server be the authority.
+   */
+  permission?: string | undefined;
 }
 
 /** One sharer's top-level home directory - where everything shared by that
@@ -240,6 +249,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
         parentRecordName: typeof entry.parentRecordName === "string" ? entry.parentRecordName : undefined,
         dirName: entry.dirName,
         sharedZoneOwner: typeof entry.sharedZoneOwner === "string" ? entry.sharedZoneOwner : undefined,
+        permission: typeof entry.permission === "string" ? entry.permission : undefined,
       };
     }
   }

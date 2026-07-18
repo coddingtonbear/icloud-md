@@ -9,7 +9,9 @@ import {
   lookupRecords,
   updateNoteRecord,
   updateRecords,
+  type CloudKitDatabase,
   type CloudKitRecord,
+  type CloudKitZoneID,
   type RecordUpdate,
 } from "../cloudkit/databaseClient.js";
 import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
@@ -41,6 +43,43 @@ import {
 } from "../notes/noteDocument.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
+
+/** The database + zoneID a note's reads and writes go to. */
+interface NoteZone {
+  database: CloudKitDatabase;
+  zoneID: CloudKitZoneID;
+}
+
+/** Own notes live in the private Notes zone; a shared note lives in its
+ * sharer's zone of the shared database (same zoneName, owner-qualified). */
+function noteZone(sharedZoneOwner: string | undefined): NoteZone {
+  return sharedZoneOwner === undefined
+    ? { database: "private", zoneID: PRIVATE_NOTES_ZONE }
+    : { database: "shared", zoneID: { zoneName: "Notes", ownerRecordName: sharedZoneOwner } };
+}
+
+/**
+ * Why an edit to this tracked shared note can't be pushed, or undefined
+ * when it can. Notes *inside* a shared folder are editable when the share's
+ * stored permission allows it (unknown permission - e.g. state written
+ * before the permission field existed - is attempted and left to the
+ * server, whose rejection is benign); individually-shared notes loose in a
+ * sharer's home stay read-only - probably the same wire shape, but unproven,
+ * and their per-note share permission isn't tracked.
+ */
+function sharedNoteWriteRefusal(state: CloneState, entry: CloneStateNoteEntry): string | undefined {
+  if (entry.sharedZoneOwner === undefined) {
+    return undefined;
+  }
+  const folder = entry.folderRecordName !== undefined ? state.folders?.[entry.folderRecordName] : undefined;
+  if (folder === undefined || folder.sharedZoneOwner !== entry.sharedZoneOwner) {
+    return "individually-shared notes can't be edited yet - only notes inside a shared folder can";
+  }
+  if (folder.permission === "READ_ONLY") {
+    return "this shared folder is read-only for you - the server would reject the edit";
+  }
+  return undefined;
+}
 
 export interface PushOptions {
   /** Report what would be pushed without sending anything or touching state. */
@@ -133,13 +172,9 @@ export async function buildPushPlan(
 
     const localText = await readFile(path.join(targetDir, entry.file), "utf-8");
 
-    if (entry.sharedZoneOwner) {
-      entries.push({
-        kind: "update",
-        file: entry.file,
-        resolution: "refused",
-        reason: "writing back to notes shared by someone else isn't supported yet",
-      });
+    const sharedRefusal = sharedNoteWriteRefusal(state, entry);
+    if (sharedRefusal !== undefined) {
+      entries.push({ kind: "update", file: entry.file, resolution: "refused", reason: sharedRefusal });
       continue;
     }
     if (hasConflictMarkers(localText)) {
@@ -201,11 +236,13 @@ export async function buildPushPlan(
   // match catches a moved-and-edited one, but only when it's unambiguous
   // on both sides. Everything paired here becomes a Folder-reference move
   // instead of the delete + create the two halves would otherwise read as.
-  // Own notes only - shared notes' write path is refused anyway.
+  // Shared notes pair too, but only so their move can be *refused* whole -
+  // left unpaired, a renamed shared-note file would decay into a refused
+  // delete plus a create that duplicates the note into the shared folder.
   const movePairs: Array<{ recordName: string; entry: CloneStateNoteEntry; toFile: string }> = [];
   const claimedByMove = new Set<string>();
   {
-    const pairable = missingCandidates.filter((candidate) => candidate.entry.sharedZoneOwner === undefined);
+    const pairable = missingCandidates;
     for (const candidate of pairable) {
       const base = await readBaseCopy(targetDir, candidate.recordName);
       if (base === undefined) {
@@ -229,9 +266,29 @@ export async function buildPushPlan(
       }
     }
   }
-  const deleteCandidates = missingCandidates.filter(
+  // A locally-deleted shared note is refused outright, before any network:
+  // shared-note deletion isn't supported (Apple's own web client shows a
+  // delete button for them but it doesn't work), and the old flow would
+  // have looked the note up in the *private* db, found nothing, and
+  // silently untracked it as "already deleted remotely".
+  const unpairedMissing = missingCandidates.filter(
     (candidate) => !movePairs.some((pair) => pair.recordName === candidate.recordName),
   );
+  const deleteCandidates: typeof unpairedMissing = [];
+  for (const candidate of unpairedMissing) {
+    if (candidate.entry.sharedZoneOwner !== undefined) {
+      entries.push({
+        kind: "delete",
+        file: candidate.entry.file,
+        resolution: "refused",
+        reason:
+          "deleting notes shared by someone else isn't supported - " +
+          `run "icloud-notes restore ${candidate.entry.file}" to bring the file back`,
+      });
+      continue;
+    }
+    deleteCandidates.push(candidate);
+  }
 
   // Classify each pair's target locally; only moves into a real own folder
   // ever need the network. Everything else resolves to a refusal right
@@ -242,6 +299,15 @@ export async function buildPushPlan(
     const info = dirIndex.get(toDir);
     const base: ExecutablePlanEntry = { kind: "move", file: pair.toFile, previousFile: pair.entry.file, resolution: "refused" };
 
+    if (pair.entry.sharedZoneOwner !== undefined) {
+      entries.push({
+        ...base,
+        reason:
+          "renaming or moving notes shared by someone else isn't supported yet - " +
+          `move the file back to ${pair.entry.file}`,
+      });
+      continue;
+    }
     if (toDir === "") {
       entries.push({
         ...base,
@@ -282,7 +348,7 @@ export async function buildPushPlan(
   // untracked file passes the same local refusal gates a modified one does
   // - a brand-new file containing conflict markers or unparseable content
   // is just as unsendable as an edited one containing them.
-  const createCandidates: { file: string; localText: string; folderRecordName: string }[] = [];
+  const createCandidates: { file: string; localText: string; folderRecordName: string; sharedZoneOwner?: string | undefined }[] = [];
   for (const { file, localText } of untracked) {
     if (claimedByMove.has(file)) {
       continue;
@@ -311,12 +377,25 @@ export async function buildPushPlan(
       });
       continue;
     }
-    if (info.kind === "sharerHome" || info.sharedZoneOwner !== undefined) {
+    if (info.kind === "sharerHome") {
+      // Only the *top* of a sharer's home is refused: a note there would
+      // need folder membership in the sharer's unreadable private tree. A
+      // real shared folder below it is a supported create target.
       entries.push({
         kind: "create",
         file,
         resolution: "refused",
-        reason: "sits inside a sharer's area - creating notes in someone else's share isn't supported",
+        reason:
+          "sits loose at the top of a sharer's area - notes can only be created inside one of their shared folders",
+      });
+      continue;
+    }
+    if (info.sharedZoneOwner !== undefined && info.permission === "READ_ONLY") {
+      entries.push({
+        kind: "create",
+        file,
+        resolution: "refused",
+        reason: "sits in a shared folder you only have read access to - the server would reject the create",
       });
       continue;
     }
@@ -351,7 +430,12 @@ export async function buildPushPlan(
       });
       continue;
     }
-    createCandidates.push({ file, localText, folderRecordName: info.folderRecordName as string });
+    createCandidates.push({
+      file,
+      localText,
+      folderRecordName: info.folderRecordName as string,
+      sharedZoneOwner: info.sharedZoneOwner,
+    });
   }
 
   if (
@@ -372,13 +456,32 @@ export async function buildPushPlan(
 
   // Fresh lookup of every candidate: both the staleness check and the
   // document we build the edit on top of come from the server's current
-  // state, not from anything cached locally.
-  const records = await lookupRecords(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, [
-    ...updateCandidates.map((candidate) => candidate.recordName),
-    ...deleteCandidates.map((candidate) => candidate.recordName),
-    ...readyMovePairs.map((pair) => pair.recordName),
-  ]);
-  const recordsByName = new Map(records.map((record) => [record.recordName, record]));
+  // state, not from anything cached locally. One lookup per zone: own notes
+  // in the private db, each sharer's notes in that sharer's shared-db zone
+  // (delete and move candidates are own-only by the refusals above).
+  const lookupGroups = new Map<string | undefined, string[]>();
+  const addLookup = (sharedZoneOwner: string | undefined, recordName: string): void => {
+    const group = lookupGroups.get(sharedZoneOwner) ?? [];
+    group.push(recordName);
+    lookupGroups.set(sharedZoneOwner, group);
+  };
+  for (const candidate of updateCandidates) {
+    addLookup(candidate.entry.sharedZoneOwner, candidate.recordName);
+  }
+  for (const candidate of deleteCandidates) {
+    addLookup(undefined, candidate.recordName);
+  }
+  for (const pair of readyMovePairs) {
+    addLookup(undefined, pair.recordName);
+  }
+  const recordsByName = new Map<string, CloudKitRecord>();
+  for (const [sharedZoneOwner, recordNames] of lookupGroups) {
+    const zone = noteZone(sharedZoneOwner);
+    const records = await lookupRecords(session, ckdatabasewsUrl, dsid, zone.database, zone.zoneID, recordNames);
+    for (const record of records) {
+      recordsByName.set(record.recordName, record);
+    }
+  }
 
   // --- Local moves: push a Folder-reference update - the exact write shape
   // trash-move deletion already uses live, pointed at a real folder.
@@ -399,7 +502,7 @@ export async function buildPushPlan(
       ...base,
       resolution: "ready",
       execute: async () => {
-        const result = await updateNoteRecord(session, ckdatabasewsUrl, dsid, PRIVATE_NOTES_ZONE, {
+        const result = await updateNoteRecord(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, {
           recordName: pair.recordName,
           recordChangeTag: record.recordChangeTag ?? "",
           fields: buildNoteMoveFields(record, folderRecordName, Date.now()),
@@ -475,7 +578,7 @@ export async function buildPushPlan(
         // - see the 2026-07-16 lifecycle HAR analysis. Works regardless of
         // attachments, and stays recoverable in Recently Deleted (~30 days);
         // `delete --hard <file>` permanently deletes from there.
-        const result = await updateNoteRecord(session, ckdatabasewsUrl, dsid, PRIVATE_NOTES_ZONE, {
+        const result = await updateNoteRecord(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, {
           recordName,
           recordChangeTag: record.recordChangeTag ?? "",
           fields: buildNoteTrashFields(record, Date.now()),
@@ -501,7 +604,7 @@ export async function buildPushPlan(
     throw new CorruptStateFileError("state.json has a malformed replicaId (expected 16 bytes, base64-encoded)");
   }
 
-  for (const { file, localText, folderRecordName } of createCandidates) {
+  for (const { file, localText, folderRecordName, sharedZoneOwner } of createCandidates) {
     // The document is built and decode-verified during planning (not at
     // execute time) so `status` shows a build failure as a refusal, with
     // the same fidelity the update path's plan-time gates have.
@@ -535,13 +638,20 @@ export async function buildPushPlan(
         // create (the live vault also has uppercase ones, so casing likely
         // doesn't matter - but lowercase is what the capture shows).
         const recordName = randomUUID();
+        const zone = noteZone(sharedZoneOwner);
         const result = await createNoteRecord(
           session,
           ckdatabasewsUrl,
           dsid,
-          PRIVATE_NOTES_ZONE,
+          zone.database,
+          zone.zoneID,
           recordName,
-          buildNoteCreateFields(payloadBase64, localText, modificationDateMs, folderRecordName),
+          buildNoteCreateFields(payloadBase64, localText, modificationDateMs, folderRecordName, sharedZoneOwner),
+          // A shared-folder create byte-matches the 2026-07-17 capture: the
+          // record-hierarchy parent at the folder is what makes the new
+          // note a member of the folder's share. The private shape (no
+          // parent) stays exactly as live-verified.
+          sharedZoneOwner !== undefined ? { parentRecordName: folderRecordName, createShortGUID: true } : {},
         );
         if (!result.ok) {
           const detail = result.reason ? ` (${result.reason})` : "";
@@ -556,6 +666,7 @@ export async function buildPushPlan(
           recordChangeTag: result.record.recordChangeTag ?? "",
           modificationDate: modificationDateOf(result.record) || modificationDateMs,
           folderRecordName,
+          sharedZoneOwner,
         };
         await writeBaseCopy(targetDir, recordName, localText);
         await applyNoteFileTimes(path.join(targetDir, file), result.record);
@@ -651,6 +762,7 @@ export async function buildPushPlan(
     const fileStat = await stat(path.join(targetDir, entry.file));
     const modificationDateMs = Math.round(fileStat.mtimeMs);
 
+    const zone = noteZone(entry.sharedZoneOwner);
     const summary: PushSummary = { conflicts: [], refused: [] };
     const conflictsBefore = summary.conflicts.length;
     const refusedBefore = summary.refused.length;
@@ -658,6 +770,7 @@ export async function buildPushPlan(
       session,
       ckdatabasewsUrl,
       dsid,
+      zone,
       targetDir,
       record,
       entry,
@@ -705,7 +818,7 @@ export async function buildPushPlan(
       file: entry.file,
       resolution: "ready",
       execute: async () => {
-        const results = await updateRecords(session, ckdatabasewsUrl, dsid, PRIVATE_NOTES_ZONE, prepared.updates);
+        const results = await updateRecords(session, ckdatabasewsUrl, dsid, zone.database, zone.zoneID, prepared.updates);
         const failure = results.find((result) => !result.ok);
         if (failure && !failure.ok) {
           const detail = failure.reason ? ` (${failure.reason})` : "";
@@ -847,6 +960,7 @@ async function prepareUpdate(
   session: IcloudSession,
   ckdatabasewsUrl: string,
   dsid: string,
+  zone: NoteZone,
   targetDir: string,
   record: CloudKitRecord,
   entry: CloneStateNoteEntry,
@@ -881,6 +995,7 @@ async function prepareUpdate(
       session,
       ckdatabasewsUrl,
       dsid,
+      zone,
       targetDir,
       record,
       classified,
@@ -916,6 +1031,7 @@ async function prepareTableCandidate(
   session: IcloudSession,
   ckdatabasewsUrl: string,
   dsid: string,
+  zone: NoteZone,
   targetDir: string,
   record: CloudKitRecord,
   classified: OkNoteRecordResult,
@@ -938,8 +1054,8 @@ async function prepareTableCandidate(
     session,
     ckdatabasewsUrl,
     dsid,
-    "private",
-    PRIVATE_NOTES_ZONE,
+    zone.database,
+    zone.zoneID,
     classified.attachments.map((ref) => ref.attachmentIdentifier),
   );
   const attachmentByName = new Map(attachmentRecords.map((r) => [r.recordName, r]));
@@ -1022,7 +1138,10 @@ function noteRecordUpdate(record: CloudKitRecord, entry: CloneStateNoteEntry, fi
     recordType: "Note",
     recordChangeTag: entry.recordChangeTag,
     fields,
-    parentRecordName: record.parentRecordName,
+    // The captured shared-zone Note updates omit the record-hierarchy
+    // parent, unlike private ones (which echo it) and unlike shared
+    // Attachment updates (which keep it) - see the 2026-07-17 capture.
+    parentRecordName: entry.sharedZoneOwner === undefined ? record.parentRecordName : undefined,
   };
 }
 

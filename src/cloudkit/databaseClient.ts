@@ -40,6 +40,14 @@ export interface CloudKitRecord {
   modified?: CloudKitRecordStamp | undefined;
   /** `cloudkit.share` records only: who shares this zone's content. */
   participants?: ShareParticipant[] | undefined;
+  /** The `cloudkit.share` record this record is the root of, when shared -
+   * a shared Folder record carries this, linking it to the share whose
+   * `currentUserPermission` gates our writes into it. */
+  shareRecordName?: string | undefined;
+  /** `cloudkit.share` records only: this account's own permission on the
+   * share ("READ_WRITE" / "READ_ONLY"), straight from the response's
+   * `currentUserParticipant` - no participant matching needed. */
+  currentUserPermission?: string | undefined;
 }
 
 export interface ZoneChangesResult {
@@ -467,10 +475,11 @@ export async function updateNoteRecord(
   session: IcloudSession,
   ckDatabaseHost: string,
   dsid: string,
+  database: CloudKitDatabase,
   zoneID: CloudKitZoneID,
   update: NoteUpdate,
 ): Promise<NoteUpdateResult> {
-  const [result] = await updateRecords(session, ckDatabaseHost, dsid, zoneID, [{ ...update, recordType: "Note" }]);
+  const [result] = await updateRecords(session, ckDatabaseHost, dsid, database, zoneID, [{ ...update, recordType: "Note" }]);
   if (!result) {
     throw new Error("Unexpected response shape from records/modify (missing records array)");
   }
@@ -495,30 +504,51 @@ export function parseNoteUpdateResponse(body: unknown): NoteUpdateResult {
   return { ok: true, record: parseRecord(entry) };
 }
 
+/** Extras a shared-database create needs beyond the private-proven shape:
+ * CloudKit record hierarchy (`parent` at the containing Folder record) is
+ * what makes the new note a member of the folder's share, and the captured
+ * shared create also asks for a short GUID. The private-db capture sent
+ * both too, but our private path omits them and is live-verified - they're
+ * optional there, so the private shape stays untouched. */
+export interface CreateNoteExtras {
+  parentRecordName?: string | undefined;
+  createShortGUID?: boolean | undefined;
+}
+
 /**
  * Creates one brand-new Note record via `records/modify`, mirroring the
  * captured first-ever save of a fresh note (operationType "create", a
  * client-generated recordName, no recordChangeTag - see the 2026-07-16
- * lifecycle HAR analysis). The response is a full record carrying the
- * note's first recordChangeTag, same shape as an update's.
+ * lifecycle HAR analysis; the shared-database variant is the 2026-07-17
+ * shared-note-modifications capture). The response is a full record
+ * carrying the note's first recordChangeTag, same shape as an update's.
  */
 export async function createNoteRecord(
   session: IcloudSession,
   ckDatabaseHost: string,
   dsid: string,
+  database: CloudKitDatabase,
   zoneID: CloudKitZoneID,
   recordName: string,
   fields: Record<string, { value: unknown }>,
+  extras: CreateNoteExtras = {},
 ): Promise<NoteUpdateResult> {
+  const record: Record<string, unknown> = { recordName, recordType: "Note", fields };
+  if (extras.parentRecordName !== undefined) {
+    record.parent = { recordName: extras.parentRecordName };
+  }
+  if (extras.createShortGUID === true) {
+    record.createShortGUID = true;
+  }
   const body = await postDatabase(
     "createNoteRecord:records/modify",
     session,
     ckDatabaseHost,
     dsid,
-    "private",
+    database,
     "records/modify",
     {
-      operations: [{ operationType: "create", record: { recordName, recordType: "Note", fields } }],
+      operations: [{ operationType: "create", record }],
       zoneID,
     },
   );
@@ -627,6 +657,7 @@ export async function updateRecords(
   session: IcloudSession,
   ckDatabaseHost: string,
   dsid: string,
+  database: CloudKitDatabase,
   zoneID: CloudKitZoneID,
   updates: RecordUpdate[],
 ): Promise<RecordUpdateResult[]> {
@@ -648,7 +679,7 @@ export async function updateRecords(
     session,
     ckDatabaseHost,
     dsid,
-    "private",
+    database,
     "records/modify",
     { operations, zoneID },
   );
@@ -742,6 +773,8 @@ function parseRecord(value: unknown): CloudKitRecord {
   }
 
   const parent = isRecord(value.parent) && typeof value.parent.recordName === "string" ? value.parent.recordName : undefined;
+  const share = isRecord(value.share) && typeof value.share.recordName === "string" ? value.share.recordName : undefined;
+  const currentUserParticipant = isRecord(value.currentUserParticipant) ? value.currentUserParticipant : undefined;
   return {
     recordName: value.recordName,
     recordType: value.recordType,
@@ -752,6 +785,9 @@ function parseRecord(value: unknown): CloudKitRecord {
     created: parseRecordStamp(value.created),
     modified: parseRecordStamp(value.modified),
     participants: parseParticipants(value.participants),
+    shareRecordName: share,
+    currentUserPermission:
+      typeof currentUserParticipant?.permission === "string" ? currentUserParticipant.permission : undefined,
   };
 }
 

@@ -87,10 +87,17 @@ const NULL_FIELDS = ["FirstAttachmentThumbnail", "FirstAttachmentUTIEncrypted", 
  */
 export const TRASH_FOLDER_RECORD_NAME = "TrashFolder-CloudKit";
 
-function folderReference(folderRecordName: string): unknown {
-  // Bare zoneName, no ownerRecordName - matching what the captured client
-  // sends on writes (the fuller zone identity only appears on the read side).
-  return { recordName: folderRecordName, action: "VALIDATE", zoneID: { zoneName: "Notes" } };
+function folderReference(folderRecordName: string, zoneOwnerRecordName?: string): unknown {
+  // Private-zone writes send a bare zoneName with no ownerRecordName,
+  // matching the captured client (the fuller zone identity only appears on
+  // the read side there). Shared-zone writes DO qualify the reference with
+  // the sharer's ownerRecordName - see the 2026-07-17 shared-note-
+  // modifications capture.
+  const zoneID =
+    zoneOwnerRecordName !== undefined
+      ? { zoneName: "Notes", ownerRecordName: zoneOwnerRecordName }
+      : { zoneName: "Notes" };
+  return { recordName: folderRecordName, action: "VALIDATE", zoneID };
 }
 
 /**
@@ -187,8 +194,9 @@ export function buildNoteCreateFields(
   newText: string,
   nowMs: number,
   folderRecordName: string = "DefaultFolder-CloudKit",
+  zoneOwnerRecordName?: string,
 ): Record<string, UpdateFieldValue> {
-  const folder = folderReference(folderRecordName);
+  const folder = folderReference(folderRecordName, zoneOwnerRecordName);
   const fields: Record<string, UpdateFieldValue> = {
     CreationDate: { value: nowMs },
     Folders: { value: [folder] },

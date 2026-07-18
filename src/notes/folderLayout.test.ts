@@ -107,6 +107,52 @@ test("buildVaultLayout drops a tombstoned folder record", () => {
   assert.equal(layout.folderDirs.get("F-GONE"), undefined);
 });
 
+test("buildVaultLayout stores the current user's share permission on a shared folder, inherited by nested folders", () => {
+  const zone: SharedZoneRecords = {
+    ownerRecordName: "_owner1",
+    records: [
+      shareRecord({ givenName: "Pat" }),
+      { recordName: "Share-F", recordType: "cloudkit.share", fields: {}, currentUserPermission: "READ_WRITE" },
+      { ...folderRecord("F-SHARED", "Shared Recipes"), shareRecordName: "Share-F" },
+      folderRecord("F-NESTED", "Desserts", "F-SHARED"),
+    ],
+  };
+  const layout = buildVaultLayout([], [zone]);
+  assert.equal(layout.stateFolders["F-SHARED"]?.permission, "READ_WRITE");
+  assert.equal(layout.stateFolders["F-NESTED"]?.permission, "READ_WRITE");
+});
+
+test("buildVaultLayout carries a shared folder's permission forward when the share record is not re-sent", () => {
+  const zone: SharedZoneRecords = {
+    ownerRecordName: "_owner1",
+    records: [folderRecord("F-SHARED", "Shared Recipes")],
+  };
+  const layout = buildVaultLayout([], [zone], {
+    folders: {
+      "F-SHARED": { name: "Shared Recipes", dirName: "Shared Recipes", sharedZoneOwner: "_owner1", permission: "READ_ONLY" },
+    },
+    sharerHomes: { _owner1: { name: "Pat", dirName: "Pat" } },
+  });
+  assert.equal(layout.stateFolders["F-SHARED"]?.permission, "READ_ONLY");
+});
+
+test("buildVaultLayout lets a re-sent share record's permission win over the carried one", () => {
+  const zone: SharedZoneRecords = {
+    ownerRecordName: "_owner1",
+    records: [
+      { recordName: "Share-F", recordType: "cloudkit.share", fields: {}, currentUserPermission: "READ_ONLY" },
+      { ...folderRecord("F-SHARED", "Shared Recipes"), shareRecordName: "Share-F" },
+    ],
+  };
+  const layout = buildVaultLayout([], [zone], {
+    folders: {
+      "F-SHARED": { name: "Shared Recipes", dirName: "Shared Recipes", sharedZoneOwner: "_owner1", permission: "READ_WRITE" },
+    },
+    sharerHomes: { _owner1: { name: "Pat", dirName: "Pat" } },
+  });
+  assert.equal(layout.stateFolders["F-SHARED"]?.permission, "READ_ONLY");
+});
+
 test("buildVaultLayout keeps a sharer home's previous name when the share record is not re-sent", () => {
   const zone: SharedZoneRecords = { ownerRecordName: "_owner1", records: [noteRecord("N1")] };
   const layout = buildVaultLayout([], [zone], {

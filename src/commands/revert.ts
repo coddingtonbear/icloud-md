@@ -100,7 +100,7 @@ export async function runRevert(targetDir: string, fileArg: string, id: string, 
     parentRecordName: record.parentRecordName,
   };
 
-  const [result] = await updateRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, PRIVATE_NOTES_ZONE, [update]);
+  const [result] = await updateRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, "private", PRIVATE_NOTES_ZONE, [update]);
   if (!result) {
     throw new VersionContentUnavailableError("the server returned no result for the revert");
   }
@@ -241,7 +241,7 @@ async function runEpochRevert(
     return;
   }
 
-  const results = await updateRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, PRIVATE_NOTES_ZONE, updates);
+  const results = await updateRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, "private", PRIVATE_NOTES_ZONE, updates);
   console.log(`Reverting ${fileArg} to the whole-note epoch captured ${epoch.timestamp}:`);
   for (let i = 0; i < updates.length; i += 1) {
     const update = updates[i];

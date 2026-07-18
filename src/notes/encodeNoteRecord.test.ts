@@ -154,3 +154,18 @@ test("buildNoteCreateFields matches the captured first-save request shape", () =
   assert.equal("ReplicaIDToNotesVersionDataEncrypted" in fields, false);
   assert.equal("FoldersModificationDate" in fields, false);
 });
+
+test("buildNoteCreateFields qualifies the folder references with the sharer's zone owner for a shared-folder create", () => {
+  // Matches the 2026-07-17 shared-note-modifications capture: writes into a
+  // shared zone carry the owner in the reference zoneIDs (private writes
+  // keep the bare zoneName, per the test above).
+  const fields = buildNoteCreateFields("RE9D", "Hi", 555, "F-SHARED", "_owner1");
+
+  const sharedRef = {
+    recordName: "F-SHARED",
+    action: "VALIDATE",
+    zoneID: { zoneName: "Notes", ownerRecordName: "_owner1" },
+  };
+  assert.deepEqual(fields.Folder?.value, sharedRef);
+  assert.deepEqual(fields.Folders?.value, [sharedRef]);
+});

@@ -210,7 +210,7 @@ export async function runObjectDelete(
     console.log(`Deleting ${label} via Apple's two-stage purge...`);
     let current = record;
     if (!isInTrash(current)) {
-      const trashResult = await updateNoteRecord(session, ckdatabasewsUrl, dsid, PRIVATE_NOTES_ZONE, {
+      const trashResult = await updateNoteRecord(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, {
         recordName,
         recordChangeTag: current.recordChangeTag ?? "",
         fields: buildNoteTrashFields(current, Date.now()),
@@ -221,7 +221,7 @@ export async function runObjectDelete(
       }
       current = trashResult.record;
     }
-    const purgeResult = await updateNoteRecord(session, ckdatabasewsUrl, dsid, PRIVATE_NOTES_ZONE, {
+    const purgeResult = await updateNoteRecord(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, {
       recordName,
       recordChangeTag: current.recordChangeTag ?? "",
       fields: buildNotePurgeFields(current, Date.now()),

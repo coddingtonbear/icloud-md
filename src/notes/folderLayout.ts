@@ -9,6 +9,7 @@ import {
   RESERVED_TOP_LEVEL_DIR_NAMES,
   sanitizeFolderDirName,
   type FolderInfo,
+  type FolderTreeNode,
 } from "./folderTree.js";
 
 /** One shared zone's raw records, tagged with its owner - the shape both
@@ -131,11 +132,38 @@ export function buildVaultLayout(
     const zoneFolders = mergeFolderInfos(
       Object.entries(previous?.folders ?? {})
         .filter(([, entry]) => entry.sharedZoneOwner === zone.ownerRecordName)
-        .map(([recordName, entry]) => ({ recordName, title: entry.name, parentRecordName: entry.parentRecordName })),
+        .map(([recordName, entry]) => ({
+          recordName,
+          title: entry.name,
+          parentRecordName: entry.parentRecordName,
+          permission: entry.permission,
+        })),
       zone.records,
     );
     const zoneTree = buildFolderTree(zoneFolders, preferredDirNames);
-    for (const node of zoneTree.byRecordName.values()) {
+
+    // This account's permission per share record this run re-sent. A folder
+    // resolves its permission freshest-first: this run's share record (via
+    // the folder's record-level `share` reference), else what previous state
+    // knew (an incremental pull won't re-send an unchanged share record),
+    // else the parent folder's - nested folders belong to the shared root's
+    // share. Still-undefined means "unknown"; push then attempts the write
+    // and lets the server enforce the truth.
+    const sharePermissions = new Map<string, string>();
+    for (const record of zone.records) {
+      if (record.recordType === "cloudkit.share" && record.deleted !== true && record.currentUserPermission !== undefined) {
+        sharePermissions.set(record.recordName, record.currentUserPermission);
+      }
+    }
+    const previousPermission = (recordName: string): string | undefined => {
+      const entry = previous?.folders?.[recordName];
+      return entry?.sharedZoneOwner === zone.ownerRecordName ? entry.permission : undefined;
+    };
+    const visit = (node: FolderTreeNode, inheritedPermission: string | undefined): void => {
+      const permission =
+        (node.shareRecordName !== undefined ? sharePermissions.get(node.shareRecordName) : undefined) ??
+        previousPermission(node.recordName) ??
+        inheritedPermission;
       const dirPath = `${homeDir}/${node.dirPath}`;
       folderDirs.set(node.recordName, dirPath);
       stateFolders[node.recordName] = {
@@ -143,8 +171,15 @@ export function buildVaultLayout(
         parentRecordName: node.parentRecordName,
         dirName: node.dirName,
         sharedZoneOwner: zone.ownerRecordName,
+        permission,
       };
       allDirs.push(dirPath);
+      for (const child of node.children) {
+        visit(child, permission);
+      }
+    };
+    for (const root of zoneTree.roots) {
+      visit(root, undefined);
     }
   }
 
@@ -225,6 +260,9 @@ export interface StateDirInfo {
   folderRecordName?: string | undefined;
   /** Set for a shared folder or a sharer home. */
   sharedZoneOwner?: string | undefined;
+  /** Shared folders only: this account's permission on the folder's share,
+   * when known - see CloneStateFolderEntry.permission. */
+  permission?: string | undefined;
 }
 
 /**
@@ -273,7 +311,12 @@ export function stateDirIndex(previous: Pick<CloneState, "folders" | "sharerHome
   for (const [recordName, entry] of Object.entries(folders)) {
     const dir = resolve(recordName, new Set());
     if (dir !== undefined) {
-      index.set(dir, { kind: "folder", folderRecordName: recordName, sharedZoneOwner: entry.sharedZoneOwner });
+      index.set(dir, {
+        kind: "folder",
+        folderRecordName: recordName,
+        sharedZoneOwner: entry.sharedZoneOwner,
+        permission: entry.permission,
+      });
     }
   }
   return index;

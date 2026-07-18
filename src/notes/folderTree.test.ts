@@ -14,7 +14,13 @@ function folderRecord(recordName: string, title: string, parentRecordName?: stri
 
 test("decodeFolderRecord decodes the base64 title", () => {
   const info = decodeFolderRecord(folderRecord("A", "Another Folder"));
-  assert.deepEqual(info, { recordName: "A", title: "Another Folder", parentRecordName: undefined });
+  assert.deepEqual(info, { recordName: "A", title: "Another Folder", parentRecordName: undefined, shareRecordName: undefined });
+});
+
+test("decodeFolderRecord carries the record-level share reference (a shared folder's link to its cloudkit.share)", () => {
+  const record: CloudKitRecord = { ...folderRecord("A", "Shared Recipes"), shareRecordName: "Share-1234" };
+  const info = decodeFolderRecord(record);
+  assert.equal(info?.shareRecordName, "Share-1234");
 });
 
 test("decodeFolderRecord reads the ParentFolder reference field (the shape observed live 2026-07-16)", () => {

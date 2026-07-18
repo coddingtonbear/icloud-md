@@ -45,6 +45,18 @@ function emptyState(): CloneState {
   return { ...state(), notes: {} };
 }
 
+/** emptyState() with the shared folder's stored share permission set. */
+function emptyStateWithSharedPermission(permission: string): CloneState {
+  const base = emptyState();
+  return {
+    ...base,
+    folders: {
+      ...base.folders,
+      "F-SHARED": { name: "Shared Recipes", dirName: "Shared Recipes", sharedZoneOwner: "_owner1", permission },
+    },
+  };
+}
+
 async function writeVaultFile(dir: string, file: string, content: string): Promise<void> {
   await mkdir(path.dirname(path.join(dir, file)), { recursive: true });
   await writeFile(path.join(dir, file), content, "utf-8");
@@ -105,19 +117,155 @@ test("buildPushPlan refuses a .md in a directory that isn't one of the account's
     assert.match(entries[0]?.reason ?? "", /creating folders isn't supported yet/);
   }));
 
-test("buildPushPlan refuses a new .md inside a sharer's area", () =>
+test("buildPushPlan refuses a new .md loose at the top of a sharer's home locally", () =>
   withTempDir(async (dir) => {
     await writeCloneState(dir, emptyState());
-    await writeVaultFile(dir, "Pat/Shared Recipes/Mine.md", "Hello");
     await writeVaultFile(dir, "Pat/Loose.md", "Hello");
 
     const { entries } = await buildPushPlan(dir);
 
-    assert.equal(entries.length, 2);
-    for (const entry of entries) {
-      assert.equal(entry.resolution, "refused");
-      assert.match(entry.reason ?? "", /sharer's area/);
-    }
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.kind, "create");
+    assert.equal(entries[0]?.resolution, "refused");
+    assert.match(entries[0]?.reason ?? "", /loose at the top of a sharer's area/);
+  }));
+
+test("buildPushPlan treats a new .md inside a shared folder as a real create candidate - it proceeds to the network", () =>
+  withTempDir(async (dir) => {
+    // Same UnboundAccountError proof as the own-folder create test: the
+    // shared-folder file passed every local gate (including the permission
+    // one - F-SHARED's permission is unknown, which is attempted, not
+    // refused) and the plan went on to need a session.
+    await writeCloneState(dir, emptyState());
+    await writeVaultFile(dir, "Pat/Shared Recipes/Mine.md", "Hello");
+
+    await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
+  }));
+
+test("buildPushPlan refuses a new .md in a READ_ONLY shared folder locally", () =>
+  withTempDir(async (dir) => {
+    await writeCloneState(dir, emptyStateWithSharedPermission("READ_ONLY"));
+    await writeVaultFile(dir, "Pat/Shared Recipes/Mine.md", "Hello");
+
+    const { entries } = await buildPushPlan(dir);
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.resolution, "refused");
+    assert.match(entries[0]?.reason ?? "", /read access/);
+  }));
+
+test("buildPushPlan refuses an edit to a note in a READ_ONLY shared folder locally", () =>
+  withTempDir(async (dir) => {
+    const shared = emptyStateWithSharedPermission("READ_ONLY");
+    shared.notes = {
+      SH1: {
+        file: "Pat/Shared Recipes/Theirs.md",
+        recordChangeTag: "1a",
+        modificationDate: 100,
+        folderRecordName: "F-SHARED",
+        sharedZoneOwner: "_owner1",
+      },
+    };
+    await writeCloneState(dir, shared);
+    await writeBaseCopy(dir, "SH1", "Hello");
+    await writeVaultFile(dir, "Pat/Shared Recipes/Theirs.md", "Hello edited");
+
+    const { entries } = await buildPushPlan(dir);
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.kind, "update");
+    assert.equal(entries[0]?.resolution, "refused");
+    assert.match(entries[0]?.reason ?? "", /read-only for you/);
+  }));
+
+test("buildPushPlan treats an edit to a note in a writable shared folder as a real update candidate - it proceeds to the network", () =>
+  withTempDir(async (dir) => {
+    const shared = emptyStateWithSharedPermission("READ_WRITE");
+    shared.notes = {
+      SH1: {
+        file: "Pat/Shared Recipes/Theirs.md",
+        recordChangeTag: "1a",
+        modificationDate: 100,
+        folderRecordName: "F-SHARED",
+        sharedZoneOwner: "_owner1",
+      },
+    };
+    await writeCloneState(dir, shared);
+    await writeBaseCopy(dir, "SH1", "Hello");
+    await writeVaultFile(dir, "Pat/Shared Recipes/Theirs.md", "Hello edited");
+
+    await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
+  }));
+
+test("buildPushPlan refuses an edit to an individually-shared note loose in a sharer's home", () =>
+  withTempDir(async (dir) => {
+    const shared = emptyState();
+    shared.notes = {
+      LOOSE1: {
+        file: "Pat/Travel List.md",
+        recordChangeTag: "1a",
+        modificationDate: 100,
+        sharedZoneOwner: "_owner1",
+      },
+    };
+    await writeCloneState(dir, shared);
+    await writeBaseCopy(dir, "LOOSE1", "Hello");
+    await writeVaultFile(dir, "Pat/Travel List.md", "Hello edited");
+
+    const { entries } = await buildPushPlan(dir);
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.resolution, "refused");
+    assert.match(entries[0]?.reason ?? "", /individually-shared/);
+  }));
+
+test("buildPushPlan refuses a locally-deleted shared note without touching the network - never 'already deleted remotely'", () =>
+  withTempDir(async (dir) => {
+    const shared = emptyState();
+    shared.notes = {
+      SH1: {
+        file: "Pat/Shared Recipes/Theirs.md",
+        recordChangeTag: "1a",
+        modificationDate: 100,
+        folderRecordName: "F-SHARED",
+        sharedZoneOwner: "_owner1",
+      },
+    };
+    await writeCloneState(dir, shared);
+    // File deliberately never written - it reads as locally deleted.
+
+    const { entries } = await buildPushPlan(dir);
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.kind, "delete");
+    assert.equal(entries[0]?.resolution, "refused");
+    assert.match(entries[0]?.reason ?? "", /deleting notes shared by someone else isn't supported/);
+    assert.match(entries[0]?.reason ?? "", /restore/);
+  }));
+
+test("buildPushPlan pairs a renamed shared-note file into a refused move - not a refused delete plus a duplicate create", () =>
+  withTempDir(async (dir) => {
+    const shared = emptyState();
+    shared.notes = {
+      SH1: {
+        file: "Pat/Shared Recipes/Theirs.md",
+        recordChangeTag: "1a",
+        modificationDate: 100,
+        folderRecordName: "F-SHARED",
+        sharedZoneOwner: "_owner1",
+      },
+    };
+    await writeCloneState(dir, shared);
+    await writeBaseCopy(dir, "SH1", "Hello");
+    await writeVaultFile(dir, "Pat/Shared Recipes/Renamed.md", "Hello");
+
+    const { entries } = await buildPushPlan(dir);
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.kind, "move");
+    assert.equal(entries[0]?.resolution, "refused");
+    assert.equal(entries[0]?.previousFile, "Pat/Shared Recipes/Theirs.md");
+    assert.match(entries[0]?.reason ?? "", /renaming or moving notes shared by someone else/);
   }));
 
 test("buildPushPlan refuses an empty untracked file locally, without touching the network", () =>

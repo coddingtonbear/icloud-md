@@ -96,7 +96,7 @@ export async function runDelete(targetDir: string, fileArg: string, options: Del
   if (!isInTrash(current)) {
     current = await trashNote(session, ckdatabasewsUrl, dsid, target.file, target.recordName, current);
   }
-  const purged = await updateNoteRecord(session, ckdatabasewsUrl, dsid, PRIVATE_NOTES_ZONE, {
+  const purged = await updateNoteRecord(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, {
     recordName: target.recordName,
     recordChangeTag: current.recordChangeTag ?? "",
     fields: buildNotePurgeFields(current, Date.now()),
@@ -123,6 +123,13 @@ interface DeletionTarget {
 function resolveDeletionTarget(state: CloneState, fileArg: string, targetDir: string, hard: boolean): DeletionTarget {
   try {
     const { recordName, entry } = resolveTrackedNote(state, fileArg, targetDir);
+    if (entry.sharedZoneOwner !== undefined) {
+      // Without this, the private-db lookup below would find nothing and
+      // misreport a live shared note as "already deleted remotely" while
+      // untracking it. Apple's own web client can't delete these either
+      // (its delete button doesn't work on shared notes).
+      throw new Error(`"${entry.file}" is shared by someone else - deleting shared notes isn't supported.`);
+    }
     return { recordName, file: entry.file, entry };
   } catch (cause) {
     if (!(cause instanceof UntrackedFileError)) {
@@ -152,7 +159,7 @@ async function trashNote(
   recordName: string,
   record: CloudKitRecord,
 ): Promise<CloudKitRecord> {
-  const result = await updateNoteRecord(session, ckdatabasewsUrl, dsid, PRIVATE_NOTES_ZONE, {
+  const result = await updateNoteRecord(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, {
     recordName,
     recordChangeTag: record.recordChangeTag ?? "",
     fields: buildNoteTrashFields(record, Date.now()),

@@ -30,6 +30,19 @@ export interface FolderInfo {
    * has neither.
    */
   parentRecordName?: string | undefined;
+  /**
+   * The `cloudkit.share` record this folder is the shared root of, when it
+   * is one (shared folders in a sharee's zone carry a record-level `share`
+   * reference - confirmed live 2026-07-17, see the shared-writes doc).
+   * The permission on that share gates writes into the folder.
+   */
+  shareRecordName?: string | undefined;
+  /**
+   * This account's permission on the folder's share as carried forward from
+   * previous state - the fallback when this run's records don't re-send the
+   * share record (see buildVaultLayout's resolution order).
+   */
+  permission?: string | undefined;
 }
 
 export interface FolderTreeNode extends FolderInfo {
@@ -63,6 +76,7 @@ export function decodeFolderRecord(record: CloudKitRecord): FolderInfo | undefin
     recordName: record.recordName,
     title,
     parentRecordName: parentFolderReference(record) ?? record.parentRecordName,
+    shareRecordName: record.shareRecordName,
   };
 }
 

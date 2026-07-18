@@ -190,6 +190,12 @@ test("round-trips the folder tree and per-note folder membership", () =>
         "DefaultFolder-CloudKit": { name: "Notes", dirName: "Notes" },
         "FOLDER-1": { name: "Recipes", dirName: "Recipes" },
         "FOLDER-2": { name: "Desserts", parentRecordName: "FOLDER-1", dirName: "Desserts" },
+        "FOLDER-SHARED": {
+          name: "Shared Recipes",
+          dirName: "Shared Recipes",
+          sharedZoneOwner: "_owner1",
+          permission: "READ_WRITE",
+        },
       },
     };
 
@@ -200,6 +206,8 @@ test("round-trips the folder tree and per-note folder membership", () =>
     assert.equal(readBack?.folders?.["FOLDER-1"]?.parentRecordName, undefined);
     assert.equal(readBack?.folders?.["FOLDER-2"]?.parentRecordName, "FOLDER-1");
     assert.equal(readBack?.folders?.["DefaultFolder-CloudKit"]?.name, "Notes");
+    assert.equal(readBack?.folders?.["FOLDER-SHARED"]?.permission, "READ_WRITE");
+    assert.equal(readBack?.folders?.["FOLDER-1"]?.permission, undefined);
     assert.equal(readBack?.notes["REC-1"]?.folderRecordName, "FOLDER-1");
     assert.equal(readBack?.notes["REC-SHARED"]?.folderRecordName, undefined);
   }));
