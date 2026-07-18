@@ -1,5 +1,3 @@
-# icloud-md
-
 A command-line tool for syncing Apple Notes (via iCloud) to a local folder
 of plain files — and back again. `git`-flavored in spirit: a single binary,
 a working tree, and explicit `clone`/`pull`/`push` commands rather than a
