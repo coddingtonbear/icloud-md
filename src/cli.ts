@@ -1,23 +1,33 @@
 #!/usr/bin/env node
 import chalk from "chalk";
 import cliProgress from "cli-progress";
+import { Command, CommanderError } from "commander";
 import ora from "ora";
 import { reauthenticateFolder, resolveFolderAccount } from "./auth/folderAuth.js";
-import { parseSinceDuration, runBugReport, runBugReportIdentify } from "./commands/bugReport.js";
+import { DISCLOSURE_WARNING, parseSinceDuration, runBugReport, runBugReportIdentify } from "./commands/bugReport.js";
 import { runClone, type CloneSummary } from "./commands/clone.js";
-import { runDelete } from "./commands/delete.js";
-import { runObjectDelete, runObjectList, runObjectShow } from "./commands/object.js";
-import { runDiff } from "./commands/diff.js";
-import { runHistory } from "./commands/history.js";
+import { renderDeleteResult, runDelete } from "./commands/delete.js";
+import { renderDiffResult, runDiff } from "./commands/diff.js";
+import { runHistory, type HistoryResult } from "./commands/history.js";
+import {
+  renderObjectDeleteResult,
+  renderObjectList,
+  runObjectDelete,
+  runObjectList,
+  runObjectShow,
+  type ObjectShowResult,
+} from "./commands/object.js";
 import { runPull, type PullSummary } from "./commands/pull.js";
 import { runPush } from "./commands/push.js";
 import { runRestore } from "./commands/restore.js";
-import { runRevert } from "./commands/revert.js";
+import { renderRevertResult, runRevert } from "./commands/revert.js";
 import { runStatus } from "./commands/status.js";
-import { displayPath, findVaultRoot } from "./vaultRoot.js";
-import { IcloudNotesSyncError, NotClonedDirectoryError } from "./errors.js";
+import { createOutputContext, emitError, emitResult, emitUsageError, makeStatusSink, type OutputContext } from "./cli/output.js";
+import { NotClonedDirectoryError } from "./errors.js";
 import { recordLastError } from "./lastError.js";
 import { readCloneState } from "./notes/cloneState.js";
+import { renderPlan } from "./notes/pushPlan.js";
+import { displayPath, findVaultRoot } from "./vaultRoot.js";
 import type { SyncProgress } from "./progress.js";
 
 /**
@@ -30,6 +40,11 @@ import type { SyncProgress } from "./progress.js";
  * progress (and its prompt lines), and a spinner running during that redraws
  * over whatever shares its row - it visually erased npx's "Ok to proceed?"
  * prompt, which presented as a silent first-run hang (2026-07-18).
+ *
+ * Both ora and cli-progress already target stderr unconditionally (ora
+ * defaults there; the bar is constructed with `stream: process.stderr`
+ * below), so nothing here needs to change between human and `--json` mode -
+ * stdout stays free for the final JSON result either way.
  */
 function makeSyncProgress(): SyncProgress {
   let fetchedCount = 0;
@@ -111,6 +126,62 @@ function printPullSummary(targetDir: string, summary: PullSummary): void {
   }
 }
 
+function printHistoryResult(result: HistoryResult): void {
+  if (result.mode === "records") {
+    if (result.records.length === 0) {
+      console.log("No version history recorded yet.");
+      return;
+    }
+    for (const row of result.records) {
+      console.log(`${row.id}  ${row.timestamp}  ${row.label}  (changeTag ${row.recordChangeTag})`);
+    }
+    return;
+  }
+  if (result.epochs.length === 0) {
+    console.log("No version history recorded yet.");
+    return;
+  }
+  for (const epoch of result.epochs) {
+    let line = `${epoch.id}  ${epoch.timestamp}  changed: ${epoch.changed.join(", ")}`;
+    if (epoch.carriedOver.length > 0) {
+      line += `  (carried over: ${epoch.carriedOver.join(", ")})`;
+    }
+    console.log(line);
+  }
+}
+
+/** The one place a new human-readable view is added rather than preserved -
+ * `object show` previously always dumped its full JSON verbatim. */
+function printObjectShowSummary(result: ObjectShowResult): void {
+  const created = result.createdAt !== undefined ? new Date(result.createdAt).toISOString() : undefined;
+  const modified = result.modifiedAt !== undefined ? new Date(result.modifiedAt).toISOString() : undefined;
+  console.log(`${result.recordType} ${result.recordName}`);
+  console.log(`  state: ${result.state}`);
+  if (created || modified) {
+    console.log(`  created: ${created ?? "-"}   modified: ${modified ?? "-"}`);
+  }
+  if (result.title !== undefined) {
+    console.log(`  title: "${result.title}"`);
+  }
+  if (result.trackedFile !== undefined) {
+    console.log(`  tracked file: ${result.trackedFile}`);
+  }
+  if (result.health !== undefined && result.health !== "ok") {
+    console.log(chalk.magenta(`  ! ${result.health}`));
+  }
+  console.log(
+    `  references (${result.references.length}): ${result.references.length > 0 ? result.references.join(", ") : "none"}`,
+  );
+  if (result.incomingReferences.length === 0) {
+    console.log(`  referenced by: none`);
+  } else {
+    console.log(`  referenced by (${result.incomingReferences.length}):`);
+    for (const ref of result.incomingReferences) {
+      console.log(`    ${ref.recordType} ${ref.recordName}${ref.title ? ` ("${ref.title}")` : ""} [${ref.state}]`);
+    }
+  }
+}
+
 /** An explicit [directory] argument wins verbatim; otherwise walk up from
  * the current directory to find the enclosing vault, git-style. The "."
  * fallback keeps the not-a-cloned-directory error pointing at where the
@@ -122,390 +193,377 @@ async function resolveTargetDir(targetDirArg: string | undefined): Promise<strin
   return (await findVaultRoot(process.cwd())) ?? ".";
 }
 
-async function verifyAuth(targetDirArg: string | undefined): Promise<void> {
-  const targetDir = await resolveTargetDir(targetDirArg);
-  const state = await readCloneState(targetDir);
-  if (!state) {
-    throw new NotClonedDirectoryError(targetDir);
-  }
-
-  const result = await resolveFolderAccount(targetDir, state.account, { onStatus: (message) => console.log(message) });
-
-  console.log(`Authenticated as ${result.appleId}${result.fullName ? ` (${result.fullName})` : ""}`);
-  console.log(`dsid: ${result.dsid}`);
-  console.log(`Notes CloudKit host: ${result.ckdatabasewsUrl ?? "(not reported)"}`);
+/** Every action reads the merged `--json` flag (global, so it works
+ * whether it's given before or after a subcommand name) via this helper. */
+function contextFor(command: Command): OutputContext {
+  const opts = command.optsWithGlobals() as { json?: boolean };
+  return createOutputContext(opts.json === true);
 }
 
-async function clone(targetDirArg: string | undefined): Promise<void> {
-  if (!targetDirArg) {
-    console.error("Usage: icloud-md clone <directory>");
-    process.exitCode = 1;
-    return;
-  }
-  const summary = await runClone(targetDirArg, makeSyncProgress(), (message) => console.log(message));
-  printCloneSummary(targetDirArg, summary);
+// `--json` is scanned directly from argv (rather than waiting for commander
+// to parse it) so a usage error - which can happen before or instead of
+// normal option parsing - still knows which mode to report in.
+const preParsedJson = process.argv.includes("--json");
+
+const program = new Command();
+program
+  .name("icloud-md")
+  .description("Your iCloud notes as real Markdown files, on any OS, bidirectionally synced with a git-flavored CLI")
+  .option("--json", "emit machine-readable JSON on stdout instead of human-readable text")
+  .exitOverride();
+
+// In `--json` mode, commander's own plain-text usage-error output would land
+// on stdout's neighbor stream unstructured; suppressed here so the top-level
+// catch below can report the same failure as structured JSON instead. Human
+// mode leaves commander's own formatting untouched. Configured before any
+// subcommand is created so `.command()`'s settings inheritance carries it
+// down to every subcommand, including `object`'s.
+if (preParsedJson) {
+  program.configureOutput({ writeErr: () => {} });
 }
 
-async function pull(targetDirArg: string | undefined): Promise<void> {
-  const targetDir = await resolveTargetDir(targetDirArg);
-  const summary = await runPull(targetDir, makeSyncProgress(), (message) => console.log(message));
-  printPullSummary(targetDir, summary);
-}
+program.action(() => {
+  program.help({ error: true });
+});
 
-async function push(args: string[]): Promise<void> {
-  const flags = args.filter((arg) => arg.startsWith("--"));
-  const positional = args.filter((arg) => !arg.startsWith("--"));
-  const unknownFlag = flags.find((flag) => flag !== "--dry-run");
-  if (unknownFlag || positional.length > 1) {
-    console.error("Usage: icloud-md push [directory] [--dry-run]");
-    process.exitCode = 1;
-    return;
-  }
-  const targetDir = await resolveTargetDir(positional[0]);
-  await runPush(targetDir, {
-    dryRun: flags.includes("--dry-run"),
-    onLoginStatus: (message) => console.log(message),
-    formatPath: (file) => displayPath(targetDir, file),
+program
+  .command("clone <directory>")
+  .description(
+    "Fetch all Notes into a fresh local directory; signs in via a browser window the first time a directory " +
+      "(or a new account) is used",
+  )
+  .action(async (directory: string, _opts: unknown, command: Command) => {
+    const context = contextFor(command);
+    const summary = await runClone(directory, makeSyncProgress(), makeStatusSink(context));
+    emitResult(context, summary, (result) => printCloneSummary(directory, result));
   });
-}
 
-async function status(args: string[]): Promise<void> {
-  if (args.length > 1) {
-    console.error("Usage: icloud-md status [directory]");
-    process.exitCode = 1;
-    return;
-  }
-  const targetDir = await resolveTargetDir(args[0]);
-  await runStatus(targetDir, {
-    onLoginStatus: (message) => console.log(message),
-    formatPath: (file) => displayPath(targetDir, file),
+program
+  .command("pull [directory]")
+  .description("Fetch changes since the last clone/pull (defaults to the current directory)")
+  .action(async (directory: string | undefined, _opts: unknown, command: Command) => {
+    const context = contextFor(command);
+    const targetDir = await resolveTargetDir(directory);
+    const summary = await runPull(targetDir, makeSyncProgress(), makeStatusSink(context));
+    emitResult(context, summary, (result) => printPullSummary(targetDir, result));
   });
-}
 
-async function restore(args: string[]): Promise<void> {
-  const [fileArg, dirArg] = args;
-  if (!fileArg) {
-    console.error("Usage: icloud-md restore <file> [directory]");
-    process.exitCode = 1;
-    return;
-  }
-  await runRestore(await resolveTargetDir(dirArg), fileArg);
-}
-
-async function deleteNote(args: string[]): Promise<void> {
-  const flags = args.filter((arg) => arg.startsWith("--"));
-  const positional = args.filter((arg) => !arg.startsWith("--"));
-  const unknownFlag = flags.find((flag) => flag !== "--hard");
-  const [fileArg, dirArg] = positional;
-  if (unknownFlag || !fileArg || positional.length > 2) {
-    console.error(
-      "Usage: icloud-md delete <file> [directory] [--hard]\n" +
-        "  Without --hard, moves the note to Recently Deleted (recoverable in Notes for ~30 days); " +
-        "--hard permanently deletes it, including a note already soft-deleted by this tool.",
-    );
-    process.exitCode = 1;
-    return;
-  }
-  await runDelete(await resolveTargetDir(dirArg), fileArg, {
-    hard: flags.includes("--hard"),
-    onLoginStatus: (message) => console.log(message),
-  });
-}
-
-const OBJECT_USAGE =
-  "Usage: icloud-md object <list|show|delete> ...\n" +
-  "  object list [directory] [--type <recordType>] [--broken] [--orphaned] [--trashed] [--untracked] [--json]\n" +
-  "      List every raw CloudKit record in the account's Notes zone (all types, including Attachment/Media\n" +
-  "      records the sync path never fetches), with lifecycle state, references, local tracking, and - for\n" +
-  "      notes - whether this tool can parse them (--broken shows only ones it can't).\n" +
-  "  object show <recordName> [directory]\n" +
-  "      Dump one record verbatim (all fields), plus the derived summary and every record referencing it\n" +
-  "      (incomingReferences) - the \"who's in the way of deleting this?\" view.\n" +
-  "  object delete <recordName> [directory] [--yes] [--force]\n" +
-  "      Permanently delete one record by ID - the repair tool for broken objects. Notes use Apple's own\n" +
-  "      two-stage purge (works on attachment-bearing and unparseable notes); other types use forceDelete.\n" +
-  "      --force tombstones the record immediately via forceDelete instead, cascading over leaf-type\n" +
-  "      referrers (attachments etc.) - for records whose content itself breaks Notes clients, since a\n" +
-  "      purged record's fields stay in the sync stream until server GC. Deleting a Folder requires --yes.";
-
-async function objectCommand(args: string[]): Promise<void> {
-  const [subcommand, ...subArgs] = args;
-  const flags = subArgs.filter((arg) => arg.startsWith("--"));
-  const positional = subArgs.filter((arg, i) => !arg.startsWith("--") && subArgs[i - 1] !== "--type");
-  const onLoginStatus = (message: string): void => console.log(message);
-
-  switch (subcommand) {
-    case "list": {
-      const typeIndex = subArgs.indexOf("--type");
-      const type = typeIndex !== -1 ? subArgs[typeIndex + 1] : undefined;
-      const knownFlags = ["--type", "--broken", "--orphaned", "--trashed", "--untracked", "--json"];
-      const unknownFlag = flags.find((flag) => !knownFlags.includes(flag));
-      if (unknownFlag || (typeIndex !== -1 && (type === undefined || type.startsWith("--"))) || positional.length > 1) {
-        console.error(OBJECT_USAGE);
-        process.exitCode = 1;
-        return;
+program
+  .command("push [directory]")
+  .description(
+    "Reconcile local disk state up to iCloud: creates notes for new .md files, uploads edited notes, moves notes " +
+      "whose file was removed locally to Recently Deleted, and merges in remote changes to a note edited both " +
+      'places. Run "status" first to see exactly what push will do, including anything it would refuse.',
+  )
+  .option("--dry-run", "report what would be pushed without changing anything")
+  .action(async (directory: string | undefined, opts: { dryRun?: boolean }, command: Command) => {
+    const context = contextFor(command);
+    const targetDir = await resolveTargetDir(directory);
+    const result = await runPush(targetDir, { dryRun: opts.dryRun === true, onLoginStatus: makeStatusSink(context) });
+    emitResult(context, result, (r) => {
+      for (const entry of r.entries) {
+        if (entry.outcome) {
+          console.log(entry.outcome.succeeded ? entry.outcome.message : chalk.red(entry.outcome.message));
+        }
       }
-      await runObjectList(
-        await resolveTargetDir(positional[0]),
-        {
-          type,
-          broken: flags.includes("--broken"),
-          orphaned: flags.includes("--orphaned"),
-          trashed: flags.includes("--trashed"),
-          untracked: flags.includes("--untracked"),
-          json: flags.includes("--json"),
-        },
-        { onLoginStatus },
+      if (r.pushed !== undefined) {
+        console.log(`Pushed ${r.pushed} note(s) from ${targetDir}`);
+      }
+      for (const line of renderPlan(r.entries, (file) => displayPath(targetDir, file))) {
+        console.log(line);
+      }
+    });
+    if (result.dryRun && result.entries.length > 0) {
+      process.exitCode = 3;
+    }
+  });
+
+program
+  .command("status [directory]")
+  .description(
+    "Preview exactly what the next push will do - creates, deletes, changes, and any refusals - using the same " +
+      "live check push --dry-run performs (requires signing in)",
+  )
+  .action(async (directory: string | undefined, _opts: unknown, command: Command) => {
+    const context = contextFor(command);
+    const targetDir = await resolveTargetDir(directory);
+    const result = await runStatus(targetDir, { onLoginStatus: makeStatusSink(context) });
+    emitResult(context, result, (r) => {
+      for (const line of renderPlan(r.entries, (file) => displayPath(targetDir, file))) {
+        console.log(line);
+      }
+    });
+    if (result.entries.length > 0) {
+      process.exitCode = 3;
+    }
+  });
+
+program
+  .command("restore <file> [directory]")
+  .description("Discard a tracked note's local edits, reverting it to the last synced copy")
+  .action(async (file: string, directory: string | undefined, _opts: unknown, command: Command) => {
+    const context = contextFor(command);
+    const targetDir = await resolveTargetDir(directory);
+    const result = await runRestore(targetDir, file);
+    emitResult(context, result, (r) => console.log(`Restored ${r.file} to match the last synced copy.`));
+  });
+
+program
+  .command("delete <file> [directory]")
+  .description(
+    "Move a tracked note to Recently Deleted (a real remote write, no confirmation prompt) and stop tracking it " +
+      "locally; a locally-edited copy is kept on disk (untracked) rather than discarded.",
+  )
+  .option("--hard", "permanently delete instead - works even on an already soft-deleted or unparseable note")
+  .action(async (file: string, directory: string | undefined, opts: { hard?: boolean }, command: Command) => {
+    const context = contextFor(command);
+    const targetDir = await resolveTargetDir(directory);
+    const result = await runDelete(targetDir, file, { hard: opts.hard === true, onLoginStatus: makeStatusSink(context) });
+    emitResult(context, result, (r) => console.log(renderDeleteResult(r)));
+  });
+
+const objectCommand = program
+  .command("object")
+  .description(
+    "Record-level plumbing: inspect and permanently delete raw CloudKit objects by ID - the repair kit for " +
+      "broken note objects",
+  );
+
+objectCommand
+  .command("list [directory]")
+  .description(
+    "List every raw CloudKit record in the account's Notes zone (all types, including Attachment/Media records " +
+      "the sync path never fetches), with lifecycle state, references, local tracking, and - for notes - whether " +
+      "this tool can parse them",
+  )
+  .option("--type <recordType>", "filter to one record type")
+  .option("--broken", "show only notes this tool can't parse")
+  .option("--orphaned", "show only records referencing something that no longer exists")
+  .option("--trashed", "show only trashed/purged records")
+  .option("--untracked", "show only live notes this tool isn't tracking")
+  .action(
+    async (
+      directory: string | undefined,
+      opts: { type?: string; broken?: boolean; orphaned?: boolean; trashed?: boolean; untracked?: boolean },
+      command: Command,
+    ) => {
+      const context = contextFor(command);
+      const targetDir = await resolveTargetDir(directory);
+      const result = await runObjectList(targetDir, opts, { onLoginStatus: makeStatusSink(context) });
+      emitResult(context, result, (list) => {
+        for (const line of renderObjectList(list)) {
+          console.log(line);
+        }
+      });
+    },
+  );
+
+objectCommand
+  .command("show <recordName> [directory]")
+  .description(
+    "Dump one record's derived summary, every field, and every record referencing it (incomingReferences) - the " +
+      '"who\'s in the way of deleting this?" view',
+  )
+  .action(async (recordName: string, directory: string | undefined, _opts: unknown, command: Command) => {
+    const context = contextFor(command);
+    const targetDir = await resolveTargetDir(directory);
+    const result = await runObjectShow(targetDir, recordName, { onLoginStatus: makeStatusSink(context) });
+    emitResult(context, result, printObjectShowSummary);
+  });
+
+objectCommand
+  .command("delete <recordName> [directory]")
+  .description(
+    "Permanently delete one record by ID. Notes use Apple's own two-stage purge (works on attachment-bearing and " +
+      "unparseable notes); other types use forceDelete. Deleting a Folder requires --yes.",
+  )
+  .option("--yes", "confirm deleting a structural record (a Folder)")
+  .option(
+    "--force",
+    "tombstone the record immediately via forceDelete, cascading over leaf-type referrers (attachments etc.) - " +
+      "for records whose content itself breaks Notes clients",
+  )
+  .action(
+    async (recordName: string, directory: string | undefined, opts: { yes?: boolean; force?: boolean }, command: Command) => {
+      const context = contextFor(command);
+      const targetDir = await resolveTargetDir(directory);
+      const result = await runObjectDelete(targetDir, recordName, {
+        yes: opts.yes === true,
+        force: opts.force === true,
+        onLoginStatus: makeStatusSink(context),
+      });
+      emitResult(context, result, (r) => {
+        for (const line of renderObjectDeleteResult(r)) {
+          console.log(line);
+        }
+      });
+    },
+  );
+
+program
+  .command("history <file> [directory]")
+  .description("List a note's epoch timeline, newest first (one line per coordinated pull/push capture)")
+  .option("--records", "flat per-record snapshot listing instead of the epoch timeline")
+  .action(async (file: string, directory: string | undefined, opts: { records?: boolean }, command: Command) => {
+    const context = contextFor(command);
+    const targetDir = await resolveTargetDir(directory);
+    const result = await runHistory(targetDir, file, { records: opts.records === true });
+    emitResult(context, result, printHistoryResult);
+  });
+
+program
+  .command("diff <file> <ref> [directory]")
+  .description("Diff two snapshots, or one snapshot against the current remote copy")
+  .addHelpText(
+    "after",
+    '\n<ref> is a snapshot id (diffed against the current remote copy) or <from>..<to> (two snapshot ids) - ' +
+      'ids come from "icloud-md history <file>".',
+  )
+  .action(async (file: string, refArg: string, directory: string | undefined, _opts: unknown, command: Command) => {
+    const context = contextFor(command);
+    const parts = refArg.split("..");
+    let fromId: string;
+    let toId: string | undefined;
+    if (parts.length === 1 && parts[0]) {
+      fromId = parts[0];
+    } else if (parts.length === 2 && parts[0] && parts[1]) {
+      [fromId, toId] = [parts[0], parts[1]];
+    } else {
+      command.error(
+        `Invalid ref "${refArg}" - expected a snapshot id or <from>..<to>.`,
       );
       return;
     }
-    case "show": {
-      const [recordName, dirArg] = positional;
-      if (flags.length > 0 || !recordName || positional.length > 2) {
-        console.error(OBJECT_USAGE);
-        process.exitCode = 1;
-        return;
-      }
-      await runObjectShow(await resolveTargetDir(dirArg), recordName, { onLoginStatus });
-      return;
+    const targetDir = await resolveTargetDir(directory);
+    const result = await runDiff(targetDir, file, fromId, toId, makeStatusSink(context));
+    emitResult(context, result, (r) => console.log(renderDiffResult(r)));
+    if (result.hasDifferences) {
+      process.exitCode = 3;
     }
-    case "delete": {
-      const [recordName, dirArg] = positional;
-      const unknownFlag = flags.find((flag) => flag !== "--yes" && flag !== "--force");
-      if (unknownFlag || !recordName || positional.length > 2) {
-        console.error(OBJECT_USAGE);
-        process.exitCode = 1;
-        return;
-      }
-      await runObjectDelete(await resolveTargetDir(dirArg), recordName, {
-        yes: flags.includes("--yes"),
-        force: flags.includes("--force"),
-        onLoginStatus,
-      });
-      return;
-    }
-    default:
-      console.error(OBJECT_USAGE);
-      process.exitCode = 1;
-  }
-}
-
-async function history(args: string[]): Promise<void> {
-  const flags = args.filter((arg) => arg.startsWith("--"));
-  const positional = args.filter((arg) => !arg.startsWith("--"));
-  const unknownFlag = flags.find((flag) => flag !== "--records");
-  const [fileArg, dirArg] = positional;
-  if (unknownFlag || !fileArg || positional.length > 2) {
-    console.error(
-      "Usage: icloud-md history <file> [directory] [--records]\n" +
-        "  Without --records, shows the epoch timeline (one line per coordinated pull/push capture); " +
-        "--records shows the flat per-record snapshot listing instead.",
-    );
-    process.exitCode = 1;
-    return;
-  }
-  await runHistory(await resolveTargetDir(dirArg), fileArg, { records: flags.includes("--records") });
-}
-
-const DIFF_USAGE =
-  "Usage: icloud-md diff <file> <ref> [directory]\n" +
-  "  <ref> is a snapshot id (diffed against the current remote copy) or <from>..<to> (two snapshot ids) - " +
-  'ids come from "icloud-md history <file>".';
-
-async function diff(args: string[]): Promise<void> {
-  const [fileArg, refArg, dirArg] = args;
-  if (!fileArg || !refArg) {
-    console.error(DIFF_USAGE);
-    process.exitCode = 1;
-    return;
-  }
-
-  const parts = refArg.split("..");
-  let fromId: string;
-  let toId: string | undefined;
-  if (parts.length === 1 && parts[0]) {
-    fromId = parts[0];
-  } else if (parts.length === 2 && parts[0] && parts[1]) {
-    [fromId, toId] = [parts[0], parts[1]];
-  } else {
-    console.error(`Invalid ref "${refArg}" - expected a snapshot id or <from>..<to>.\n${DIFF_USAGE}`);
-    process.exitCode = 1;
-    return;
-  }
-
-  await runDiff(await resolveTargetDir(dirArg), fileArg, fromId, toId, (message) => console.log(message));
-}
-
-async function revert(args: string[]): Promise<void> {
-  const flags = args.filter((arg) => arg.startsWith("--"));
-  const positional = args.filter((arg) => !arg.startsWith("--"));
-  const unknownFlag = flags.find((flag) => flag !== "--yes");
-  const [fileArg, idArg, dirArg] = positional;
-  if (unknownFlag || !fileArg || !idArg || positional.length > 3) {
-    console.error(
-      "Usage: icloud-md revert <file> <id> [directory] [--yes]\n" +
-        "  Without --yes, reports what would happen without writing anything - this is a real remote write.",
-    );
-    process.exitCode = 1;
-    return;
-  }
-
-  await runRevert(await resolveTargetDir(dirArg), fileArg, idArg, {
-    confirmed: flags.includes("--yes"),
-    onLoginStatus: (message) => console.log(message),
   });
-}
 
-const BUG_REPORT_USAGE =
-  "Usage: icloud-md bug-report --since <duration> [directory]\n" +
-  '  <duration> is a number followed by "m" (minutes), "h" (hours), or "d" (days) - e.g. 30m, 6h, 2d.\n' +
-  "  A range is required rather than assumed, since the log is shared across every account used on this machine.\n" +
-  "  Note titles, folder/sharer names, and the account's dsid/appleId are replaced with stable aliases in the\n" +
-  "  report - see its \"Redacted identifiers\" section.\n" +
-  "\n" +
-  "Usage: icloud-md bug-report --identify <file> [directory]\n" +
-  "  Prints the alias a bug report will use for <file>, so you can reference it (e.g. \"note-14\") without\n" +
-  "  sharing its real title.";
+program
+  .command("revert <file> <id> [directory]")
+  .description(
+    "Write a historical snapshot back to the server (a real remote write - without --yes, reports what would " +
+      "happen)",
+  )
+  .option("--yes", "confirm the write")
+  .action(async (file: string, id: string, directory: string | undefined, opts: { yes?: boolean }, command: Command) => {
+    const context = contextFor(command);
+    const targetDir = await resolveTargetDir(directory);
+    const result = await runRevert(targetDir, file, id, { confirmed: opts.yes === true, onLoginStatus: makeStatusSink(context) });
+    emitResult(context, result, (r) => {
+      for (const line of renderRevertResult(file, r)) {
+        console.log(line);
+      }
+    });
+  });
 
-async function bugReport(args: string[]): Promise<void> {
-  const identifyIndex = args.indexOf("--identify");
-  if (identifyIndex !== -1) {
-    const fileArg = args[identifyIndex + 1];
-    const positional = args.filter((_arg, index) => index !== identifyIndex && index !== identifyIndex + 1);
-    if (!fileArg || positional.length > 1) {
-      console.error(BUG_REPORT_USAGE);
-      process.exitCode = 1;
+program
+  .command("bug-report [directory]")
+  .description(
+    "Bundle version info, the last error, local state, and debug-log entries into a file to attach to a GitHub " +
+      "issue - note titles, folder/sharer names, and the account's dsid/appleId are replaced with stable aliases",
+  )
+  .option("--since <duration>", 'how far back to bundle debug-log entries, e.g. "30m", "6h", "2d"')
+  .option("--identify <file>", "print the alias a bug report would use for <file>, without writing a report")
+  .action(
+    async (
+      directory: string | undefined,
+      opts: { since?: string; identify?: string },
+      command: Command,
+    ) => {
+      const context = contextFor(command);
+      const targetDir = await resolveTargetDir(directory);
+
+      if (opts.identify !== undefined && opts.since !== undefined) {
+        command.error('"--since" and "--identify" can\'t be used together.');
+        return;
+      }
+
+      if (opts.identify !== undefined) {
+        const result = await runBugReportIdentify(targetDir, opts.identify);
+        emitResult(context, result, (r) => console.log(`"${r.file}" is ${r.alias} in this vault's bug reports.`));
+        return;
+      }
+
+      if (opts.since === undefined) {
+        command.error('Either "--since <duration>" or "--identify <file>" is required.');
+        return;
+      }
+      const since = parseSinceDuration(opts.since);
+      if (!since) {
+        command.error(`Invalid duration "${opts.since}" - expected a number followed by "m", "h", or "d" (e.g. 30m, 6h, 2d).`);
+        return;
+      }
+
+      const result = await runBugReport(targetDir, since, { onDisclosure: (message) => console.error(message) });
+      emitResult(context, result, (r) => {
+        console.log(`Wrote ${r.outputPath}`);
+        if (r.contentPreviewPath) {
+          console.log(
+            `Wrote a decoded-content preview to ${r.contentPreviewPath} - review it before sharing ${r.outputPath} ` +
+              "anywhere. This preview file is not meant to be attached or shared; delete it once you're done.",
+          );
+        }
+      });
+    },
+  );
+
+program
+  .command("reauthenticate [directory]")
+  .description("Force a fresh sign-in for a directory's already-bound account (defaults to the current directory)")
+  .action(async (directory: string | undefined, _opts: unknown, command: Command) => {
+    const context = contextFor(command);
+    const targetDir = await resolveTargetDir(directory);
+    const statusSink = makeStatusSink(context);
+    statusSink("Opening a browser window for iCloud sign-in...");
+    const result = await reauthenticateFolder(targetDir, { onStatus: statusSink });
+    emitResult(context, { appleId: result.appleId, dsid: result.dsid, targetDir }, (r) =>
+      console.log(`Reauthenticated as ${r.appleId} (dsid ${r.dsid}) for ${r.targetDir}.`),
+    );
+  });
+
+program
+  .command("verify-auth [directory]")
+  .description("Check whether a directory's bound account is authenticated (defaults to the current directory)")
+  .action(async (directory: string | undefined, _opts: unknown, command: Command) => {
+    const context = contextFor(command);
+    const targetDir = await resolveTargetDir(directory);
+    const state = await readCloneState(targetDir);
+    if (!state) {
+      throw new NotClonedDirectoryError(targetDir);
+    }
+    const result = await resolveFolderAccount(targetDir, state.account, { onStatus: makeStatusSink(context) });
+    emitResult(
+      context,
+      { appleId: result.appleId, fullName: result.fullName, dsid: result.dsid, ckdatabasewsUrl: result.ckdatabasewsUrl },
+      (r) => {
+        console.log(`Authenticated as ${r.appleId}${r.fullName ? ` (${r.fullName})` : ""}`);
+        console.log(`dsid: ${r.dsid}`);
+        console.log(`Notes CloudKit host: ${r.ckdatabasewsUrl ?? "(not reported)"}`);
+      },
+    );
+  });
+
+async function main(): Promise<void> {
+  try {
+    await program.parseAsync(process.argv);
+  } catch (error) {
+    const context = createOutputContext(preParsedJson);
+    if (error instanceof CommanderError) {
+      if (error.exitCode === 0) {
+        process.exitCode = 0;
+        return;
+      }
+      process.exitCode = emitUsageError(context, error.message);
       return;
     }
-    await runBugReportIdentify(await resolveTargetDir(positional[0]), fileArg);
-    return;
-  }
 
-  const sinceIndex = args.indexOf("--since");
-  let since: Date | undefined;
-  let positional = args;
-  if (sinceIndex !== -1) {
-    since = parseSinceDuration(args[sinceIndex + 1] ?? "");
-    positional = args.filter((_arg, index) => index !== sinceIndex && index !== sinceIndex + 1);
-  }
-
-  const unknownFlag = positional.find((arg) => arg.startsWith("--"));
-  if (!since || unknownFlag || positional.length > 1) {
-    console.error(BUG_REPORT_USAGE);
-    process.exitCode = 1;
-    return;
-  }
-
-  await runBugReport(await resolveTargetDir(positional[0]), since);
-}
-
-async function reauthenticate(targetDirArg: string | undefined): Promise<void> {
-  const targetDir = await resolveTargetDir(targetDirArg);
-  console.log("Opening a browser window for iCloud sign-in...");
-  const result = await reauthenticateFolder(targetDir, { onStatus: (message) => console.log(message) });
-  console.log(`Reauthenticated as ${result.appleId} (dsid ${result.dsid}) for ${targetDir}.`);
-}
-
-/**
- * Known, "expected" failures (`IcloudNotesSyncError`) print just their
- * message/hint in red - no stack trace, since the user doesn't need one to
- * act on them. Anything else is a genuine bug: rethrowing here leaves Node's
- * default unhandled-rejection handler to print the full stack trace, which
- * is what keeps those debuggable.
- */
-async function main(): Promise<void> {
-  const [, , command, ...rest] = process.argv;
-
-  try {
-    switch (command) {
-      case "reauthenticate":
-        await reauthenticate(rest[0]);
-        return;
-      case "verify-auth":
-        await verifyAuth(rest[0]);
-        return;
-      case "clone":
-        await clone(rest[0]);
-        return;
-      case "pull":
-        await pull(rest[0]);
-        return;
-      case "push":
-        await push(rest);
-        return;
-      case "status":
-        await status(rest);
-        return;
-      case "restore":
-        await restore(rest);
-        return;
-      case "delete":
-        await deleteNote(rest);
-        return;
-      case "object":
-        await objectCommand(rest);
-        return;
-      case "history":
-        await history(rest);
-        return;
-      case "diff":
-        await diff(rest);
-        return;
-      case "revert":
-        await revert(rest);
-        return;
-      case "bug-report":
-        await bugReport(rest);
-        return;
-      default:
-        console.error(
-          "Usage: icloud-md <command>\n\n" +
-            "Commands:\n" +
-            "  clone <directory>     Fetch all Notes into a fresh local directory; signs in via a browser window " +
-            "the first time a directory (or a new account) is used\n" +
-            "  pull [directory]      Fetch changes since the last clone/pull (defaults to the current directory)\n" +
-            "  push [directory]      Reconcile local disk state up to iCloud: creates notes for new .md files, " +
-            "uploads edited notes, moves notes whose file was removed locally to Recently Deleted, and merges in " +
-            'remote changes to a note edited both places (--dry-run to preview). Run "status" first to see exactly ' +
-            "what push will do, including anything it would refuse.\n" +
-            "  status [directory]    Preview exactly what the next push will do - creates, deletes, changes, and " +
-            "any refusals - using the same live check push --dry-run performs (requires signing in)\n" +
-            "  restore <file> [directory]  Discard a tracked note's local edits, reverting it to the last synced copy\n" +
-            "  delete <file> [directory] [--hard]  Move a tracked note to Recently Deleted (a real remote write, no " +
-            "confirmation prompt) and stop tracking it locally; a locally-edited copy is kept on disk (untracked) " +
-            "rather than discarded. --hard permanently deletes instead - works on attachment-bearing and even " +
-            "unparseable notes, and on a note this tool already soft-deleted\n" +
-            "  object <list|show|delete>  Record-level plumbing: inspect and permanently delete raw CloudKit objects " +
-            'by ID - the repair kit for broken note objects. Run "icloud-md object" for details\n' +
-            "  history <file> [directory] [--records]  List a note's epoch timeline, newest first (--records for the " +
-            "flat per-record snapshot listing instead)\n" +
-            "  diff <file> <ref> [directory]  Diff two snapshots, or one snapshot against the current remote copy - " +
-            "<ref> is a snapshot id or <from>..<to>\n" +
-            "  revert <file> <id> [directory] [--yes]  Write a historical snapshot back to the server (a real remote " +
-            "write - without --yes, reports what would happen)\n" +
-            "  reauthenticate [directory]  Force a fresh sign-in for a directory's already-bound account (defaults to the current directory)\n" +
-            "  verify-auth [directory]     Check whether a directory's bound account is authenticated (defaults to the current directory)\n" +
-            "  bug-report --since <duration> [directory]  Bundle version info, the last error, local state, and " +
-            "debug-log entries from the given duration (e.g. 1h, 2d) into a file to attach to a GitHub issue - " +
-            "note titles, folder/sharer names, and the account's dsid/appleId are replaced with stable aliases\n" +
-            "  bug-report --identify <file> [directory]  Print the alias (e.g. \"note-14\") a bug report will use " +
-            "for <file>, to reference it without sharing its real title",
-        );
-        process.exitCode = 1;
-    }
-  } catch (error) {
     // Best-effort: a failure to persist this shouldn't mask the real error below.
     await recordLastError(error).catch(() => {});
-
-    if (error instanceof IcloudNotesSyncError) {
-      console.error(chalk.red(error.message));
-      if (error.hint) {
-        console.error(chalk.red(error.hint));
-      }
-      process.exitCode = 1;
-      return;
-    }
-    throw error;
+    process.exitCode = emitError(context, error);
   }
 }
 

@@ -7,7 +7,7 @@ import { writeCloneState, type CloneState } from "../notes/cloneState.js";
 import { listEpochs, recordEpoch } from "../notes/noteEpoch.js";
 import { REAL_PLAIN_NOTE } from "../notes/realFixtures.js";
 import { recordVersion } from "../notes/versionHistory.js";
-import { runRevert } from "./revert.js";
+import { renderRevertResult, runRevert } from "./revert.js";
 
 // Same real capture attachmentSync.test.ts/diff.test.ts use for "Test Table
 // Note (2)" (dev notes, 2026-07-14T10:46/14:41) - decodes cleanly as a table,
@@ -33,15 +33,6 @@ const STATE: CloneState = {
     "ATT-1": { noteRecordName: "REC1" },
   },
 };
-
-function captureLogs(): { lines: string[]; restore: () => void } {
-  const lines: string[] = [];
-  const original = console.log;
-  console.log = (...args: unknown[]) => {
-    lines.push(args.map(String).join(" "));
-  };
-  return { lines, restore: () => { console.log = original; } };
-}
 
 test("revert rejects an id that matches neither a snapshot nor an epoch", () =>
   withTempDir(async (dir) => {
@@ -139,16 +130,16 @@ test("revert (unconfirmed, epoch id) reports what it would do without any networ
     await recordEpoch(dir, "REC1", ["REC1", "ATT-1"]);
     const [epoch] = await listEpochs(dir, "REC1");
 
-    const { lines, restore } = captureLogs();
-    try {
-      // No `account` on STATE - if this reached resolveFolderAccount it
-      // would throw UnboundAccountError, so a clean run proves the
-      // unconfirmed epoch path never touches the network.
-      await runRevert(dir, "Test Note.md", epoch!.id, { confirmed: false });
-    } finally {
-      restore();
-    }
-
+    // No `account` on STATE - if this reached resolveFolderAccount it would
+    // throw UnboundAccountError, so a clean result proves the unconfirmed
+    // epoch path never touches the network.
+    const result = await runRevert(dir, "Test Note.md", epoch!.id, { confirmed: false });
+    assert.equal(result.mode, "epoch");
+    assert.equal(result.confirmed, false);
+    assert.equal(result.nothingToRevert, undefined);
+    assert.ok(result.entries?.some((entry) => entry.label === "the note's own text"));
+    assert.ok(result.entries?.some((entry) => entry.label === "table ATT-1"));
+    const lines = renderRevertResult("Test Note.md", result);
     assert.ok(lines.some((line) => /Would revert Test Note\.md to the whole-note epoch/.test(line)));
     assert.ok(lines.some((line) => /the note's own text, to the snapshot captured/.test(line)));
     assert.ok(lines.some((line) => /table ATT-1, to the snapshot captured/.test(line)));
@@ -169,14 +160,8 @@ test("revert (unconfirmed, epoch id) notes tables added after the epoch and neve
     await recordEpoch(dir, "REC1", ["REC1"]);
     const [epoch] = await listEpochs(dir, "REC1");
 
-    const { lines, restore } = captureLogs();
-    try {
-      await runRevert(dir, "Test Note.md", epoch!.id, { confirmed: false });
-    } finally {
-      restore();
-    }
-
-    assert.ok(lines.some((line) => /table ATT-1: wasn't part of this epoch/.test(line)));
+    const result = await runRevert(dir, "Test Note.md", epoch!.id, { confirmed: false });
+    assert.ok(result.notices?.some((notice) => /table ATT-1: wasn't part of this epoch/.test(notice)));
   }));
 
 test("revert (unconfirmed, epoch id) reports nothing to revert when every record is skippable", () =>
@@ -188,13 +173,9 @@ test("revert (unconfirmed, epoch id) reports nothing to revert when every record
     await recordEpoch(dir, "REC1", ["REC1"]);
     const [epoch] = await listEpochs(dir, "REC1");
 
-    const { lines, restore } = captureLogs();
-    try {
-      await runRevert(dir, "Test Note.md", epoch!.id, { confirmed: false });
-    } finally {
-      restore();
-    }
-
+    const result = await runRevert(dir, "Test Note.md", epoch!.id, { confirmed: false });
+    assert.equal(result.nothingToRevert, "locally-skipped");
+    const lines = renderRevertResult("Test Note.md", result);
     assert.ok(lines.some((line) => /Nothing to revert for Test Note\.md at epoch/.test(line)));
     assert.ok(lines.some((line) => /no snapshot was ever captured/.test(line)));
   }));

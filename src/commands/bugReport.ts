@@ -22,6 +22,9 @@ export interface BugReportSummary {
 export interface BugReportOptions {
   debugLogPath?: string;
   lastErrorPath?: string;
+  /** Routes the disclosure warning (always stderr - the CLI wires this to
+   * `console.error` in both human and `--json` mode); defaults to silent. */
+  onDisclosure?: (message: string) => void;
 }
 
 /**
@@ -83,7 +86,7 @@ async function readStateForReport(targetDir: string): Promise<StateForReport> {
  * the user can attach to a GitHub issue.
  */
 export async function runBugReport(targetDir: string, since: Date, options: BugReportOptions = {}): Promise<BugReportSummary> {
-  console.warn(DISCLOSURE_WARNING);
+  options.onDisclosure?.(DISCLOSURE_WARNING);
 
   const [lastError, state, logEntries] = await Promise.all([
     readLastError(options.lastErrorPath ?? DEFAULT_LAST_ERROR_PATH),
@@ -127,7 +130,6 @@ export async function runBugReport(targetDir: string, since: Date, options: BugR
     renderBundle({ environment, lastError: redactedLastError, state: redactedState, logEntries: redactedLogEntries, since, targetDir, generatedAt }),
     "utf-8",
   );
-  console.log(`Wrote ${outputPath}`);
 
   // Decoded from the raw (pre-redaction) log entries, not the redacted
   // copy above - this is a local-only review aid, so there's no reason to
@@ -138,10 +140,6 @@ export async function runBugReport(targetDir: string, since: Date, options: BugR
   if (contentPreview.length > 0) {
     contentPreviewPath = path.join(targetDir, `icloud-md-bug-report-${timestamp}.content-preview.md`);
     await writeFile(contentPreviewPath, renderContentPreview(contentPreview, generatedAt), "utf-8");
-    console.log(
-      `Wrote a decoded-content preview to ${contentPreviewPath} - review it before sharing ${outputPath} anywhere. ` +
-        "This preview file is not meant to be attached or shared; delete it once you're done.",
-    );
   }
 
   return { outputPath, logEntryCount: logEntries.length, ...(contentPreviewPath ? { contentPreviewPath } : {}) };
@@ -153,7 +151,12 @@ export async function runBugReport(targetDir: string, since: Date, options: BugR
  * this is how a reporter tells the maintainer "the problem is with note-14"
  * instead of pasting the actual note title into a public GitHub issue.
  */
-export async function runBugReportIdentify(targetDir: string, fileArg: string): Promise<string> {
+export interface BugReportIdentifyResult {
+  file: string;
+  alias: string;
+}
+
+export async function runBugReportIdentify(targetDir: string, fileArg: string): Promise<BugReportIdentifyResult> {
   const state = await readCloneState(targetDir);
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
@@ -164,8 +167,7 @@ export async function runBugReportIdentify(targetDir: string, fileArg: string): 
   const alias = resolveAlias(aliasStore, "notes", recordName);
   await writeAliasStore(targetDir, aliasStore);
 
-  console.log(`"${fileArg}" is ${alias} in this vault's bug reports.`);
-  return alias;
+  return { file: fileArg, alias };
 }
 
 function renderBundle(input: {

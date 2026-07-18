@@ -16,40 +16,21 @@ async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   }
 }
 
-function captureLogs(): { lines: string[]; restore: () => void } {
-  const lines: string[] = [];
-  const original = console.log;
-  console.log = (...args: unknown[]) => {
-    lines.push(args.map(String).join(" "));
-  };
-  return {
-    lines,
-    restore: () => {
-      console.log = original;
-    },
-  };
-}
-
 test("runStatus refuses when there's no cloned state at all", () =>
   withTempDir(async (dir) => {
     await assert.rejects(() => runStatus(dir), NotClonedDirectoryError);
   }));
 
-test("runStatus renders \"Nothing to push.\" for an already-clean, untracked-file-free directory - same wording push uses", () =>
+test("runStatus returns no entries for an already-clean, untracked-file-free directory", () =>
   withTempDir(async (dir) => {
     await writeCloneState(dir, { syncToken: "token", notes: {} });
 
-    const { lines, restore } = captureLogs();
-    try {
-      await runStatus(dir);
-    } finally {
-      restore();
-    }
+    const result = await runStatus(dir);
 
-    assert.deepEqual(lines, ["Nothing to push."]);
+    assert.deepEqual(result.entries, []);
   }));
 
-test("runStatus renders an untracked file's local refusal exactly like push --dry-run would, without needing a bound account", () =>
+test("runStatus reports an untracked file's local refusal exactly like push --dry-run would, without needing a bound account", () =>
   withTempDir(async (dir) => {
     await writeCloneState(dir, {
       syncToken: "token",
@@ -59,17 +40,13 @@ test("runStatus renders an untracked file's local refusal exactly like push --dr
     await mkdir(path.join(dir, "Notes"), { recursive: true });
     await writeFile(path.join(dir, "Notes", "Empty Note.md"), "", "utf-8");
 
-    const { lines, restore } = captureLogs();
-    try {
-      await runStatus(dir);
-    } finally {
-      restore();
-    }
+    const result = await runStatus(dir);
 
-    assert.equal(lines.length, 3);
-    assert.match(lines[0] ?? "", /Empty Note\.md/);
-    assert.match(lines[1] ?? "", /the file is empty - nothing to create/);
-    assert.match(lines[2] ?? "", /0 to create, 0 changed, 0 to delete\./);
+    assert.equal(result.entries.length, 1);
+    assert.equal(result.entries[0]?.kind, "create");
+    assert.equal(result.entries[0]?.resolution, "refused");
+    assert.match(result.entries[0]?.file ?? "", /Empty Note\.md/);
+    assert.match(result.entries[0]?.reason ?? "", /the file is empty - nothing to create/);
   }));
 
 test("runStatus requires the same live check push does for a creatable untracked file - reaches the network and fails without a bound account", () =>

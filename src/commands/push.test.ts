@@ -62,20 +62,6 @@ async function writeVaultFile(dir: string, file: string, content: string): Promi
   await writeFile(path.join(dir, file), content, "utf-8");
 }
 
-function captureLogs(): { lines: string[]; restore: () => void } {
-  const lines: string[] = [];
-  const original = console.log;
-  console.log = (...args: unknown[]) => {
-    lines.push(args.map(String).join(" "));
-  };
-  return {
-    lines,
-    restore: () => {
-      console.log = original;
-    },
-  };
-}
-
 test("buildPushPlan refuses when there's no cloned state at all", () =>
   withTempDir(async (dir) => {
     await assert.rejects(() => buildPushPlan(dir), NotClonedDirectoryError);
@@ -441,19 +427,14 @@ test("buildPushPlan no longer refuses deleting a note with a tracked table attac
     await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
   }));
 
-test("runPush prints \"Nothing to push.\" and doesn't rewrite state.json when the plan is empty", () =>
+test("runPush returns no entries and a zero pushed count when the plan is empty", () =>
   withTempDir(async (dir) => {
     const s = state();
     await writeBaseCopy(dir, "REC1", "Synced text");
     await writeVaultFile(dir, "Notes/Tracked.md", "Synced text");
     await writeCloneState(dir, s);
 
-    const { lines, restore } = captureLogs();
-    try {
-      await runPush(dir);
-    } finally {
-      restore();
-    }
+    const result = await runPush(dir);
 
-    assert.deepEqual(lines, ["Nothing to push."]);
+    assert.deepEqual(result, { dryRun: false, pushed: 0, entries: [] });
   }));

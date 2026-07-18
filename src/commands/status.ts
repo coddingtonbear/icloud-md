@@ -1,11 +1,12 @@
-import { renderPlan } from "../notes/pushPlan.js";
+import { serializePlanEntry, type SerializedPlanEntry } from "../notes/pushPlan.js";
 import { buildPushPlan } from "./push.js";
 
 export interface StatusOptions {
   onLoginStatus?: (message: string) => void;
-  /** Presentation hook: re-express vault-root-relative paths for display
-   * (the CLI passes cwd-relativization). Defaults to identity. */
-  formatPath?: (file: string) => string;
+}
+
+export interface StatusResult {
+  entries: SerializedPlanEntry[];
 }
 
 /**
@@ -20,9 +21,7 @@ export interface StatusOptions {
  * remote record, so there's no way to preserve full refusal parity while
  * also staying offline.
  */
-export async function runStatus(targetDir: string, options: StatusOptions = {}): Promise<void> {
+export async function runStatus(targetDir: string, options: StatusOptions = {}): Promise<StatusResult> {
   const { entries } = await buildPushPlan(targetDir, { onLoginStatus: options.onLoginStatus });
-  for (const line of renderPlan(entries, options.formatPath)) {
-    console.log(line);
-  }
+  return { entries: entries.map(serializePlanEntry) };
 }

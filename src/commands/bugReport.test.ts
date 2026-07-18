@@ -237,20 +237,12 @@ test("handles a directory with no state.json and no recorded error gracefully", 
     assert.match(contents, /No debug log entries fall within this time range\./);
   }));
 
-test("prints the disclosure warning before writing the bundle", () =>
+test("reports the disclosure warning before writing the bundle", () =>
   withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
-    const originalWarn = console.warn;
-    const warnings: string[] = [];
-    console.warn = (message: string) => {
-      warnings.push(message);
-    };
-    try {
-      await runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath });
-    } finally {
-      console.warn = originalWarn;
-    }
+    const disclosures: string[] = [];
+    await runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath, onDisclosure: (message) => disclosures.push(message) });
 
-    assert.ok(warnings.includes(DISCLOSURE_WARNING));
+    assert.ok(disclosures.includes(DISCLOSURE_WARNING));
   }));
 
 test("writes the bundle into the target directory", () =>
@@ -286,13 +278,13 @@ test("runBugReportIdentify prints and returns the same alias bug-report would us
     };
     await writeCloneState(targetDir, state);
 
-    const firstAlias = await runBugReportIdentify(targetDir, path.join(targetDir, "Two.md"));
-    const secondAlias = await runBugReportIdentify(targetDir, path.join(targetDir, "Two.md"));
-    const otherAlias = await runBugReportIdentify(targetDir, path.join(targetDir, "One.md"));
+    const first = await runBugReportIdentify(targetDir, path.join(targetDir, "Two.md"));
+    const second = await runBugReportIdentify(targetDir, path.join(targetDir, "Two.md"));
+    const other = await runBugReportIdentify(targetDir, path.join(targetDir, "One.md"));
 
-    assert.equal(firstAlias, secondAlias);
-    assert.notEqual(firstAlias, otherAlias);
-    assert.match(firstAlias, /^note-\d+$/);
+    assert.equal(first.alias, second.alias);
+    assert.notEqual(first.alias, other.alias);
+    assert.match(first.alias, /^note-\d+$/);
   }));
 
 test("parseSinceDuration parses minutes, hours, and days into a past Date", () => {

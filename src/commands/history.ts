@@ -9,13 +9,34 @@ export interface HistoryOptions {
   records?: boolean;
 }
 
+/** One epoch in the default timeline view - which records changed at this
+ * capture vs. which carried their previous snapshot over unchanged. */
+export interface HistoryEpochRow {
+  id: string;
+  timestamp: string;
+  changed: string[];
+  carriedOver: string[];
+}
+
+/** One row in the `--records` flat per-record snapshot listing. */
+export interface HistoryRecordRow {
+  id: string;
+  timestamp: string;
+  label: string;
+  recordChangeTag: string;
+}
+
+export type HistoryResult =
+  | { mode: "epochs"; epochs: HistoryEpochRow[] }
+  | { mode: "records"; records: HistoryRecordRow[] };
+
 /**
  * Lists a tracked note's recorded history, newest first. By default this is
  * the epoch timeline (one line per coordinated pull/push capture - see the
  * "Whole-note coordinated version epochs" investigation); `--records` (via
  * `options.records`) restores the previous per-record flat listing.
  */
-export async function runHistory(targetDir: string, fileArg: string, options: HistoryOptions = {}): Promise<void> {
+export async function runHistory(targetDir: string, fileArg: string, options: HistoryOptions = {}): Promise<HistoryResult> {
   const state = await readCloneState(targetDir);
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
@@ -24,31 +45,24 @@ export async function runHistory(targetDir: string, fileArg: string, options: Hi
   const { recordName } = resolveTrackedNote(state, fileArg, targetDir);
 
   if (options.records) {
-    await printRecordHistory(targetDir, historyRecordNames(state, recordName), recordName, fileArg);
-    return;
+    return { mode: "records", records: await buildRecordHistory(targetDir, historyRecordNames(state, recordName), recordName) };
   }
 
   const epochs = await listEpochs(targetDir, recordName);
-  if (epochs.length === 0) {
-    console.log(`No version history recorded yet for ${fileArg}.`);
-    return;
-  }
 
   // oldest-first from listEpochs; walking forward lets each epoch compare
   // against the one immediately before it to say what changed vs. carried
-  // over, then the finished rows print newest-first to match the default.
-  const rows: string[] = [];
+  // over, then the finished rows return newest-first to match the default.
+  const rows: HistoryEpochRow[] = [];
   let previous: NoteEpoch | undefined;
   for (const epoch of epochs) {
     rows.push(describeEpoch(epoch, previous, recordName));
     previous = epoch;
   }
-  for (const row of rows.reverse()) {
-    console.log(row);
-  }
+  return { mode: "epochs", epochs: rows.reverse() };
 }
 
-function describeEpoch(epoch: NoteEpoch, previous: NoteEpoch | undefined, noteRecordName: string): string {
+function describeEpoch(epoch: NoteEpoch, previous: NoteEpoch | undefined, noteRecordName: string): HistoryEpochRow {
   const changed: string[] = [];
   const carried: string[] = [];
   for (const [recordName, snapshotId] of Object.entries(epoch.snapshots)) {
@@ -61,14 +75,10 @@ function describeEpoch(epoch: NoteEpoch, previous: NoteEpoch | undefined, noteRe
     }
   }
 
-  let line = `${epoch.id}  ${epoch.timestamp}  changed: ${changed.join(", ")}`;
-  if (carried.length > 0) {
-    line += `  (carried over: ${carried.join(", ")})`;
-  }
-  return line;
+  return { id: epoch.id, timestamp: epoch.timestamp, changed, carriedOver: carried };
 }
 
-async function printRecordHistory(targetDir: string, recordNames: string[], noteRecordName: string, fileArg: string): Promise<void> {
+async function buildRecordHistory(targetDir: string, recordNames: string[], noteRecordName: string): Promise<HistoryRecordRow[]> {
   const rows: Array<{ snapshot: VersionSnapshot; label: string }> = [];
   for (const rn of recordNames) {
     const label = rn === noteRecordName ? "note" : `table ${rn}`;
@@ -81,13 +91,11 @@ async function printRecordHistory(targetDir: string, recordNames: string[], note
     }
   }
 
-  if (rows.length === 0) {
-    console.log(`No version history recorded yet for ${fileArg}.`);
-    return;
-  }
-
   rows.sort((a, b) => b.snapshot.timestamp.localeCompare(a.snapshot.timestamp));
-  for (const { snapshot, label } of rows) {
-    console.log(`${snapshot.id}  ${snapshot.timestamp}  ${label}  (changeTag ${snapshot.recordChangeTag})`);
-  }
+  return rows.map(({ snapshot, label }) => ({
+    id: snapshot.id,
+    timestamp: snapshot.timestamp,
+    label,
+    recordChangeTag: snapshot.recordChangeTag,
+  }));
 }

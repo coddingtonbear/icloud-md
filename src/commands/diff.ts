@@ -12,6 +12,36 @@ import { findSnapshotById, historyRecordNames, resolveTrackedNote } from "../not
 import { listVersions, type VersionSnapshot } from "../notes/versionHistory.js";
 import type { IcloudSession } from "../session.js";
 
+/** One record's comparison within an epoch diff - a note's own text, or one
+ * of its table attachments. `skipped` covers every reason there's nothing to
+ * diff (no snapshot ever captured, the snapshot no longer exists locally, or
+ * the current remote content isn't available) - `text` carries the
+ * human-readable explanation in that case instead of a rendered diff. */
+export interface DiffEpochSection {
+  label: string;
+  skipped: boolean;
+  hasDifferences?: boolean;
+  text: string;
+}
+
+/** What `runDiff` reports - a single snapshot-vs-snapshot (or
+ * snapshot-vs-current) comparison, or a whole-note epoch's per-record
+ * breakdown. `hasDifferences` is the query-command signal `status`/`diff`
+ * share: true means the CLI exits non-zero even though the diff itself
+ * succeeded. */
+export type DiffResult =
+  | { kind: "snapshot"; from: string; to: string; hasDifferences: boolean; text: string }
+  | { kind: "epoch"; epochId: string; hasDifferences: boolean; sections: DiffEpochSection[] };
+
+/** Reassembles a `DiffResult` into the same report text `runDiff` used to
+ * print directly - the CLI's human renderer. */
+export function renderDiffResult(result: DiffResult): string {
+  if (result.kind === "snapshot") {
+    return result.text;
+  }
+  return result.sections.map((section) => `=== ${section.label} ===\n${section.text}`).join("\n\n");
+}
+
 /**
  * Diffs two renderings of the same note or table attachment - `fromId` is
  * always a snapshot id; `toId` is another snapshot id, or `undefined` to
@@ -26,7 +56,7 @@ export async function runDiff(
   fromId: string,
   toId: string | undefined,
   onLoginStatus?: (message: string) => void,
-): Promise<void> {
+): Promise<DiffResult> {
   const state = await readCloneState(targetDir);
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
@@ -58,8 +88,7 @@ export async function runDiff(
           `(run "icloud-md history ${fileArg} --records" for their ids), or diff the epoch against the current remote copy`,
       );
     }
-    console.log(await renderEpochDiff(targetDir, state, recordName, zone, epoch, onLoginStatus));
-    return;
+    return await renderEpochDiff(targetDir, state, recordName, zone, epoch, onLoginStatus);
   }
   const fromText = decodeSnapshotText(from);
 
@@ -83,7 +112,8 @@ export async function runDiff(
     toLabel = "current";
   }
 
-  console.log(renderDiff(fromText, toText, fromId, toLabel));
+  const rendered = renderDiff(fromText, toText, fromId, toLabel);
+  return { kind: "snapshot", from: fromId, to: toLabel, hasDifferences: rendered.hasDifferences, text: rendered.text };
 }
 
 /** Decodes a snapshot's raw bytes into the same rendered text form
@@ -108,7 +138,7 @@ async function renderEpochDiff(
   zone: NoteZone,
   epoch: NoteEpoch,
   onLoginStatus?: (message: string) => void,
-): Promise<string> {
+): Promise<DiffResult> {
   let resolvedAuth: { session: IcloudSession; ckdatabasewsUrl: string; dsid: string } | undefined;
   const resolveAuth = async (): Promise<{ session: IcloudSession; ckdatabasewsUrl: string; dsid: string }> => {
     if (!resolvedAuth) {
@@ -121,32 +151,37 @@ async function renderEpochDiff(
     return resolvedAuth;
   };
 
-  const sections: string[] = [];
+  const sections: DiffEpochSection[] = [];
+  let hasDifferences = false;
   for (const [recordName, snapshotId] of Object.entries(epoch.snapshots)) {
     const label = recordName === noteRecordName ? "note text" : `table ${recordName}`;
     if (snapshotId === null) {
-      sections.push(`=== ${label} ===\n(no snapshot was ever captured for this record at this epoch - skipped)`);
+      sections.push({ label, skipped: true, text: "(no snapshot was ever captured for this record at this epoch - skipped)" });
       continue;
     }
     const snapshot = (await listVersions(targetDir, recordName)).find((candidate) => candidate.id === snapshotId);
     if (!snapshot) {
-      sections.push(`=== ${label} ===\n(the recorded snapshot "${snapshotId}" no longer exists locally - skipped)`);
+      sections.push({ label, skipped: true, text: `(the recorded snapshot "${snapshotId}" no longer exists locally - skipped)` });
       continue;
     }
 
     try {
       const { session, ckdatabasewsUrl, dsid } = await resolveAuth();
       const toText = await fetchCurrentText(session, ckdatabasewsUrl, dsid, zone, recordName, snapshot.recordType);
-      sections.push(`=== ${label} ===\n${renderDiff(decodeSnapshotText(snapshot), toText, epoch.id, "current")}`);
+      const rendered = renderDiff(decodeSnapshotText(snapshot), toText, epoch.id, "current");
+      if (rendered.hasDifferences) {
+        hasDifferences = true;
+      }
+      sections.push({ label, skipped: false, hasDifferences: rendered.hasDifferences, text: rendered.text });
     } catch (cause) {
       if (!(cause instanceof VersionContentUnavailableError)) {
         throw cause;
       }
-      sections.push(`=== ${label} ===\n(${cause.message})`);
+      sections.push({ label, skipped: true, text: `(${cause.message})` });
     }
   }
 
-  return sections.join("\n\n");
+  return { kind: "epoch", epochId: epoch.id, hasDifferences, sections };
 }
 
 async function fetchCurrentText(
@@ -176,10 +211,19 @@ async function fetchCurrentText(
   return markdown;
 }
 
+/** A rendered two-way diff, plus whether it found any actual differences -
+ * the signal `runDiff` surfaces as its `hasDifferences` result field (query
+ * commands, per the git `--exit-code` convention, exit non-zero when there
+ * are differences to show). */
+export interface RenderedDiff {
+  text: string;
+  hasDifferences: boolean;
+}
+
 /** Renders a unified-diff-style comparison of two texts using node-diff3's
  * plain two-way `diffComm` (already a dependency via `mergeConflict.ts`'s
  * 3-way merge, so this needs nothing new). */
-export function renderDiff(fromText: string, toText: string, fromLabel: string, toLabel: string): string {
+export function renderDiff(fromText: string, toText: string, fromLabel: string, toLabel: string): RenderedDiff {
   const segments = diffComm(fromText.split("\n"), toText.split("\n")) as Array<
     { common: string[] } | { buffer1: string[]; buffer2: string[] }
   >;
@@ -204,5 +248,5 @@ export function renderDiff(fromText: string, toText: string, fromLabel: string, 
   if (!changed) {
     lines.push("(no differences)");
   }
-  return lines.join("\n");
+  return { text: lines.join("\n"), hasDifferences: changed };
 }

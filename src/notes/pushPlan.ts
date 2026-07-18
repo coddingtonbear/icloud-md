@@ -109,3 +109,22 @@ export function stripFilePrefix(message: string, file: string): string {
   const prefix = `${file}: `;
   return message.startsWith(prefix) ? message.slice(prefix.length) : message;
 }
+
+/** A `PlanEntry` projected to its plain-data fields - what `status` and
+ * `push --dry-run` both hand to `--json` callers (dropping `push`'s
+ * `execute` closure, which isn't serializable and isn't anyone's business
+ * outside this process). */
+export type SerializedPlanEntry = Pick<PlanEntry, "kind" | "file" | "resolution" | "reason" | "previousFile">;
+
+/** Projects any `PlanEntry` (including `push`'s `ExecutablePlanEntry`, which
+ * extends it with `execute`) down to its serializable fields. */
+export function serializePlanEntry(entry: PlanEntry): SerializedPlanEntry {
+  const { kind, file, resolution, reason, previousFile } = entry;
+  return {
+    kind,
+    file,
+    resolution,
+    ...(reason !== undefined ? { reason } : {}),
+    ...(previousFile !== undefined ? { previousFile } : {}),
+  };
+}

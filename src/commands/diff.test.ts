@@ -43,21 +43,24 @@ test("decodeSnapshotText decodes an Attachment MergeableDataEncrypted (table) sn
 
 test("renderDiff shows no differences for identical text", () => {
   const rendered = renderDiff("a\nb\nc", "a\nb\nc", "old", "new");
-  assert.equal(rendered, ["--- old", "+++ new", "  a", "  b", "  c", "(no differences)"].join("\n"));
+  assert.equal(rendered.text, ["--- old", "+++ new", "  a", "  b", "  c", "(no differences)"].join("\n"));
+  assert.equal(rendered.hasDifferences, false);
 });
 
 test("renderDiff shows added and removed lines", () => {
   const rendered = renderDiff("a\nb\nc", "a\nx\nc", "old", "new");
-  assert.equal(rendered.split("\n")[0], "--- old");
-  assert.equal(rendered.split("\n")[1], "+++ new");
-  assert.match(rendered, /^- b$/m);
-  assert.match(rendered, /^\+ x$/m);
-  assert.doesNotMatch(rendered, /no differences/);
+  assert.equal(rendered.text.split("\n")[0], "--- old");
+  assert.equal(rendered.text.split("\n")[1], "+++ new");
+  assert.match(rendered.text, /^- b$/m);
+  assert.match(rendered.text, /^\+ x$/m);
+  assert.doesNotMatch(rendered.text, /no differences/);
+  assert.equal(rendered.hasDifferences, true);
 });
 
 test("renderDiff treats an empty 'from' as everything added", () => {
   const rendered = renderDiff("", "new line", "old", "new");
-  assert.match(rendered, /^\+ new line$/m);
+  assert.match(rendered.text, /^\+ new line$/m);
+  assert.equal(rendered.hasDifferences, true);
 });
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {

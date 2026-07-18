@@ -1,7 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import chalk from "chalk";
 import { resolveFolderAccount } from "../auth/folderAuth.js";
 import type { IcloudSession } from "../session.js";
 import {
@@ -28,7 +27,7 @@ import { hasEmbedMarker, hasUnknownContentMarker } from "../notes/unknownContent
 import { localFileState } from "../notes/localFileState.js";
 import { recordEpoch } from "../notes/noteEpoch.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
-import { renderPlan, stripFilePrefix, type PlanEntry } from "../notes/pushPlan.js";
+import { serializePlanEntry, stripFilePrefix, type PlanEntry, type SerializedPlanEntry } from "../notes/pushPlan.js";
 import { decodeNoteFormat, formatsRoundTripEqual, type FormatParagraph } from "../notes/noteFormat.js";
 import { compressNoteDocument, decodeNoteBodyText, decodeNoteString, decompressNoteDocument } from "../notes/noteText.js";
 import { parseNoteMarkdown } from "../notes/parseNoteMarkdown.js";
@@ -78,9 +77,22 @@ export interface PushOptions {
   dryRun?: boolean;
   /** Routes any headless-recovery login status messages; defaults to staying silent (see `resolveFolderAccount`). */
   onLoginStatus?: (message: string) => void;
-  /** Presentation hook: re-express vault-root-relative paths for display
-   * (the CLI passes cwd-relativization). Defaults to identity. */
-  formatPath?: (file: string) => string;
+}
+
+/** A planned entry plus (for a real, non-dry-run push) what actually
+ * happened when it executed - `outcome` is absent for a dry run, since
+ * nothing executes, and absent for a plan entry with no `execute` (already
+ * refused/conflicting at plan time). */
+export interface PushEntryResult extends SerializedPlanEntry {
+  outcome?: ExecuteOutcome;
+}
+
+export interface PushResult {
+  dryRun: boolean;
+  /** Count of entries whose `resolution` was "ready" and whose `execute`
+   * reported success - absent for a dry run. */
+  pushed?: number;
+  entries: PushEntryResult[];
 }
 
 interface PushCandidate {
@@ -105,6 +117,16 @@ interface PreparedCandidate {
   noteTextUpdated: boolean;
 }
 
+/** What actually happened when an `ExecutablePlanEntry.execute` ran: whether
+ * the write succeeded, and a human-readable description of the outcome (a
+ * success message, or the server's rejection detail) - the CLI layer renders
+ * this rather than `execute` printing it directly, so `push` stays usable as
+ * a library and `--json` can report it structurally. */
+export interface ExecuteOutcome {
+  succeeded: boolean;
+  message: string;
+}
+
 /** A `PlanEntry` plus (for anything `buildPushPlan` can actually act on) the
  * closure that does so. `status` only ever reads the `PlanEntry` fields;
  * `push` additionally invokes `execute` for every entry that has one. The
@@ -112,7 +134,7 @@ interface PreparedCandidate {
  * rejected after planning said "ready") - callers must use it rather than
  * the entry's `resolution` to decide whether something genuinely happened. */
 export interface ExecutablePlanEntry extends PlanEntry {
-  execute?: () => Promise<boolean>;
+  execute?: () => Promise<ExecuteOutcome>;
 }
 
 export interface BuildPushPlanResult {
@@ -511,8 +533,7 @@ export async function buildPushPlan(
         });
         if (!result.ok) {
           const detail = result.reason ? ` (${result.reason})` : "";
-          console.log(chalk.red(`${pair.toFile}: server rejected the move: ${result.serverErrorCode}${detail}`));
-          return false;
+          return { succeeded: false, message: `${pair.toFile}: server rejected the move: ${result.serverErrorCode}${detail}` };
         }
         state.notes[pair.recordName] = {
           ...pair.entry,
@@ -522,8 +543,7 @@ export async function buildPushPlan(
           modificationDate: modificationDateOf(result.record) || Date.now(),
         };
         await applyNoteFileTimes(path.join(targetDir, pair.toFile), result.record);
-        console.log(`Moved ${pair.entry.file} -> ${pair.toFile}`);
-        return true;
+        return { succeeded: true, message: `Moved ${pair.entry.file} -> ${pair.toFile}` };
       },
     });
   }
@@ -538,8 +558,7 @@ export async function buildPushPlan(
         execute: async () => {
           await applyLocalNoteDeletion(targetDir, recordName, entry, state);
           delete state.trashed?.[recordName];
-          console.log(`${entry.file}: already deleted remotely - removed from tracking`);
-          return true;
+          return { succeeded: true, message: `${entry.file}: already deleted remotely - removed from tracking` };
         },
       });
       continue;
@@ -555,8 +574,7 @@ export async function buildPushPlan(
         execute: async () => {
           await applyLocalNoteDeletion(targetDir, recordName, entry, state);
           rememberTrashedNote(state, recordName, entry.file);
-          console.log(`${entry.file}: already in Recently Deleted - removed from tracking`);
-          return true;
+          return { succeeded: true, message: `${entry.file}: already in Recently Deleted - removed from tracking` };
         },
       });
       continue;
@@ -587,13 +605,11 @@ export async function buildPushPlan(
         });
         if (!result.ok) {
           const detail = result.reason ? ` (${result.reason})` : "";
-          console.log(chalk.red(`${entry.file}: server rejected the delete: ${result.serverErrorCode}${detail}`));
-          return false;
+          return { succeeded: false, message: `${entry.file}: server rejected the delete: ${result.serverErrorCode}${detail}` };
         }
         await applyLocalNoteDeletion(targetDir, recordName, entry, state);
         rememberTrashedNote(state, recordName, entry.file);
-        console.log(`Moved ${entry.file} to Recently Deleted`);
-        return true;
+        return { succeeded: true, message: `Moved ${entry.file} to Recently Deleted` };
       },
     });
   }
@@ -678,8 +694,7 @@ export async function buildPushPlan(
         );
         if (!result.ok) {
           const detail = result.reason ? ` (${result.reason})` : "";
-          console.log(chalk.red(`${file}: server rejected the create: ${result.serverErrorCode}${detail}`));
-          return false;
+          return { succeeded: false, message: `${file}: server rejected the create: ${result.serverErrorCode}${detail}` };
         }
         // Mirror what pull's "added" branch establishes for a newly-seen
         // remote note: tracking entry, base copy, file times, and the
@@ -704,8 +719,7 @@ export async function buildPushPlan(
           });
         }
         await recordEpoch(targetDir, recordName, historyRecordNames(state, recordName));
-        console.log(`Created ${file}`);
-        return true;
+        return { succeeded: true, message: `Created ${file}` };
       },
     });
   }
@@ -839,8 +853,7 @@ export async function buildPushPlan(
         resolution: "noop",
         execute: async () => {
           await writeBaseCopy(targetDir, recordName, localText);
-          console.log(`${entry.file}: no server-side change needed`);
-          return false;
+          return { succeeded: true, message: `${entry.file}: no server-side change needed` };
         },
       });
       continue;
@@ -855,12 +868,11 @@ export async function buildPushPlan(
         const failure = results.find((result) => !result.ok);
         if (failure && !failure.ok) {
           const detail = failure.reason ? ` (${failure.reason})` : "";
-          if (failure.serverErrorCode === "CONFLICT") {
-            console.log(chalk.red(`${entry.file}: rejected by the server as a conflicting change${detail} - run "pull" first`));
-          } else {
-            console.log(chalk.red(`${entry.file}: server rejected the update: ${failure.serverErrorCode}${detail}`));
-          }
-          return false;
+          const message =
+            failure.serverErrorCode === "CONFLICT"
+              ? `${entry.file}: rejected by the server as a conflicting change${detail} - run "pull" first`
+              : `${entry.file}: server rejected the update: ${failure.serverErrorCode}${detail}`;
+          return { succeeded: false, message };
         }
 
         if (prepared.noteTextUpdated) {
@@ -883,8 +895,7 @@ export async function buildPushPlan(
         // `pull`'s own capture - see the "Whole-note coordinated version
         // epochs" investigation.
         await recordEpoch(targetDir, recordName, historyRecordNames(state, recordName));
-        console.log(`Pushed ${entry.file}`);
-        return true;
+        return { succeeded: true, message: `Pushed ${entry.file}` };
       },
     });
   }
@@ -915,33 +926,34 @@ export async function buildPushPlan(
  * permanent deletion). Run `status` first to preview exactly what a push
  * will do (including anything it would refuse) before running it for real.
  */
-export async function runPush(targetDir: string, options: PushOptions = {}): Promise<void> {
+export async function runPush(targetDir: string, options: PushOptions = {}): Promise<PushResult> {
   const dryRun = options.dryRun === true;
   const { state, entries } = await buildPushPlan(targetDir, { onLoginStatus: options.onLoginStatus });
 
   if (entries.length === 0) {
-    console.log("Nothing to push.");
-    return;
+    return { dryRun, entries: [], ...(dryRun ? {} : { pushed: 0 }) };
   }
 
-  if (!dryRun) {
-    let pushed = 0;
-    for (const entry of entries) {
-      if (!entry.execute) {
-        continue;
-      }
-      const succeeded = await entry.execute();
-      if (entry.resolution === "ready" && succeeded) {
-        pushed += 1;
-      }
+  if (dryRun) {
+    return { dryRun, entries: entries.map(serializePlanEntry) };
+  }
+
+  let pushed = 0;
+  const results: PushEntryResult[] = [];
+  for (const entry of entries) {
+    if (!entry.execute) {
+      results.push(serializePlanEntry(entry));
+      continue;
     }
-    await writeCloneState(targetDir, state);
-    console.log(`Pushed ${pushed} note(s) from ${targetDir}`);
+    const outcome = await entry.execute();
+    if (entry.resolution === "ready" && outcome.succeeded) {
+      pushed += 1;
+    }
+    results.push({ ...serializePlanEntry(entry), outcome });
   }
+  await writeCloneState(targetDir, state);
 
-  for (const line of renderPlan(entries, options.formatPath)) {
-    console.log(line);
-  }
+  return { dryRun, pushed, entries: results };
 }
 
 /** Untracked `.md` files anywhere in the vault, as vault-root-relative

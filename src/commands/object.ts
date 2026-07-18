@@ -73,26 +73,17 @@ export interface ObjectListFilters {
   orphaned?: boolean;
   trashed?: boolean;
   untracked?: boolean;
-  json?: boolean;
 }
 
 export async function runObjectList(
   targetDir: string,
   filters: ObjectListFilters = {},
   options: ObjectCommandOptions = {},
-): Promise<void> {
+): Promise<ObjectInfo[]> {
   const { state, auth } = await resolveObjectAuth(targetDir, options);
   const records = await fetchAllZoneRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid);
   const index = buildObjectIndex(records, state);
-  const filtered = applyObjectFilters(index, filters);
-
-  if (filters.json === true) {
-    console.log(JSON.stringify(filtered, null, 2));
-    return;
-  }
-  for (const line of renderObjectList(filtered)) {
-    console.log(line);
-  }
+  return applyObjectFilters(index, filters);
 }
 
 /** One incoming reference as `object show` reports it: enough to identify
@@ -105,11 +96,16 @@ export interface IncomingReference {
   state: ObjectLifecycleState;
 }
 
+export interface ObjectShowResult extends ObjectInfo {
+  record: CloudKitRecord;
+  incomingReferences: IncomingReference[];
+}
+
 export async function runObjectShow(
   targetDir: string,
   recordName: string,
   options: ObjectCommandOptions = {},
-): Promise<void> {
+): Promise<ObjectShowResult> {
   const { state, auth } = await resolveObjectAuth(targetDir, options);
   // A full zone walk rather than a single-record lookup: `show` is the
   // "look before you shoot" step, and the question that matters before a
@@ -120,10 +116,11 @@ export async function runObjectShow(
     throw new UnknownObjectError(recordName);
   }
   const index = buildObjectIndex(records, state);
-  const info = index.find((candidate) => candidate.recordName === recordName);
-  console.log(
-    JSON.stringify({ ...info, record, incomingReferences: findIncomingReferences(index, recordName) }, null, 2),
-  );
+  // Every record in `records` gets exactly one entry in `index` (see
+  // `buildObjectIndex`), so this record - just confirmed present above -
+  // always has one too.
+  const info = index.find((candidate) => candidate.recordName === recordName)!;
+  return { ...info, record, incomingReferences: findIncomingReferences(index, recordName) };
 }
 
 /** Every record in `index` holding a reference to `recordName` - the
@@ -169,14 +166,27 @@ export function isCascadableType(recordType: string): boolean {
   );
 }
 
+export type ObjectDeleteOutcome = "already-deleted" | "purged" | "force-deleted";
+
+export interface ObjectDeleteResult {
+  recordName: string;
+  recordType: string;
+  title?: string | undefined;
+  outcome: ObjectDeleteOutcome;
+  /** `outcome: "force-deleted"` only: referrer records the `--force` cascade
+   * had to delete first to unblock the target. */
+  cascaded?: Array<{ recordName: string; recordType: string; title?: string | undefined }>;
+}
+
 export async function runObjectDelete(
   targetDir: string,
   recordName: string,
   options: ObjectDeleteOptions = {},
-): Promise<void> {
+): Promise<ObjectDeleteResult> {
   const { state, auth } = await resolveObjectAuth(targetDir, options);
   const { session, dsid } = auth;
   const ckdatabasewsUrl = auth.ckdatabasewsUrl;
+  const onStatus = options.onLoginStatus;
 
   const records = await lookupRecords(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, [recordName]);
   const record = records[0];
@@ -185,12 +195,12 @@ export async function runObjectDelete(
   }
 
   const [info] = buildObjectIndex([record], state);
-  const label = `${record.recordType} ${recordName}${info?.title ? ` ("${info.title}")` : ""}`;
+  const title = info?.title;
+  const label = `${record.recordType} ${recordName}${title ? ` ("${title}")` : ""}`;
 
   if (record.deleted === true || (isPurged(record) && options.force !== true)) {
     await forgetObjectLocally(targetDir, recordName, state);
-    console.log(`${label}: already permanently deleted - nothing to do remotely.`);
-    return;
+    return { recordName, recordType: record.recordType, title, outcome: "already-deleted" };
   }
 
   if (NEEDS_CONFIRMATION_TYPES.has(record.recordType) && options.yes !== true) {
@@ -198,16 +208,16 @@ export async function runObjectDelete(
   }
 
   if (options.force === true) {
-    await forceDeleteWithCascade(session, ckdatabasewsUrl, dsid, state, label, record);
+    const cascaded = await forceDeleteWithCascade(session, ckdatabasewsUrl, dsid, state, label, record, onStatus);
     await forgetObjectLocally(targetDir, recordName, state);
-    return;
+    return { recordName, recordType: record.recordType, title, outcome: "force-deleted", ...(cascaded.length > 0 ? { cascaded } : {}) };
   }
 
   if (record.recordType === "Note") {
     // Apple's own two-stage deletion (trash-move update, then Deleted: 1) -
     // works regardless of attachments and never parses content, so it can't
     // be defeated by the very brokenness this command exists to clean up.
-    console.log(`Deleting ${label} via Apple's two-stage purge...`);
+    onStatus?.(`Deleting ${label} via Apple's two-stage purge...`);
     let current = record;
     if (!isInTrash(current)) {
       const trashResult = await updateNoteRecord(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, {
@@ -231,15 +241,14 @@ export async function runObjectDelete(
       throw new NoteDeleteRejectedError(recordName, purgeResult.serverErrorCode, purgeResult.reason);
     }
     await forgetObjectLocally(targetDir, recordName, state);
-    console.log(`Permanently deleted ${label}.`);
-    return;
+    return { recordName, recordType: record.recordType, title, outcome: "purged" };
   }
 
   // Non-Note records have no captured deletion precedent - forceDelete is
   // the only primitive there is, live-verified to work when nothing still
   // references the target (the server rejects it otherwise, which is
   // surfaced as the error below rather than pre-checked).
-  console.log(`Force-deleting ${label}...`);
+  onStatus?.(`Force-deleting ${label}...`);
   const result = await forceDeleteRecord(
     session,
     ckdatabasewsUrl,
@@ -253,7 +262,29 @@ export async function runObjectDelete(
     throw rejectionWithBlockerHint(recordName, result.serverErrorCode, result.reason);
   }
   await forgetObjectLocally(targetDir, recordName, state);
-  console.log(`Permanently deleted ${label}.`);
+  return { recordName, recordType: record.recordType, title, outcome: "force-deleted" };
+}
+
+/** Turns an `ObjectDeleteResult` back into the message(s) this command used
+ * to print directly - the CLI's human renderer. */
+export function renderObjectDeleteResult(result: ObjectDeleteResult): string[] {
+  const label = `${result.recordType} ${result.recordName}${result.title ? ` ("${result.title}")` : ""}`;
+  switch (result.outcome) {
+    case "already-deleted":
+      return [`${label}: already permanently deleted - nothing to do remotely.`];
+    case "purged":
+    case "force-deleted": {
+      if (result.cascaded && result.cascaded.length > 0) {
+        return [
+          `Permanently deleted ${label} and ${result.cascaded.length} referencing record(s).`,
+          ...result.cascaded.map(
+            (referrer) => `  deleted ${referrer.recordType} ${referrer.recordName}${referrer.title ? ` ("${referrer.title}")` : ""}`,
+          ),
+        ];
+      }
+      return [`Permanently deleted ${label}.`];
+    }
+  }
 }
 
 /**
@@ -292,6 +323,8 @@ export function rejectionWithBlockerHint(
  * that's been live-verified; the referrer set comes from a fresh full zone
  * walk using the same reference scan `object show` reports.
  */
+/** Returns the referrer records it had to delete first to unblock the
+ * target (empty when the first `forceDelete` attempt just worked). */
 async function forceDeleteWithCascade(
   session: IcloudSession,
   ckdatabasewsUrl: string,
@@ -299,8 +332,9 @@ async function forceDeleteWithCascade(
   state: CloneState,
   label: string,
   record: CloudKitRecord,
-): Promise<void> {
-  console.log(`Force-deleting ${label}...`);
+  onStatus?: ((message: string) => void) | undefined,
+): Promise<Array<{ recordName: string; recordType: string; title?: string | undefined }>> {
+  onStatus?.(`Force-deleting ${label}...`);
   const first = await forceDeleteRecord(
     session,
     ckdatabasewsUrl,
@@ -311,14 +345,13 @@ async function forceDeleteWithCascade(
     record.recordChangeTag ?? "",
   );
   if (first.ok) {
-    console.log(`Permanently deleted ${label}.`);
-    return;
+    return [];
   }
   if (first.serverErrorCode !== "VALIDATING_REFERENCE_ERROR") {
     throw new NoteDeleteRejectedError(record.recordName, first.serverErrorCode, first.reason);
   }
 
-  console.log("Blocked by validating references - walking the zone to find every referrer...");
+  onStatus?.("Blocked by validating references - walking the zone to find every referrer...");
   const records = await fetchAllZoneRecords(session, ckdatabasewsUrl, dsid);
   const index = buildObjectIndex(records, state);
   const referrers = findIncomingReferences(index, record.recordName).filter(
@@ -346,7 +379,6 @@ async function forceDeleteWithCascade(
     }
     delete state.attachments?.[referrer.recordName];
     delete state.tableAttachments?.[referrer.recordName];
-    console.log(`  deleted ${referrer.recordType} ${referrer.recordName}${referrer.title ? ` ("${referrer.title}")` : ""}`);
   }
 
   const retry = await forceDeleteRecord(
@@ -361,7 +393,7 @@ async function forceDeleteWithCascade(
   if (!retry.ok) {
     throw rejectionWithBlockerHint(record.recordName, retry.serverErrorCode, retry.reason);
   }
-  console.log(`Permanently deleted ${label} and ${referrers.length} referencing record(s).`);
+  return referrers.map((referrer) => ({ recordName: referrer.recordName, recordType: referrer.recordType, title: referrer.title }));
 }
 
 async function resolveObjectAuth(targetDir: string, options: ObjectCommandOptions) {

@@ -5,6 +5,10 @@ import { readCloneState } from "../notes/cloneState.js";
 import { resolveTrackedNote } from "../notes/trackedFile.js";
 import { NotClonedDirectoryError } from "../errors.js";
 
+export interface RestoreResult {
+  file: string;
+}
+
 /**
  * Discards a tracked note's local edits, overwriting it with its base copy -
  * the last-known-synced text `push`/`pull` treat as "clean". Purely local,
@@ -13,7 +17,7 @@ import { NotClonedDirectoryError } from "../errors.js";
  * the file: an attachment-bearing note `push` will never accept, unresolved
  * conflict markers the user wants to abandon rather than resolve, etc.
  */
-export async function runRestore(targetDir: string, fileArg: string): Promise<void> {
+export async function runRestore(targetDir: string, fileArg: string): Promise<RestoreResult> {
   const state = await readCloneState(targetDir);
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
@@ -27,5 +31,5 @@ export async function runRestore(targetDir: string, fileArg: string): Promise<vo
   }
 
   await writeFile(path.join(targetDir, entry.file), base, "utf-8");
-  console.log(`Restored ${entry.file} to match the last synced copy.`);
+  return { file: entry.file };
 }

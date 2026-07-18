@@ -27,26 +27,11 @@ const STATE: CloneState = {
   },
 };
 
-function captureLogs(): { lines: string[]; restore: () => void } {
-  const lines: string[] = [];
-  const original = console.log;
-  console.log = (...args: unknown[]) => {
-    lines.push(args.map(String).join(" "));
-  };
-  return { lines, restore: () => { console.log = original; } };
-}
-
 test("history reports no version history when nothing has been recorded", () =>
   withTempDir(async (dir) => {
     await writeCloneState(dir, STATE);
-    const { lines, restore } = captureLogs();
-    try {
-      await runHistory(dir, "Test Note.md");
-    } finally {
-      restore();
-    }
-    assert.equal(lines.length, 1);
-    assert.match(lines[0]!, /No version history recorded yet/);
+    const result = await runHistory(dir, "Test Note.md");
+    assert.deepEqual(result, { mode: "epochs", epochs: [] });
   }));
 
 test("history --records lists snapshots for the note and its table attachments, newest first", () =>
@@ -75,21 +60,20 @@ test("history --records lists snapshots for the note and its table attachments, 
       noteRecordName: "REC1",
     });
 
-    const { lines, restore } = captureLogs();
-    try {
-      await runHistory(dir, "Test Note.md", { records: true });
-    } finally {
-      restore();
+    const result = await runHistory(dir, "Test Note.md", { records: true });
+    assert.equal(result.mode, "records");
+    if (result.mode !== "records") {
+      return;
     }
 
-    assert.equal(lines.length, 3);
-    assert.ok(lines.some((line) => /table ATT-1/.test(line)));
+    assert.equal(result.records.length, 3);
+    assert.ok(result.records.some((row) => row.label === "table ATT-1"));
     // Newest-first within a single record is a real guarantee (even under a
     // same-millisecond capture tie); ordering *between* two different
     // records that tie on timestamp isn't, so this only checks the note's
     // own two snapshots relative to each other, not against the table's.
-    const tag1Index = lines.findIndex((line) => /\bnote\b.*tag-1/.test(line));
-    const tag2Index = lines.findIndex((line) => /\bnote\b.*tag-2/.test(line));
+    const tag1Index = result.records.findIndex((row) => row.label === "note" && row.recordChangeTag === "tag-1");
+    const tag2Index = result.records.findIndex((row) => row.label === "note" && row.recordChangeTag === "tag-2");
     assert.notEqual(tag1Index, -1);
     assert.notEqual(tag2Index, -1);
     assert.ok(tag2Index < tag1Index, "the more recently captured note snapshot should list first");
@@ -126,19 +110,18 @@ test("history defaults to an epoch timeline, newest first, noting changed vs. ca
     });
     await recordEpoch(dir, "REC1", ["REC1", "ATT-1"]);
 
-    const { lines, restore } = captureLogs();
-    try {
-      await runHistory(dir, "Test Note.md");
-    } finally {
-      restore();
+    const result = await runHistory(dir, "Test Note.md");
+    assert.equal(result.mode, "epochs");
+    if (result.mode !== "epochs") {
+      return;
     }
 
-    assert.equal(lines.length, 2);
+    assert.equal(result.epochs.length, 2);
     // Newest-first: the second epoch (note changed, table carried over) prints first.
-    assert.match(lines[0]!, /changed: note/);
-    assert.match(lines[0]!, /carried over: table ATT-1/);
-    assert.match(lines[1]!, /changed: note, table ATT-1/);
-    assert.doesNotMatch(lines[1]!, /carried over/);
+    assert.deepEqual(result.epochs[0]?.changed, ["note"]);
+    assert.deepEqual(result.epochs[0]?.carriedOver, ["table ATT-1"]);
+    assert.deepEqual(result.epochs[1]?.changed, ["note", "table ATT-1"]);
+    assert.deepEqual(result.epochs[1]?.carriedOver, []);
   }));
 
 test("history refuses a file that isn't a tracked note", () =>

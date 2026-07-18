@@ -26,6 +26,17 @@ export interface DeleteOptions {
   onLoginStatus?: (message: string) => void;
 }
 
+/** Which of the four remote outcomes a delete resolved to - the CLI's human
+ * renderer turns this (plus `localOutcome`) back into the message this
+ * command used to print directly. */
+export type DeleteOutcome = "already-deleted" | "already-trashed" | "trashed" | "purged";
+
+export interface DeleteResult {
+  file: string;
+  outcome: DeleteOutcome;
+  localOutcome: LocalFileState;
+}
+
 /**
  * Deletes a tracked note from iCloud the way Apple's own client does (see
  * the 2026-07-16 lifecycle/purge HAR analyses in the project notes): an
@@ -45,7 +56,7 @@ export interface DeleteOptions {
  * file is left on disk (just untracked) rather than deleted along with the
  * remote note.
  */
-export async function runDelete(targetDir: string, fileArg: string, options: DeleteOptions = {}): Promise<void> {
+export async function runDelete(targetDir: string, fileArg: string, options: DeleteOptions = {}): Promise<DeleteResult> {
   const hard = options.hard === true;
   const state = await readCloneState(targetDir);
   if (!state) {
@@ -67,26 +78,23 @@ export async function runDelete(targetDir: string, fileArg: string, options: Del
   const record = records[0];
 
   if (!record || record.deleted === true || isPurged(record)) {
-    const local = await forgetNoteLocally(targetDir, target, state);
+    const localOutcome = await forgetNoteLocally(targetDir, target, state);
     await writeCloneState(targetDir, state);
-    console.log(`${target.file}: already deleted remotely - ${describeLocalOutcome(local)}`);
-    return;
+    return { file: target.file, outcome: "already-deleted", localOutcome };
   }
 
   if (!hard) {
     if (isInTrash(record)) {
-      const local = await forgetNoteLocally(targetDir, target, state);
+      const localOutcome = await forgetNoteLocally(targetDir, target, state);
       rememberTrashedNote(state, target.recordName, target.file);
       await writeCloneState(targetDir, state);
-      console.log(`${target.file}: already in Recently Deleted - ${describeLocalOutcome(local)}`);
-      return;
+      return { file: target.file, outcome: "already-trashed", localOutcome };
     }
     await trashNote(session, ckdatabasewsUrl, dsid, target.file, target.recordName, record);
-    const local = await forgetNoteLocally(targetDir, target, state);
+    const localOutcome = await forgetNoteLocally(targetDir, target, state);
     rememberTrashedNote(state, target.recordName, target.file);
     await writeCloneState(targetDir, state);
-    console.log(`Moved ${target.file} to Recently Deleted (recoverable in Notes for ~30 days) - ${describeLocalOutcome(local)}`);
-    return;
+    return { file: target.file, outcome: "trashed", localOutcome };
   }
 
   // --hard: Apple's own two-stage sequence, staying on captured precedent -
@@ -105,9 +113,9 @@ export async function runDelete(targetDir: string, fileArg: string, options: Del
   if (!purged.ok) {
     throw new NoteDeleteRejectedError(target.file, purged.serverErrorCode, purged.reason);
   }
-  const local = await forgetNoteLocally(targetDir, target, state);
+  const localOutcome = await forgetNoteLocally(targetDir, target, state);
   await writeCloneState(targetDir, state);
-  console.log(`Permanently deleted ${target.file} from iCloud - ${describeLocalOutcome(local)}`);
+  return { file: target.file, outcome: "purged", localOutcome };
 }
 
 /** What `runDelete` operates on: a currently-tracked note, or (for `--hard`)
@@ -240,6 +248,22 @@ export async function applyLocalNoteDeletion(
   state.tableAttachments = tableAttachments;
 
   return local;
+}
+
+/** Turns a `DeleteResult` back into the message this command used to print
+ * directly - the CLI's human renderer. */
+export function renderDeleteResult(result: DeleteResult): string {
+  const local = describeLocalOutcome(result.localOutcome);
+  switch (result.outcome) {
+    case "already-deleted":
+      return `${result.file}: already deleted remotely - ${local}`;
+    case "already-trashed":
+      return `${result.file}: already in Recently Deleted - ${local}`;
+    case "trashed":
+      return `Moved ${result.file} to Recently Deleted (recoverable in Notes for ~30 days) - ${local}`;
+    case "purged":
+      return `Permanently deleted ${result.file} from iCloud - ${local}`;
+  }
 }
 
 function describeLocalOutcome(local: LocalFileState): string {
