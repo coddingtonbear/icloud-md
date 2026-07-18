@@ -1,6 +1,6 @@
 {
   "name": "icloud-md",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Your iCloud notes as real Markdown files, on any OS, bidirectionally synced with a git-flavored CLI",
   "license": "MIT",
