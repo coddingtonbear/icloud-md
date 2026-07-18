@@ -20,54 +20,52 @@ This tool exists to fix that:
 - **Your notes become real files**, editable in whatever editor you already
   use, versionable in git, greppable, diffable, and scriptable — instead of
   being locked inside Notes.app or the iCloud web client.
-- **Plain files, not a proprietary export.** `clone` writes one Markdown
+- **Plain markdown files**: `clone` writes one Markdown
   file per note into a folder you control; `pull` and `push` keep it in sync
-  with iCloud in both directions. The tool itself never touches git — but
-  wrap that folder in a git repo yourself and you get free history,
-  diffing, and backup on top, which is exactly what it's designed for.
-- **Built-in version history, independent of git.** Every `pull`/`push` that
+  with iCloud in both directions.
+- **Built-in version history**: Every `pull`/`push` that
   changes a note snapshots it, so you can inspect or roll back *any* past
   version of a note — even ones you never `pull`ed while they existed — via
   `icloud-notes history`/`diff`/`revert`.
-- **Conflict-aware, not silently-overwriting.** If a note changed in iCloud
+- **Conflict-awareness**: If a note changed in iCloud
   since your last sync *and* you edited it locally, `pull` does a real
   three-way merge and only asks you to resolve the parts that actually
   overlap — the rest merges automatically.
-- **A `git`-flavored CLI**, not a background daemon or FUSE filesystem —
-  something you run when you want to sync, not something always watching.
+- **`git`-flavored CLI**: You're probably familiar with what the various
+  `git` do; that knowledge is most of what you need to know to use this
+  tool.
 
-## ⚠️ Before you use this
-
-**This is not an official or supported Apple API.** It works by
-reverse-engineering the private CloudKit web service that
-`www.icloud.com/notes` itself talks to, and by reverse-engineering the
-format Notes uses to store note content. Apple can change either of those
-at any time without notice.
-
-**Data loss is a real possibility, not a hypothetical one.** `push`,
-`delete`, and `revert` all make real writes to your live Notes account
-based on this tool's own reverse-engineered understanding of Apple's
-formats, not documented behavior. This tool's own version-history snapshots
-(`history`/`diff`/`revert`) are a real safety net, but you should not
-assume they're infallible, and you should not treat this tool as a
-substitute for a real backup.
-
-**Use this at your own risk, on your own account, and only against a
-working tree that's also a git repo** (or otherwise backed up) so you always
-have an independent copy of your notes outside of iCloud and outside of this
-tool. Before relying on `push` (or `delete`, or `revert`) against notes you
-care about, try it first against a disposable test note.
-
-A few things follow directly from the reverse-engineering:
-
-- It likely **requires Advanced Data Protection (ADP) to be disabled** on
-  the account — with ADP on, note content is end-to-end encrypted in a way
-  this tool doesn't attempt to decrypt.
-- Login itself is **not** reverse-engineered: `clone`/`reauthenticate` open
-  a real, headed browser window and let Apple's own sign-in pages (password,
-  2FA, CAPTCHAs) run to completion, then harvest the resulting session. This
-  keeps the tool out of the business of replicating Apple's login protocol,
-  which changes far more often than the sync API does.
+> [!WARNING]
+> **This is not an official or supported Apple API.** It works by
+> reverse-engineering the private CloudKit web service that
+> `www.icloud.com/notes` itself talks to, and by reverse-engineering the
+> format Notes uses to store note content. Apple can change either of those
+> at any time without notice.
+> 
+> **Data loss is a real possibility, not a hypothetical one.** `push`,
+> `delete`, and `revert` all make real writes to your live Notes account
+> based on this tool's own reverse-engineered understanding of Apple's
+> formats, not documented behavior. This tool's own version-history snapshots
+> (`history`/`diff`/`revert`) are a real safety net, but you should not
+> assume they're infallible, and you should not treat this tool as a
+> substitute for a real backup.
+> 
+> **Use this at your own risk, on your own account, and only against a
+> working tree that's also a git repo** (or otherwise backed up) so you always
+> have an independent copy of your notes outside of iCloud and outside of this
+> tool. Before relying on `push` (or `delete`, or `revert`) against notes you
+> care about, try it first against a disposable test note.
+> 
+> A few things follow directly from the reverse-engineering:
+> 
+> - It likely **requires Advanced Data Protection (ADP) to be disabled** on
+>   the account — with ADP on, note content is end-to-end encrypted in a way
+>   this tool doesn't attempt to decrypt.
+> - Login itself is **not** reverse-engineered: `clone`/`reauthenticate` open
+>   a real, headed browser window and let Apple's own sign-in pages (password,
+>   2FA, CAPTCHAs) run to completion, then harvest the resulting session. This
+>   keeps the tool out of the business of replicating Apple's login protocol,
+>   which changes far more often than the sync API does.
 
 ## Install
 
@@ -102,7 +100,10 @@ you normally would (password, 2FA, whatever your account requires). The
 command detects sign-in completion on its own and closes the window;
 closing it yourself aborts the clone. This walks your whole Notes zone
 (including notes shared with you) and writes one Markdown file per note into
-`./my-notes`, downloading any attachments alongside them.
+`./my-notes`, mirroring your Apple Notes folder structure — each note lands
+in the same (sub)folder it's in inside Notes.app, with each sharer's notes
+under a top-level directory named for them — and downloading any
+attachments alongside their note.
 
 After that:
 
@@ -147,15 +148,35 @@ resolution live.
 ## What works today
 
 - **`clone`/`pull`/`push` for plain-text notes**, including notes shared
-  with you (read side), with real three-way merging on `pull`.
+  with you, with real three-way merging on `pull`.
+- **Your Apple Notes folder structure is mirrored on disk** `pull` reconciles remote
+  folder renames/moves by moving the note's file rather than the
+  directory, and `push` picks up local moves between folders (a rename or
+  `mv` of a tracked file) and sends the matching folder change upstream.
+  Notes shared with you live under a top-level directory per sharer, with
+  their own shared folders nested underneath. All commands are
+  `git`-style about it — run them from anywhere inside the vault and file
+  arguments resolve relative to your current directory.
 - **`push` as a full reconciler**: creating notes from new local files,
-  uploading edits, and moving deleted-locally notes to Recently Deleted —
-  all gated by an optimistic-lock check against the note's remote change
-  tag, so a note that changed remotely since your last sync is reported as
-  a conflict, never silently overwritten.
+  uploading edits, moving notes between folders, and
+  moving deleted-locally notes to Recently Deleted — all gated by an
+  optimistic-lock check against the note's remote change tag, so a note
+  that changed remotely since your last sync is reported as a conflict,
+  never silently overwritten.
+- **Rich-text formatting round-trips, not just plain text.** Headings,
+  ordered/unordered/nested lists (including custom start numbers),
+  checklists, blockquotes, fenced monospace blocks, and inline
+  bold/italic/strikethrough/underline/links render to real Markdown on
+  `pull`/`clone` and push back as the matching Apple formatting on edit.
+  Anything this tool doesn't fully understand about a note's formatting
+  stays read-only rather than risking a bad write.
+- **Writing to notes shared with you is supported for creates and edits**
+  inside a shared folder you have write access to — not just the read
+  side. See Known limitations for what's still refused.
 - **Attachments** (images and audio confirmed): downloaded and rewritten
-  into note text as `attachments/`-relative links; re-downloaded only when
-  the remote file's checksum actually changes.
+  into note text as `attachments/`-relative links (attachments live
+  alongside the note in its own folder); re-downloaded only when the
+  remote file's checksum actually changes.
 - **Table edits.** Cell edits, and inserting/deleting a contiguous run of
   rows or columns, round-trip both ways. Row/column *reordering*, and any
   edit that adds/removes rows and columns in the same save, are refused
@@ -169,7 +190,7 @@ resolution live.
 ## Known limitations
 
 - **Regular file attachments (images, audio, other files) are permanently
-  read-only, not just "not yet."** `push` will always refuse to write back
+  read-only** `push` will always refuse to write back
   a note that has a non-table attachment, since this tool doesn't fully
   parse that part of a note's internal format and editing one back risks
   corrupting it. `restore <file>` discards any local edit to get back to a
@@ -180,18 +201,26 @@ resolution live.
 - **Shared-note attachments are unverified.** The download code path should
   work (it mirrors how shared note text already does), but no shared note
   with an attachment has actually been observed live yet.
-- **Creating, deleting, or writing to notes *shared with you* is out of
-  scope.** Shared notes are cloned and pulled (read side) but push-side
-  write-back to them isn't implemented.
+- **Some writes to notes shared with you are still refused.** Deleting a
+  shared note, and renaming/moving one between folders, aren't supported
+  (Apple's own web client can't do the former either). A note that's
+  individually shared with you rather than living in a shared folder — or
+  sitting loose at the top of a sharer's area rather than inside one of
+  their shared folders — is refused as a create/edit target too. A
+  shared folder you only have read access to is correctly refused, but
+  that path is still unverified live (no read-only share has been
+  available to test against).
 - **No real-time or continuous sync.** This is a deliberate fetch/push
   tool, not a background daemon.
-- **Apple Notes' folder structure is ignored.** Whatever folders you've
-  organized notes into inside Notes.app are flattened away — every note
-  lands in one directory, with no subfolders mirroring that structure.
 - **Concurrent edits from *other* Apple devices aren't merged the way Notes
   itself does internally.** `pull`'s three-way merge is a real text diff
   (auto-merging non-overlapping edits, flagging overlapping ones), not a
   reimplementation of Notes' own internal merge behavior.
+- **Formatting fidelity has edges.** Hashtags/mentions aren't handled yet;
+  a handful of rare cases (list groups that start above the top indent
+  level, some unusual CommonMark adjacency, blockquotes that round-trip
+  correctly but don't actually render in the iCloud web client) fall back
+  to read-only rather than risk a mis-parse.
 
 ## How it works
 
@@ -238,19 +267,109 @@ except the final upload; table edits go through an analogous check.
   text merge instead.
 - Perfect fidelity for rich formatting, scanned documents, or drawings.
 - Attachment upload.
-- Write access to notes shared with you (read access is supported).
+- Deleting or moving/renaming notes shared with you (see Known
+  limitations for exactly what's refused — creating and editing shared
+  notes *is* supported).
 
 ## Reporting bugs
 
-Every issue must include the output of:
+Every reported issue must include three things:
+
+- A bug report export
+- Reproduction steps
+- File Identities
+
+For each of these, read more below.
+
+> [!WARNING]
+> It is strongly recommended that, instead of submitting
+> bug reports for actual notes you need day-to-day, that
+> you instead create a test note specifically for reproducing
+> whatever bug and generating a bug report. Owing to how
+> notes work, we must know the content of the note you are
+> submitting a report for!
+
+### Getting a Bug Report Export
+
+Run
 
 ```
 icloud-notes bug-report --since <duration>
 ```
 
-(e.g. `--since 2h`, run against the affected directory) attached in full,
-**and** concrete, immediately scriptable reproduction steps. Issues missing
-either will not be accepted.
+(e.g. `--since 10m`, run against the affected directory).
+
+This will generate a markdown document outlining the state
+of your note clone as well as any recent log messages.
+
+> [!WARNING]
+> The bug report intends to remove the most dangerous of PII
+> (e.g. your apple ID, name, email, and internal IDs like
+> your dsid), but it **does not redact the underlying content
+> of a note or table touched by a recent `push`/`pull`/`diff`/`revert`**.
+>
+> Users reviewing your report can at least:
+> - See the content you changed in any notes you changed during
+>   the time window you selected your bug report to span.
+> - See the content of any attachments (via a signed URL) in those notes.
+> - Possibly other things, too!
+>
+> As part of the bug report creation process, we create a file
+> of the same name but with a `content-preview.md` extension.
+> That file will include decompressed versions of the logged
+> information above so you can have a better understanding
+> of what content can be decoded from the bug report you may
+> choose to submit.
+>
+> If you have recently cloned your repository, that export
+> might expose the full content of every single file in
+> your notes! It is recommended that you instead reproduce
+> whatever problem in isolation (a few minutes after
+> doing anything else with your icloud notes on any device)
+> and then narrowly generate a bug report for just the range
+> of time during which your problem occurred.
+>
+> **Be careful to review the `content-preview.md` file created
+> alongside your bug report to ensure that you are not leaking
+> private information!**
+
+### Reproduction Steps
+
+Reproduction steps must be precise, concrete, and scriptable,
+and must describe both every step you took as well as what problem
+you encountered (including the exact error message or stack trace
+you received if you received one) and what you expected to take
+place instead of the error you received, even when you think
+what should be expected is obvious.
+
+For example:
+
+> - I cloned my repository.
+> - The file originally looked like X
+> - I modified it to look like Y
+> - When I tried to push, the push was rejected and I received this error message: "PUSH REJECTED: 404"
+> - What I expected was that the note would be pushed successfully.
+
+Where X and Y are two files you've attached as part of your
+bug report.
+
+### File Identities
+
+The bug report export above intentionally does not include the names
+of any files in your notes. To find relevant log entries, you will need
+to get the bug report identity for any relevant files; to do that, you can run:
+
+```
+icloud-notes bug-report --identify FILENAME
+```
+
+identities for each file you discuss in your reproduction steps must be included
+for any report to be accepted.
+
+For example:
+
+> "./My Note.md" is note-72 in this vault's bug reports.
+
 
 ## Contributing / development
 
