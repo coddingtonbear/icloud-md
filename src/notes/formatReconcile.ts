@@ -19,7 +19,7 @@
  * just because markdown represents it as plain text.
  */
 
-import { clone, create, toBinary } from "@bufbuild/protobuf";
+import { clearField, clone, create, isFieldSet, toBinary } from "@bufbuild/protobuf";
 import { randomUUID } from "node:crypto";
 import {
   AttributeRunSchema,
@@ -292,7 +292,7 @@ function overlayParagraphStyle(piece: AttributeRun, plan: ParagraphPlan): void {
   const needIndent = isListKind(desired.kind) && current.indent !== desired.indent;
   const needQuote = current.blockQuoteLevel !== desired.blockQuoteLevel;
   const needDone = desired.kind === "todoList" && (current.done ?? false) !== (desired.done ?? false);
-  const needStart = desired.kind === "numberedList" && current.startNumber !== desired.startNumber;
+  const needStart = desired.kind === "numberedList" && effectiveStart(current.startNumber) !== effectiveStart(desired.startNumber);
   const needIdentity = desired.kind === "todoList" && plan.forceFreshTodoUuid;
   if (!needIndent && !needQuote && !needDone && !needStart && !needIdentity) {
     return;
@@ -310,7 +310,14 @@ function overlayParagraphStyle(piece: AttributeRun, plan: ParagraphPlan): void {
     ps.blockQuoteLevel = desired.blockQuoteLevel;
   }
   if (needStart) {
-    ps.startingListItemNumber = desired.startNumber;
+    setStartNumber(ps, desired.startNumber);
+  }
+  // Repair pass for this tool's own early Step 2 writes: an *explicit*
+  // startingListItemNumber of 0 makes Apple render the list from 0 (its own
+  // client omits the field entirely - live-verified 2026-07-18), so any
+  // rewrite of the paragraph drops it.
+  if (isFieldSet(ps, PS_START_FIELD) && ps.startingListItemNumber === 0) {
+    clearField(ps, PS_START_FIELD);
   }
   if (needIdentity) {
     ps.todo = create(TodoSchema, { todoUUID: plan.todoUuid, done: desired.done === true ? 1 : 0 });
@@ -324,11 +331,15 @@ function overlayParagraphStyle(piece: AttributeRun, plan: ParagraphPlan): void {
 }
 
 /** A fresh paragraph style in the shape the captured web client writes:
- * every field stamped explicitly (zeros included), alignment 4 (Natural),
- * uuid empty. A checklist paragraph keeps the run's existing todo uuid when
- * it has one (a done-toggle isn't an identity change), and otherwise gets
- * the plan's freshly minted one - Apple's own client re-mints freely, so
- * this matches its bar (dev log 2026-07-17T10:16). */
+ * fields stamped explicitly (zeros included), alignment 4 (Natural), uuid
+ * empty. The one exception is `startingListItemNumber`, which Apple's
+ * client *omits* rather than zero-stamps - an explicit 0 renders the list
+ * starting at 0 (live-verified 2026-07-18) - so it's only written for a
+ * numbered group genuinely starting past 1. A checklist paragraph keeps
+ * the run's existing todo uuid when it has one (a done-toggle isn't an
+ * identity change), and otherwise gets the plan's freshly minted one -
+ * Apple's own client re-mints freely, so this matches its bar (dev log
+ * 2026-07-17T10:16). */
 function freshParagraphStyle(desired: FormatParagraph, piece: AttributeRun, plan: ParagraphPlan) {
   return create(ParagraphStyleSchema, {
     style: KIND_TO_STYLE[projectedKind(desired.kind)],
@@ -344,10 +355,28 @@ function freshParagraphStyle(desired: FormatParagraph, piece: AttributeRun, plan
         }
       : {}),
     paragraphHints: 0,
-    startingListItemNumber: desired.kind === "numberedList" ? desired.startNumber : 0,
+    ...(desired.kind === "numberedList" && effectiveStart(desired.startNumber) !== 1
+      ? { startingListItemNumber: desired.startNumber }
+      : {}),
     blockQuoteLevel: desired.blockQuoteLevel,
     uuid: new Uint8Array(0),
   });
+}
+
+const PS_START_FIELD = ParagraphStyleSchema.fields.find((f) => f.localName === "startingListItemNumber")!;
+
+function effectiveStart(startNumber: number): number {
+  return startNumber === 0 ? 1 : startNumber;
+}
+
+/** Writes a numbered group's start, clearing the field for the default of 1
+ * (matching Apple's omit-when-default shape) and setting it otherwise. */
+function setStartNumber(ps: NonNullable<AttributeRun["paragraphStyle"]>, startNumber: number): void {
+  if (effectiveStart(startNumber) === 1) {
+    clearField(ps, PS_START_FIELD);
+  } else {
+    ps.startingListItemNumber = startNumber;
+  }
 }
 
 /** Overlays only the inline fields whose normalized projection differs -

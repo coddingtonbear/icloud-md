@@ -215,6 +215,22 @@ test("two checklist items sharing an inherited todo uuid get the later one re-mi
   assert.notDeepEqual(second?.todoUUID, TODO_UUID);
 });
 
+test("numbered lists omit startingListItemNumber at the default start (explicit 0 renders from 0 in Notes)", () => {
+  const startField = ParagraphStyleSchema.fields.find((f) => f.localName === "startingListItemNumber")!;
+  const doc = docWith("num one\nnum two", [{ length: 15 }]);
+  const result = reconcileNoteFormat(doc, desired("1. num one\n2. num two").paragraphs, REPLICA_A);
+  assert.deepEqual(result, { ok: true, changed: true });
+  for (const run of doc.attributeRuns) {
+    assert.equal(run.paragraphStyle?.style, 102);
+    assert.equal(isFieldSet(run.paragraphStyle!, startField), false);
+  }
+
+  // A genuine non-default start is written explicitly.
+  const started = docWith("five", [{ length: 4 }]);
+  assert.deepEqual(reconcileNoteFormat(started, desired("5. five").paragraphs, REPLICA_A), { ok: true, changed: true });
+  assert.equal(started.attributeRuns[0]?.paragraphStyle?.startingListItemNumber, 5);
+});
+
 test("misaligned desired paragraphs refuse rather than guess", () => {
   const doc = docWith("one line", [{ length: 8 }]);
   const result = reconcileNoteFormat(doc, desired("different text").paragraphs, REPLICA_A);
