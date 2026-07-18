@@ -48,6 +48,7 @@ export async function runClone(
 
   await mkdir(targetDir, { recursive: true });
 
+  progress?.onFetchStart?.();
   let fetchedCount = 0;
   const onPage = (pageRecordCount: number): void => {
     fetchedCount += pageRecordCount;

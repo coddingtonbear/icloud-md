@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { accountProfileDir, accountSessionPath, readAccountMeta, writeAccountMeta } from "./accountStore.js";
@@ -116,6 +116,35 @@ test("bindNewFolderAccount throws and cleans up the ephemeral profile when the c
 
     assert.ok(capturedProfileDir);
     await assert.rejects(stat(capturedProfileDir));
+  }));
+
+test("bindNewFolderAccount reports the sign-in failure even when discarding the ephemeral profile also fails", () =>
+  withTempRoot(async (root) => {
+    const accountsRoot = path.join(root, "accounts");
+    const tmpRoot = path.join(root, "tmp");
+
+    try {
+      await assert.rejects(
+        bindNewFolderAccount({
+          accountsRoot,
+          tmpRoot,
+          performBrowserLogin: async () => {
+            // Make the ephemeral dir un-removable before failing, so the
+            // finally-block cleanup throws too - the *sign-in* error must
+            // still be the one that surfaces (a cleanup ENOTEMPTY/EACCES
+            // masked a real SignInIncompleteError on 2026-07-18).
+            await chmod(tmpRoot, 0o500);
+            throw new Error("the real sign-in failure");
+          },
+          checkAuthentication: async () => {
+            throw new Error("unreachable - login already failed");
+          },
+        }),
+        /the real sign-in failure/,
+      );
+    } finally {
+      await chmod(tmpRoot, 0o700);
+    }
   }));
 
 test("resolveFolderAccount throws UnboundAccountError when the folder has no bound account", async () => {

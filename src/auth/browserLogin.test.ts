@@ -1,11 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import {
   buildIcloudCookieHeader,
   extractClientParams,
   isFullySignedInBody,
   isIcloudDomain,
   isMissingChromiumError,
+  resolvePlaywrightCli,
   sessionFromBrowserCapture,
   type CapturedCookie,
 } from "./browserLogin.js";
@@ -137,4 +140,13 @@ test("isMissingChromiumError rejects other launch failures and non-Error values"
   assert.equal(isMissingChromiumError(new Error("spawn EACCES")), false);
   assert.equal(isMissingChromiumError("Executable doesn't exist"), false);
   assert.equal(isMissingChromiumError(undefined), false);
+});
+
+test("resolvePlaywrightCli points at the installed playwright package's real CLI entrypoint", () => {
+  const cli = resolvePlaywrightCli();
+  assert.equal(path.isAbsolute(cli), true);
+  assert.equal(path.basename(cli), "cli.js");
+  // Would fail if a playwright upgrade moved/renamed its bin target - the
+  // lazy-install path would then break only on fresh machines, so catch it here.
+  assert.equal(existsSync(cli), true);
 });

@@ -67,6 +67,7 @@ export async function runPull(
     throw new NotesUnavailableError();
   }
 
+  progress?.onFetchStart?.();
   let fetchedCount = 0;
   const onPage = (pageRecordCount: number): void => {
     fetchedCount += pageRecordCount;

@@ -80,7 +80,10 @@ export async function bindNewFolderAccount(deps: BindNewFolderAccountDeps = {}):
     return auth;
   } finally {
     if (!promoted) {
-      await discardEphemeralProfile(ephemeralProfileDir);
+      // Best-effort: a throw here would replace whatever the try block is
+      // already throwing (a leftover tmp dir is harmless; a masked sign-in
+      // error is not).
+      await discardEphemeralProfile(ephemeralProfileDir).catch(() => {});
     }
   }
 }

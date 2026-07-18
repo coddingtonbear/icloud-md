@@ -75,9 +75,16 @@ export async function newEphemeralProfileDir(tmpRoot: string = TMP_ROOT): Promis
   return dir;
 }
 
-/** Discards an ephemeral profile that turned out not to be needed (its dsid already had an account, or the login failed). */
+/**
+ * Discards an ephemeral profile that turned out not to be needed (its dsid
+ * already had an account, or the login failed). Retries because Chromium can
+ * still be flushing files into the profile right after the context closes,
+ * which makes a single recursive rm lose the race with an ENOTEMPTY
+ * (observed 2026-07-18: that ENOTEMPTY escaped a `finally` and masked the
+ * real sign-in error).
+ */
 export async function discardEphemeralProfile(dir: string): Promise<void> {
-  await rm(dir, { recursive: true, force: true });
+  await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }
 
 /**

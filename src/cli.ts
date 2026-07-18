@@ -24,19 +24,29 @@ import type { SyncProgress } from "./progress.js";
  * Live terminal rendering for `clone`/`pull` progress - the only place ora
  * or cli-progress get constructed, so `runClone`/`runPull` stay usable as a
  * library without pulling terminal UI along with them.
+ *
+ * The spinner starts on `onFetchStart` (post-sign-in), never at construction:
+ * sign-in can print status lines and even a first-run Chromium download's
+ * progress (and its prompt lines), and a spinner running during that redraws
+ * over whatever shares its row - it visually erased npx's "Ok to proceed?"
+ * prompt, which presented as a silent first-run hang (2026-07-18).
  */
 function makeSyncProgress(): SyncProgress {
   let fetchedCount = 0;
-  const spinner = ora("Fetching notes from iCloud…").start();
+  let spinner: ReturnType<typeof ora> | undefined;
+  const ensureSpinner = (): ReturnType<typeof ora> => (spinner ??= ora("Fetching notes from iCloud…").start());
   let bar: InstanceType<typeof cliProgress.SingleBar> | undefined;
 
   return {
+    onFetchStart: () => {
+      ensureSpinner();
+    },
     onFetchPage: (recordsSoFar) => {
       fetchedCount = recordsSoFar;
-      spinner.text = `Fetching notes from iCloud… (${fetchedCount} record(s) so far)`;
+      ensureSpinner().text = `Fetching notes from iCloud… (${fetchedCount} record(s) so far)`;
     },
     onProcessStart: (totalRecords) => {
-      spinner.succeed(`Fetched ${fetchedCount} record(s) from iCloud`);
+      ensureSpinner().succeed(`Fetched ${fetchedCount} record(s) from iCloud`);
       bar = new cliProgress.SingleBar(
         {
           format: "Processing |{bar}| {value}/{total} notes",

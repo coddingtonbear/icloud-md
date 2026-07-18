@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { chromium, type BrowserContext, type Page, type Response as PlaywrightResponse } from "playwright";
 import { DEFAULT_CLIENT_BUILD_NUMBER, DEFAULT_CLIENT_MASTERING_NUMBER } from "./clientConstants.js";
@@ -253,16 +254,36 @@ export function isMissingChromiumError(error: unknown): boolean {
   return error instanceof Error && error.message.includes("Executable doesn't exist");
 }
 
-/** Runs `npx playwright install chromium` as a child process, streaming its own progress output straight through. */
+/**
+ * Absolute path to the bundled Playwright package's own CLI entrypoint
+ * (`cli.js`, the target of its "bin" field). It isn't in playwright's exports
+ * map, so it can't be resolved by specifier - but `playwright/package.json`
+ * is exported, and `cli.js` sits beside it.
+ */
+export function resolvePlaywrightCli(): string {
+  const require = createRequire(import.meta.url);
+  return path.join(path.dirname(require.resolve("playwright/package.json")), "cli.js");
+}
+
+/**
+ * Runs the bundled Playwright CLI's `install chromium` as a child process,
+ * streaming its progress output straight through. Deliberately not
+ * `npx playwright`: with a globally-installed icloud-md, npx (run from the
+ * user's cwd) can't see the bundled playwright package at all, so it stops at
+ * an interactive "Ok to proceed? (y)" download prompt - invisible under the
+ * sync spinner, which looked like a silent hang (observed 2026-07-18). It
+ * would also fetch playwright@latest, whose browser build can drift from the
+ * pinned library version. Spawning our own copy has neither problem.
+ */
 function installChromium(): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn("npx", ["playwright", "install", "chromium"], { stdio: "inherit" });
+    const child = spawn(process.execPath, [resolvePlaywrightCli(), "install", "chromium"], { stdio: "inherit" });
     child.on("error", reject);
     child.on("exit", (code) => {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`"npx playwright install chromium" exited with code ${code}`));
+        reject(new Error(`"playwright install chromium" exited with code ${code}`));
       }
     });
   });
