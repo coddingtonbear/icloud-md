@@ -77,9 +77,37 @@ export function reconcileNoteFormat(doc: NoteDocument, desired: readonly FormatP
     }
   }
 
+  // Todo identity dedup: a line inserted next to a checklist item inherits
+  // that item's attribute run wholesale (`adjustAttributeRuns`), todo uuid
+  // included - and two checklist items must never share an identity (Apple
+  // merges check-state per uuid). Every later duplicate re-mints, matching
+  // Apple's own client, which re-mints the disturbed *remainder* item on
+  // splits (dev log 2026-07-17T10:16).
+  const uuidOwners = new Set<string>();
+  const needsFreshTodoUuid = new Set<number>();
+  for (let i = 0; i < current.paragraphs.length; i += 1) {
+    const paragraph = current.paragraphs[i]!;
+    if (paragraph.kind !== "todoList" || desired[i]!.kind !== "todoList") {
+      continue;
+    }
+    const uuid = todoUuidOfParagraph(doc, paragraph, i === current.paragraphs.length - 1);
+    if (uuid === undefined || uuid.length === 0) {
+      continue;
+    }
+    const key = Buffer.from(uuid).toString("hex");
+    if (uuidOwners.has(key)) {
+      needsFreshTodoUuid.add(i);
+    } else {
+      uuidOwners.add(key);
+    }
+  }
+
   const changedIndexes: number[] = [];
   for (let i = 0; i < desired.length; i += 1) {
-    if (!paragraphProjectionsEqual(current.paragraphs[i]!, desired[i]!, current.paragraphs[i - 1], desired[i - 1])) {
+    if (
+      needsFreshTodoUuid.has(i) ||
+      !paragraphProjectionsEqual(current.paragraphs[i]!, desired[i]!, current.paragraphs[i - 1], desired[i - 1])
+    ) {
       changedIndexes.push(i);
     }
   }
@@ -88,7 +116,7 @@ export function reconcileNoteFormat(doc: NoteDocument, desired: readonly FormatP
   }
 
   const plans = changedIndexes.map((index) =>
-    buildParagraphPlan(current.paragraphs[index]!, desired[index]!, index === desired.length - 1),
+    buildParagraphPlan(current.paragraphs[index]!, desired[index]!, index === desired.length - 1, needsFreshTodoUuid.has(index)),
   );
   doc.attributeRuns = rewriteAttributeRuns(doc.attributeRuns, plans);
   applyFormattingOp(
@@ -113,6 +141,9 @@ interface ParagraphPlan {
   currentSpans: SpanInterval[];
   desiredSpans: SpanInterval[];
   todoUuid: Uint8Array;
+  /** The paragraph's inherited todo uuid duplicates an earlier item's - its
+   * runs must take `todoUuid` even though nothing rendered differs. */
+  forceFreshTodoUuid: boolean;
 }
 
 interface SpanInterval {
@@ -121,7 +152,12 @@ interface SpanInterval {
   style: InlineStyle;
 }
 
-function buildParagraphPlan(current: FormatParagraph, desired: FormatParagraph, isLastParagraph: boolean): ParagraphPlan {
+function buildParagraphPlan(
+  current: FormatParagraph,
+  desired: FormatParagraph,
+  isLastParagraph: boolean,
+  forceFreshTodoUuid: boolean,
+): ParagraphPlan {
   const start = current.start;
   const end = start + current.text.length + (isLastParagraph ? 0 : 1);
   return {
@@ -132,7 +168,25 @@ function buildParagraphPlan(current: FormatParagraph, desired: FormatParagraph, 
     currentSpans: spanIntervals(current, end),
     desiredSpans: spanIntervals(desired, end),
     todoUuid: uuidBytes(),
+    forceFreshTodoUuid,
   };
+}
+
+/** The todo uuid carried by the first run overlapping the paragraph's range
+ * (all of a paragraph's runs share one), or undefined when none does. */
+function todoUuidOfParagraph(doc: NoteDocument, paragraph: FormatParagraph, isLastParagraph: boolean): Uint8Array | undefined {
+  const start = paragraph.start;
+  const end = start + paragraph.text.length + (isLastParagraph ? 0 : 1);
+  let offset = 0;
+  for (const run of doc.attributeRuns) {
+    const runStart = offset;
+    const runEnd = offset + run.length;
+    offset = runEnd;
+    if (runStart < end && runEnd > start && run.paragraphStyle?.todo) {
+      return run.paragraphStyle.todo.todoUUID;
+    }
+  }
+  return undefined;
 }
 
 /** A paragraph's normalized spans as absolute [start, end) intervals; the
@@ -239,7 +293,8 @@ function overlayParagraphStyle(piece: AttributeRun, plan: ParagraphPlan): void {
   const needQuote = current.blockQuoteLevel !== desired.blockQuoteLevel;
   const needDone = desired.kind === "todoList" && (current.done ?? false) !== (desired.done ?? false);
   const needStart = desired.kind === "numberedList" && current.startNumber !== desired.startNumber;
-  if (!needIndent && !needQuote && !needDone && !needStart) {
+  const needIdentity = desired.kind === "todoList" && plan.forceFreshTodoUuid;
+  if (!needIndent && !needQuote && !needDone && !needStart && !needIdentity) {
     return;
   }
   if (!piece.paragraphStyle) {
@@ -257,7 +312,9 @@ function overlayParagraphStyle(piece: AttributeRun, plan: ParagraphPlan): void {
   if (needStart) {
     ps.startingListItemNumber = desired.startNumber;
   }
-  if (needDone) {
+  if (needIdentity) {
+    ps.todo = create(TodoSchema, { todoUUID: plan.todoUuid, done: desired.done === true ? 1 : 0 });
+  } else if (needDone) {
     if (ps.todo) {
       ps.todo.done = desired.done === true ? 1 : 0;
     } else {
@@ -281,7 +338,7 @@ function freshParagraphStyle(desired: FormatParagraph, piece: AttributeRun, plan
     ...(desired.kind === "todoList"
       ? {
           todo: create(TodoSchema, {
-            todoUUID: piece.paragraphStyle?.todo?.todoUUID ?? plan.todoUuid,
+            todoUUID: (plan.forceFreshTodoUuid ? undefined : piece.paragraphStyle?.todo?.todoUUID) ?? plan.todoUuid,
             done: desired.done === true ? 1 : 0,
           }),
         }

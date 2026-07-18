@@ -197,6 +197,24 @@ test("formatting-only reconcile after a text edit composes with applyTextEdit", 
   assert.equal(decoded.paragraphs[0]?.kind, "heading");
 });
 
+test("two checklist items sharing an inherited todo uuid get the later one re-minted", () => {
+  // The exact live-verification finding from 2026-07-18: an inserted line
+  // inherits its neighbor's run wholesale, todo uuid included.
+  const doc = docWith("todo two\nstep2 verify line", [
+    { length: 9, paragraphStyle: { style: 103, alignment: 4, todo: { todoUUID: TODO_UUID, done: 0 } } },
+    { length: 17, paragraphStyle: { style: 103, alignment: 4, todo: { todoUUID: TODO_UUID, done: 0 } } },
+  ]);
+  const result = reconcileNoteFormat(doc, desired("- [ ] todo two\n- [ ] step2 verify line").paragraphs, REPLICA_A);
+  assert.deepEqual(result, { ok: true, changed: true });
+
+  const first = doc.attributeRuns[0]?.paragraphStyle?.todo;
+  const second = doc.attributeRuns[doc.attributeRuns.length - 1]?.paragraphStyle?.todo;
+  // The earlier item keeps its identity; the later duplicate re-minted.
+  assert.deepEqual(first?.todoUUID, TODO_UUID);
+  assert.equal(second?.todoUUID.length, 16);
+  assert.notDeepEqual(second?.todoUUID, TODO_UUID);
+});
+
 test("misaligned desired paragraphs refuse rather than guess", () => {
   const doc = docWith("one line", [{ length: 8 }]);
   const result = reconcileNoteFormat(doc, desired("different text").paragraphs, REPLICA_A);
