@@ -1,8 +1,9 @@
-A command-line tool for syncing Apple Notes (via iCloud) to a local folder
-of plain files — and back again. `git`-flavored in spirit: a single binary,
-a working tree, and explicit `clone`/`pull`/`push` commands rather than a
-background daemon. It doesn't touch git itself, but the folder it writes is
-exactly the kind of thing you'd want to put under git.
+Apple Notes only lives one place: Notes.app or the iCloud web client. There
+is no export, API, or any easy way to read or edit your own notes from anywhere else.
+`icloud-md` frees them from icloud by turning your Apple Notes into a folder
+of real Markdown files, on Linux, Windows, or macOS, editable in whatever tool
+you already use (Vim, VS Code, Obsidian, `grep`) and syncs your edits
+back to iCloud as if you'd typed them into Notes.app all along.
 
 ```
 $ icloud-md clone ./my-notes
@@ -12,26 +13,25 @@ $ icloud-md push
 
 ## Why
 
-Apple Notes has no supported way to get your notes onto disk as plain files.
-This tool exists to fix that:
-
-- **Your notes become real files**, editable in whatever editor you already
-  use, versionable in git, greppable, diffable, and scriptable — instead of
-  being locked inside Notes.app or the iCloud web client.
-- **Plain markdown files**: `clone` writes one Markdown
-  file per note into a folder you control; `pull` and `push` keep it in sync
-  with iCloud in both directions.
+- **Your notes become real files** — one Markdown file per note, editable,
+  versionable in git, greppable, diffable, scriptable — instead of locked
+  inside Notes.app or the iCloud web client.
+- **Every OS, not just Apple's**: `icloud-md` is a plain Node CLI. Clone
+  your notes to Linux or Windows and treat them like any other folder of
+  text, no Mac required.
+- **Actually bidirectional, not just export**: `pull` and `push` keep your
+  local folder and iCloud in sync in both directions — edit locally, edit
+  in Notes.app, or edit from another device, and it reconciles.
 - **Built-in version history**: Every `pull`/`push` that
   changes a note snapshots it, so you can inspect or roll back *any* past
-  version of a note — even ones you never `pull`ed while they existed — via
-  `icloud-md history`/`diff`/`revert`.
+  version of a note.
 - **Conflict-awareness**: If a note changed in iCloud
   since your last sync *and* you edited it locally, `pull` does a real
   three-way merge and only asks you to resolve the parts that actually
   overlap — the rest merges automatically.
-- **`git`-flavored CLI**: You're probably familiar with what the various
-  `git` do; that knowledge is most of what you need to know to use this
-  tool.
+- **`git`-flavored CLI**: You're probably already familiar with what the
+  various `git` commands do; that knowledge is most of what you need to
+  know to use this tool.
 
 > [!WARNING]
 > **This is not an official or supported Apple API.** It works by
