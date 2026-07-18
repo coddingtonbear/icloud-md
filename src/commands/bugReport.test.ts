@@ -6,7 +6,7 @@ import path from "node:path";
 import { appendDebugLog } from "../debugLog.js";
 import { recordLastError } from "../lastError.js";
 import { writeCloneState, type CloneState } from "../notes/cloneState.js";
-import { parseSinceDuration, runBugReport, DISCLOSURE_WARNING } from "./bugReport.js";
+import { parseSinceDuration, runBugReport, runBugReportIdentify, DISCLOSURE_WARNING } from "./bugReport.js";
 
 async function withTempDirs(
   run: (paths: { targetDir: string; debugLogPath: string; lastErrorPath: string }) => Promise<void>,
@@ -50,9 +50,125 @@ test("bundles environment info, last error, state, and in-range log entries into
     const contents = await readFile(summary.outputPath, "utf-8");
     assert.match(contents, /# icloud-notes-sync bug report/);
     assert.match(contents, /push failed/);
-    assert.match(contents, /"appleId": "person@example\.com"/);
     assert.match(contents, /"note": "inRange"/);
     assert.doesNotMatch(contents, /tooOld/);
+  }));
+
+test("redacts the note's real file path, the account's real appleId/dsid, and folder/sharer names", () =>
+  withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
+    const state: CloneState = {
+      syncToken: "token",
+      account: { appleId: "person@example.com", dsid: "12345" },
+      notes: {
+        REC1: { file: "Recipes/Bank Statement.md", recordChangeTag: "1a", modificationDate: 100, folderRecordName: "FOLDER1" },
+      },
+      folders: { FOLDER1: { name: "Recipes", dirName: "Recipes" } },
+    };
+    await writeCloneState(targetDir, state);
+
+    const summary = await runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath });
+    const contents = await readFile(summary.outputPath, "utf-8");
+
+    assert.doesNotMatch(contents, /person@example\.com/);
+    assert.doesNotMatch(contents, /12345/);
+    assert.doesNotMatch(contents, /Bank Statement/);
+    assert.doesNotMatch(contents, /Recipes/);
+    assert.match(contents, /"appleId": "account-\d+"/);
+    assert.match(contents, /"dsid": "account-\d+"/);
+    assert.match(contents, /"file": "folder-1\/note-1\.md"/);
+    assert.match(contents, /## Redacted identifiers/);
+  }));
+
+test("assigns the same note the same alias across repeated runs, and different notes different aliases", () =>
+  withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
+    const state: CloneState = {
+      syncToken: "token",
+      notes: {
+        REC1: { file: "One.md", recordChangeTag: "1a", modificationDate: 100 },
+        REC2: { file: "Two.md", recordChangeTag: "1b", modificationDate: 100 },
+      },
+    };
+    await writeCloneState(targetDir, state);
+
+    const first = await runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath });
+    const firstContents = await readFile(first.outputPath, "utf-8");
+    assert.match(firstContents, /"file": "note-1\.md"/);
+    assert.match(firstContents, /"file": "note-2\.md"/);
+
+    const second = await runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath });
+    const secondContents = await readFile(second.outputPath, "utf-8");
+    assert.match(secondContents, /"file": "note-1\.md"/);
+    assert.match(secondContents, /"file": "note-2\.md"/);
+  }));
+
+test("drops identity fields (name/email/aliases) from a captured debug-log response body", () =>
+  withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
+    await appendDebugLog(
+      {
+        note: "checkAuthentication",
+        response: {
+          status: 200,
+          headers: {},
+          body: {
+            dsInfo: {
+              dsid: "12345",
+              appleId: "person@example.com",
+              firstName: "Adam",
+              lastName: "Coddington",
+              primaryEmail: "person@example.com",
+              appleIdAliases: ["alt@example.com"],
+            },
+          },
+        },
+      },
+      debugLogPath,
+    );
+
+    const summary = await runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath });
+    const contents = await readFile(summary.outputPath, "utf-8");
+
+    assert.doesNotMatch(contents, /Adam/);
+    assert.doesNotMatch(contents, /Coddington/);
+    assert.doesNotMatch(contents, /person@example\.com/);
+    assert.doesNotMatch(contents, /alt@example\.com/);
+    assert.match(contents, /"firstName": "\[omitted\]"/);
+    assert.match(contents, /"dsid": "account-\d+"/);
+  }));
+
+test("pseudonymizes a dsid embedded in a captured request URL's query string", () =>
+  withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
+    await writeCloneState(targetDir, { syncToken: "token", account: { appleId: "person@example.com", dsid: "999999" }, notes: {} });
+    await appendDebugLog(
+      { note: "fetchZone", request: { method: "GET", url: "https://example.com/changes/zone?dsid=999999&clientId=abc", headers: {} } },
+      debugLogPath,
+    );
+
+    const summary = await runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath });
+    const contents = await readFile(summary.outputPath, "utf-8");
+
+    assert.doesNotMatch(contents, /999999/);
+    assert.match(contents, /clientId=abc/);
+  }));
+
+test("scrubs a real filename and appleId quoted inside lastError's message", () =>
+  withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
+    const state: CloneState = {
+      syncToken: "token",
+      account: { appleId: "person@example.com", dsid: "12345" },
+      notes: { REC1: { file: "Secret Diary.md", recordChangeTag: "1a", modificationDate: 100 } },
+    };
+    await writeCloneState(targetDir, state);
+    await recordLastError(
+      new Error('Secret Diary.md was cloned for person@example.com, but the session just authenticated is for other@example.com.'),
+      lastErrorPath,
+    );
+
+    const summary = await runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath });
+    const contents = await readFile(summary.outputPath, "utf-8");
+
+    assert.doesNotMatch(contents, /Secret Diary/);
+    assert.doesNotMatch(contents, /person@example\.com/);
+    assert.match(contents, /note-1\.md was cloned for account-\d+/);
   }));
 
 test("handles a directory with no state.json and no recorded error gracefully", () =>
@@ -101,6 +217,26 @@ test("reports a corrupt state.json instead of crashing", () =>
     const contents = await readFile(summary.outputPath, "utf-8");
     assert.match(contents, /exists but couldn't be read/);
     assert.match(contents, /does not look like a valid state file/);
+  }));
+
+test("runBugReportIdentify prints and returns the same alias bug-report would use, stably across calls", () =>
+  withTempDirs(async ({ targetDir }) => {
+    const state: CloneState = {
+      syncToken: "token",
+      notes: {
+        REC1: { file: "One.md", recordChangeTag: "1a", modificationDate: 100 },
+        REC2: { file: "Two.md", recordChangeTag: "1b", modificationDate: 100 },
+      },
+    };
+    await writeCloneState(targetDir, state);
+
+    const firstAlias = await runBugReportIdentify(targetDir, path.join(targetDir, "Two.md"));
+    const secondAlias = await runBugReportIdentify(targetDir, path.join(targetDir, "Two.md"));
+    const otherAlias = await runBugReportIdentify(targetDir, path.join(targetDir, "One.md"));
+
+    assert.equal(firstAlias, secondAlias);
+    assert.notEqual(firstAlias, otherAlias);
+    assert.match(firstAlias, /^note-\d+$/);
   }));
 
 test("parseSinceDuration parses minutes, hours, and days into a past Date", () => {

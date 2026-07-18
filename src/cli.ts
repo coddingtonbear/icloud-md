@@ -3,7 +3,7 @@ import chalk from "chalk";
 import cliProgress from "cli-progress";
 import ora from "ora";
 import { reauthenticateFolder, resolveFolderAccount } from "./auth/folderAuth.js";
-import { parseSinceDuration, runBugReport } from "./commands/bugReport.js";
+import { parseSinceDuration, runBugReport, runBugReportIdentify } from "./commands/bugReport.js";
 import { runClone, type CloneSummary } from "./commands/clone.js";
 import { runDelete } from "./commands/delete.js";
 import { runObjectDelete, runObjectList, runObjectShow } from "./commands/object.js";
@@ -349,9 +349,28 @@ async function revert(args: string[]): Promise<void> {
 const BUG_REPORT_USAGE =
   "Usage: icloud-notes bug-report --since <duration> [directory]\n" +
   '  <duration> is a number followed by "m" (minutes), "h" (hours), or "d" (days) - e.g. 30m, 6h, 2d.\n' +
-  "  A range is required rather than assumed, since the log is shared across every account used on this machine.";
+  "  A range is required rather than assumed, since the log is shared across every account used on this machine.\n" +
+  "  Note titles, folder/sharer names, and the account's dsid/appleId are replaced with stable aliases in the\n" +
+  "  report - see its \"Redacted identifiers\" section.\n" +
+  "\n" +
+  "Usage: icloud-notes bug-report --identify <file> [directory]\n" +
+  "  Prints the alias a bug report will use for <file>, so you can reference it (e.g. \"note-14\") without\n" +
+  "  sharing its real title.";
 
 async function bugReport(args: string[]): Promise<void> {
+  const identifyIndex = args.indexOf("--identify");
+  if (identifyIndex !== -1) {
+    const fileArg = args[identifyIndex + 1];
+    const positional = args.filter((_arg, index) => index !== identifyIndex && index !== identifyIndex + 1);
+    if (!fileArg || positional.length > 1) {
+      console.error(BUG_REPORT_USAGE);
+      process.exitCode = 1;
+      return;
+    }
+    await runBugReportIdentify(await resolveTargetDir(positional[0]), fileArg);
+    return;
+  }
+
   const sinceIndex = args.indexOf("--since");
   let since: Date | undefined;
   let positional = args;
@@ -457,7 +476,10 @@ async function main(): Promise<void> {
             "  reauthenticate [directory]  Force a fresh sign-in for a directory's already-bound account (defaults to the current directory)\n" +
             "  verify-auth [directory]     Check whether a directory's bound account is authenticated (defaults to the current directory)\n" +
             "  bug-report --since <duration> [directory]  Bundle version info, the last error, local state, and " +
-            "debug-log entries from the given duration (e.g. 1h, 2d) into a file to attach to a GitHub issue",
+            "debug-log entries from the given duration (e.g. 1h, 2d) into a file to attach to a GitHub issue - " +
+            "note titles, folder/sharer names, and the account's dsid/appleId are replaced with stable aliases\n" +
+            "  bug-report --identify <file> [directory]  Print the alias (e.g. \"note-14\") a bug report will use " +
+            "for <file>, to reference it without sharing its real title",
         );
         process.exitCode = 1;
     }

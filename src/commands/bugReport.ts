@@ -1,9 +1,12 @@
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { DEFAULT_DEBUG_LOG_PATH, readDebugLogSince, type DebugLogRecord } from "../debugLog.js";
-import { CorruptStateFileError } from "../errors.js";
+import { CorruptStateFileError, NotClonedDirectoryError } from "../errors.js";
 import { DEFAULT_LAST_ERROR_PATH, readLastError, type LastErrorRecord } from "../lastError.js";
+import { readAliasStore, resolveAlias, writeAliasStore } from "../notes/bugReportAliases.js";
+import { buildTextReplacements, discoverAccountScalars, redactCloneState, redactDebugLogEntries, redactLastError } from "../notes/bugReportRedaction.js";
 import { readCloneState, STATE_DIR_NAME, STATE_FILE_NAME, type CloneState } from "../notes/cloneState.js";
+import { resolveTrackedNote } from "../notes/trackedFile.js";
 import { getEnvironmentInfo, type EnvironmentInfo } from "../version.js";
 
 export interface BugReportSummary {
@@ -21,12 +24,16 @@ export interface BugReportOptions {
  * scaffolding" brainstorm: content is included by default (a garbled table
  * or a dropped note is usually undiagnosable without seeing it), so
  * disclosure - not redaction - is what makes that inclusion an informed
- * choice rather than a silent one.
+ * choice rather than a silent one. Note titles, folder/sharer names, and
+ * the account's dsid/appleId *are* redacted below (see redactCloneState /
+ * redactDebugLogEntries) - what's left unredacted is the actual (compressed)
+ * bytes of a note's own content, which can turn up in captured network
+ * response bodies.
  */
 export const DISCLOSURE_WARNING =
-  "This report may include the actual text of your notes (if a recent failure or the included log entries " +
-  "touched them) and your Apple ID/account identifier. Review it before attaching it anywhere, including a " +
-  "public GitHub issue.";
+  "Note titles, folder/sharer names, and your Apple ID/dsid are replaced with stable local aliases in this " +
+  "report. It may still include the actual (compressed) content of a note, if a recent failure or the included " +
+  "log entries touched it. Review it before attaching it anywhere, including a public GitHub issue.";
 
 const SINCE_DURATION_PATTERN = /^(\d+)(m|h|d)$/;
 
@@ -81,15 +88,63 @@ export async function runBugReport(targetDir: string, since: Date, options: BugR
   const environment = getEnvironmentInfo();
   const generatedAt = new Date();
 
+  const aliasStore = await readAliasStore(targetDir);
+  const rawState = state.status === "ok" ? state.state : undefined;
+
+  const accountAliasMap = new Map<string, string>();
+  for (const value of discoverAccountScalars(rawState, logEntries)) {
+    accountAliasMap.set(value, resolveAlias(aliasStore, "account", value));
+  }
+  // Also carry forward every account alias already on file, so dsid/appleId
+  // values that only show up in an older log entry (e.g. this vault was
+  // re-authenticated under a different account since) still get redacted
+  // using the alias they were assigned last time, not left unredacted.
+  for (const [real, alias] of Object.entries(aliasStore.account)) {
+    accountAliasMap.set(real, alias);
+  }
+
+  let redactedState: StateForReport = state;
+  let fileReplacements = new Map<string, string>();
+  if (state.status === "ok") {
+    const redacted = redactCloneState(state.state, aliasStore);
+    redactedState = { status: "ok", state: redacted.state };
+    fileReplacements = redacted.fileReplacements;
+  }
+  const redactedLogEntries = redactDebugLogEntries(logEntries, accountAliasMap);
+  const redactedLastError = redactLastError(lastError, buildTextReplacements(fileReplacements, accountAliasMap));
+
+  await writeAliasStore(targetDir, aliasStore);
+
   const outputPath = path.join(targetDir, `icloud-notes-bug-report-${formatFileTimestamp(generatedAt)}.md`);
   await writeFile(
     outputPath,
-    renderBundle({ environment, lastError, state, logEntries, since, targetDir, generatedAt }),
+    renderBundle({ environment, lastError: redactedLastError, state: redactedState, logEntries: redactedLogEntries, since, targetDir, generatedAt }),
     "utf-8",
   );
 
   console.log(`Wrote ${outputPath}`);
   return { outputPath, logEntryCount: logEntries.length };
+}
+
+/**
+ * Prints the stable alias `bug-report` will use for this tracked note,
+ * without printing (or requiring the caller to share) its real title -
+ * this is how a reporter tells the maintainer "the problem is with note-14"
+ * instead of pasting the actual note title into a public GitHub issue.
+ */
+export async function runBugReportIdentify(targetDir: string, fileArg: string): Promise<string> {
+  const state = await readCloneState(targetDir);
+  if (!state) {
+    throw new NotClonedDirectoryError(targetDir);
+  }
+  const { recordName } = resolveTrackedNote(state, fileArg, targetDir);
+
+  const aliasStore = await readAliasStore(targetDir);
+  const alias = resolveAlias(aliasStore, "notes", recordName);
+  await writeAliasStore(targetDir, aliasStore);
+
+  console.log(`"${fileArg}" is ${alias} in this vault's bug reports.`);
+  return alias;
 }
 
 function renderBundle(input: {
@@ -110,6 +165,15 @@ function renderBundle(input: {
   lines.push(`- Tool version: ${environment.toolVersion}`);
   lines.push(`- Node version: ${environment.nodeVersion}`);
   lines.push(`- Platform: ${environment.platform} (${environment.osRelease})`, "");
+
+  lines.push("## Redacted identifiers");
+  lines.push(
+    "Note titles, folder/sharer names, and this account's Apple ID/dsid have been replaced below with stable " +
+      "aliases (`note-N`, `folder-N`, `sharer-N`, `attachment-N`) local to this vault - the same real item gets " +
+      "the same alias every time this command runs here. To find a specific note's alias without sharing its " +
+      "title, run `icloud-notes bug-report --identify <file>`.",
+    "",
+  );
 
   lines.push("## Last recorded error");
   if (lastError) {
