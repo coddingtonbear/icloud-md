@@ -1,7 +1,14 @@
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveFolderAccount } from "../auth/folderAuth.js";
-import { fetchAllNoteRecords, fetchSharedNoteRecords, type CloudKitRecord } from "../cloudkit/databaseClient.js";
+import {
+  fetchAllNoteRecords,
+  fetchSharedNoteRecords,
+  lookupRecords,
+  type CloudKitRecord,
+  type SharedZoneChanges,
+} from "../cloudkit/databaseClient.js";
+import type { IcloudSession } from "../session.js";
 import {
   removeAttachmentsForNote,
   removeTableAttachmentsForNote,
@@ -80,6 +87,7 @@ export async function runPull(
     state.sharedZoneSyncTokens ?? {},
     onPage,
   );
+  await backfillSharePermissions(auth.session, auth.ckdatabasewsUrl, auth.dsid, state.folders ?? {}, sharedZones);
 
   const notes: CloneState["notes"] = { ...state.notes };
   const attachments: NonNullable<CloneState["attachments"]> = { ...state.attachments };
@@ -368,6 +376,48 @@ export async function runPull(
   });
 
   return summary;
+}
+
+/**
+ * One-time backfill for tracked shared folders with no stored share
+ * permission (any vault cloned before the permission field existed): an
+ * incremental pull only re-sends *changed* records, so an unchanged
+ * `cloudkit.share` record may never arrive again and the permission would
+ * stay unknown forever. For each such folder, look up its Folder record (to
+ * get the record-level share reference) and then the share record itself,
+ * and append both to the zone's record list - `buildVaultLayout` then
+ * resolves and stores the permission exactly as if the server had re-sent
+ * them. Skipped entirely once every shared folder has a stored permission,
+ * so the extra lookups happen once per vault, not once per pull.
+ */
+async function backfillSharePermissions(
+  session: IcloudSession,
+  ckdatabasewsUrl: string,
+  dsid: string,
+  folders: NonNullable<CloneState["folders"]>,
+  sharedZones: SharedZoneChanges[],
+): Promise<void> {
+  for (const zone of sharedZones) {
+    const owner = zone.zoneID.ownerRecordName;
+    if (owner === undefined) {
+      continue;
+    }
+    const unknown = Object.entries(folders)
+      .filter(([, entry]) => entry.sharedZoneOwner === owner && entry.permission === undefined)
+      .map(([recordName]) => recordName);
+    if (unknown.length === 0) {
+      continue;
+    }
+    const folderRecords = await lookupRecords(session, ckdatabasewsUrl, dsid, "shared", zone.zoneID, unknown);
+    const shareRecordNames = folderRecords
+      .map((record) => record.shareRecordName)
+      .filter((name): name is string => name !== undefined);
+    const shareRecords =
+      shareRecordNames.length > 0
+        ? await lookupRecords(session, ckdatabasewsUrl, dsid, "shared", zone.zoneID, shareRecordNames)
+        : [];
+    zone.records.push(...folderRecords, ...shareRecords);
+  }
 }
 
 /** The per-directory used-names set, created on first use. */
