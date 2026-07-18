@@ -29,7 +29,10 @@ import { localFileState } from "../notes/localFileState.js";
 import { recordEpoch } from "../notes/noteEpoch.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { renderPlan, stripFilePrefix, type PlanEntry } from "../notes/pushPlan.js";
-import { compressNoteDocument, decodeNoteBodyText, decompressNoteDocument } from "../notes/noteText.js";
+import { decodeNoteFormat, formatsRoundTripEqual, type FormatParagraph } from "../notes/noteFormat.js";
+import { compressNoteDocument, decodeNoteBodyText, decodeNoteString, decompressNoteDocument } from "../notes/noteText.js";
+import { parseNoteMarkdown } from "../notes/parseNoteMarkdown.js";
+import { reconcileNoteFormat } from "../notes/formatReconcile.js";
 import { prepareTableAttachmentUpdate } from "../notes/tablePushEdit.js";
 import { historyRecordNames } from "../notes/trackedFile.js";
 import { recordVersion } from "../notes/versionHistory.js";
@@ -41,6 +44,7 @@ import {
   encodeNoteDocument,
   noteDocumentRoundTrips,
   parseNoteDocument,
+  validateDocumentInvariants,
 } from "../notes/noteDocument.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
@@ -604,11 +608,32 @@ export async function buildPushPlan(
   for (const { file, localText, folderRecordName, sharedZoneOwner } of createCandidates) {
     // The document is built and decode-verified during planning (not at
     // execute time) so `status` shows a build failure as a refusal, with
-    // the same fidelity the update path's plan-time gates have.
+    // the same fidelity the update path's plan-time gates have. The local
+    // markdown parses into plain text + formatting; the initial document
+    // carries the text and the same reconciler `push` edits with applies
+    // the formatting (Step 2 of the formatting plan).
     let payloadBase64: string;
+    let plainText: string;
     try {
-      const compressed = compressNoteDocument(encodeNoteDocument(buildInitialNoteDocument(localText, replicaIdBytes)));
-      if (decodeNoteBodyText(compressed) !== localText) {
+      const parsed = parseNoteMarkdown(localText);
+      if (parsed.status !== "ok") {
+        entries.push({ kind: "create", file, resolution: "refused", reason: parsed.reason });
+        continue;
+      }
+      const doc = buildInitialNoteDocument(parsed.text, replicaIdBytes);
+      const reconciled = reconcileNoteFormat(doc, parsed.paragraphs, replicaIdBytes);
+      if (!reconciled.ok) {
+        entries.push({ kind: "create", file, resolution: "refused", reason: reconciled.reason });
+        continue;
+      }
+      const compressed = compressNoteDocument(encodeNoteDocument(doc));
+      const rebuiltString = decodeNoteString(compressed);
+      const rebuiltFormat = decodeNoteFormat(rebuiltString.string, rebuiltString.attributeRun);
+      if (
+        rebuiltString.string !== parsed.text ||
+        rebuiltFormat.status !== "ok" ||
+        !formatsRoundTripEqual(rebuiltFormat.paragraphs, parsed.paragraphs)
+      ) {
         entries.push({
           kind: "create",
           file,
@@ -618,6 +643,7 @@ export async function buildPushPlan(
         continue;
       }
       payloadBase64 = compressed.toString("base64");
+      plainText = parsed.text;
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       entries.push({ kind: "create", file, resolution: "refused", reason: message });
@@ -643,7 +669,7 @@ export async function buildPushPlan(
           zone.database,
           zone.zoneID,
           recordName,
-          buildNoteCreateFields(payloadBase64, localText, modificationDateMs, folderRecordName, sharedZoneOwner),
+          buildNoteCreateFields(payloadBase64, plainText, modificationDateMs, folderRecordName, sharedZoneOwner),
           // A shared-folder create byte-matches the 2026-07-17 capture: the
           // record-hierarchy parent at the folder is what makes the new
           // note a member of the folder's share. The private shape (no
@@ -735,7 +761,7 @@ export async function buildPushPlan(
       // behavior, which already merges eagerly; see the "status converges
       // with push --dry-run" project notes.
       const base = (await readBaseCopy(targetDir, recordName)) ?? "";
-      const outcome = mergeNoteVersions(base, localText, classified.bodyText);
+      const outcome = mergeNoteVersions(base, localText, classified.markdownText);
       await writeFile(path.join(targetDir, entry.file), outcome.text, "utf-8");
 
       if (outcome.hasConflict) {
@@ -985,7 +1011,7 @@ async function prepareUpdate(
   }
   if (!classified.publishable) {
     summary.refused.push(
-      `${entry.file}: this note contains content this tool can't parse - it can't be safely edited. ` +
+      `${entry.file}: this note ${classified.unpublishableReason ?? "contains content this tool can't parse"} - it can't be safely edited. ` +
         `Run "icloud-notes restore ${entry.file}" to discard your local edit.`,
     );
     return undefined;
@@ -1009,11 +1035,21 @@ async function prepareUpdate(
     );
   }
 
-  const textUpdate = prepareNoteTextUpdate(record, classified.bodyText, localText, classified.embedSlots, replicaId, entry, summary);
+  const parsed = parseNoteMarkdown(localText);
+  if (parsed.status !== "ok") {
+    summary.refused.push(`${entry.file}: ${parsed.reason}. Run "icloud-notes restore ${entry.file}" to discard your local edit.`);
+    return undefined;
+  }
+  const textUpdate = prepareNoteTextUpdate(record, classified.bodyText, parsed, classified.embedSlots, replicaId, entry, summary);
   if (!textUpdate) {
     return undefined;
   }
-  const fields = buildNoteUpdateFields(record, textUpdate, localText, modificationDateMs);
+  if (textUpdate.status === "unchanged") {
+    // The file differs from the base copy only cosmetically (markdown
+    // notation, not content) - nothing to send.
+    return { updates: [], noteTextUpdated: false };
+  }
+  const fields = buildNoteUpdateFields(record, textUpdate.payloadBase64, parsed.text, modificationDateMs);
   return {
     updates: [noteRecordUpdate(record, entry, fields)],
     noteTextUpdated: true,
@@ -1050,6 +1086,13 @@ async function prepareEmbedCandidate(
   const plan = planEmbedRepresentations(localText, classified.embedSlots, trackedFileAttachmentIds);
   if (!plan.ok) {
     summary.refused.push(`${entry.file}: ${plan.reason}. Run "icloud-notes restore ${entry.file}" to discard your local edit.`);
+    return undefined;
+  }
+  // The placeholder-form markdown (markers and table blocks re-spliced to
+  // U+FFFC) is what parses back into the desired text + formatting.
+  const parsed = parseNoteMarkdown(plan.reconstructedBodyText);
+  if (parsed.status !== "ok") {
+    summary.refused.push(`${entry.file}: ${parsed.reason}. Run "icloud-notes restore ${entry.file}" to discard your local edit.`);
     return undefined;
   }
 
@@ -1113,22 +1156,18 @@ async function prepareEmbedCandidate(
   }
 
   let noteTextUpdated = false;
-  if (plan.reconstructedBodyText !== classified.bodyText) {
-    const textUpdate = prepareNoteTextUpdate(
-      record,
-      classified.bodyText,
-      plan.reconstructedBodyText,
-      classified.embedSlots,
-      replicaId,
-      entry,
-      summary,
-    );
+  if (plan.reconstructedBodyText !== classified.markdownText) {
+    const textUpdate = prepareNoteTextUpdate(record, classified.bodyText, parsed, classified.embedSlots, replicaId, entry, summary);
     if (!textUpdate) {
       return undefined;
     }
-    const fields = buildNoteUpdateFields(record, textUpdate, plan.reconstructedBodyText, modificationDateMs);
-    updates.unshift(noteRecordUpdate(record, entry, fields));
-    noteTextUpdated = true;
+    if (textUpdate.status === "ok") {
+      const fields = buildNoteUpdateFields(record, textUpdate.payloadBase64, parsed.text, modificationDateMs);
+      updates.unshift(noteRecordUpdate(record, entry, fields));
+      noteTextUpdated = true;
+    }
+    // "unchanged": the markdown differs only cosmetically from the remote
+    // rendering - no note-text update needed (tables may still update).
   }
 
   if (updates.length === 0) {
@@ -1153,26 +1192,32 @@ function noteRecordUpdate(record: CloudKitRecord, entry: CloneStateNoteEntry, fi
   };
 }
 
+/** A prepared note-text payload, or "unchanged" when the desired content is
+ * already exactly what the remote document holds (text and formatting alike -
+ * a cosmetic markdown difference in the file resolves to a no-op). */
+type NoteTextUpdate = { status: "ok"; payloadBase64: string } | { status: "unchanged" };
+
 /**
  * Builds and verifies the new TextDataEncrypted payload for a note's own
- * text, returning it base64-encoded, or undefined (with the reason recorded
- * in `summary`) if any safety gate refuses. `currentBodyText` is what the
- * remote document is expected to currently decode to (the plain-text path
- * passes the remote's own text; the embed path passes the same, since only
- * the *desired* text differs when prose around an embed changed too).
- * `expectedSlots` is the note's embed structure, which the edit must leave
- * exactly alone: the text splice may not touch a U+FFFC placeholder, and the
- * rebuilt document must decode to the same slots it started with.
+ * text, or undefined (with the reason recorded in `summary`) if any safety
+ * gate refuses. `currentBodyText` is what the remote document is expected
+ * to currently decode to; `desired` is the parsed local markdown - its
+ * plain text drives the splice, its paragraphs drive the formatting
+ * reconciler. `expectedSlots` is the note's embed structure, which the edit
+ * must leave exactly alone: the text splice may not touch a U+FFFC
+ * placeholder, and the rebuilt document must decode to the same slots it
+ * started with. The rebuilt document must also decode to the desired
+ * formatting projection - the write-side half of Step 2's round-trip gate.
  */
 function prepareNoteTextUpdate(
   record: CloudKitRecord,
   currentBodyText: string,
-  desiredBodyText: string,
+  desired: { text: string; paragraphs: FormatParagraph[] },
   expectedSlots: readonly EmbedSlot[],
   replicaId: Uint8Array,
   entry: CloneStateNoteEntry,
   summary: PushSummary,
-): string | undefined {
+): NoteTextUpdate | undefined {
   const textField = record.fields.TextDataEncrypted;
   if (!textField || typeof textField.value !== "string") {
     summary.refused.push(`${entry.file}: remote note has no readable text data`);
@@ -1197,7 +1242,7 @@ function prepareNoteTextUpdate(
   // tombstoning one (or typing a literal one) would sever the CRDT character
   // its attachmentInfo run points at, even if the visible text ends up with
   // the right placeholder count. Embeds can't be moved through this tool.
-  const splice = computeSplice(currentBodyText, desiredBodyText);
+  const splice = computeSplice(currentBodyText, desired.text);
   const spliceTouchesPlaceholder =
     currentBodyText.slice(splice.start, splice.start + splice.deleteLength).includes(OBJECT_REPLACEMENT_CHARACTER) ||
     splice.insertText.includes(OBJECT_REPLACEMENT_CHARACTER);
@@ -1215,9 +1260,20 @@ function prepareNoteTextUpdate(
       summary.refused.push(`${entry.file}: decoder disagreement on the note's current text - refusing to edit`);
       return undefined;
     }
-    applyTextEdit(doc, desiredBodyText, { replicaId });
+    const textChanged = applyTextEdit(doc, desired.text, { replicaId });
+    const reconciled = reconcileNoteFormat(doc, desired.paragraphs, replicaId);
+    if (!reconciled.ok) {
+      summary.refused.push(
+        `${entry.file}: ${reconciled.reason}. Run "icloud-notes restore ${entry.file}" to discard your local edit.`,
+      );
+      return undefined;
+    }
+    if (!textChanged && !reconciled.changed) {
+      return { status: "unchanged" };
+    }
+    validateDocumentInvariants(doc);
     const compressed = compressNoteDocument(encodeNoteDocument(doc));
-    if (decodeNoteBodyText(compressed) !== desiredBodyText) {
+    if (decodeNoteBodyText(compressed) !== desired.text) {
       summary.refused.push(`${entry.file}: rebuilt document failed decode verification - refusing to push`);
       return undefined;
     }
@@ -1229,7 +1285,16 @@ function prepareNoteTextUpdate(
       summary.refused.push(`${entry.file}: rebuilt document failed embed-structure verification - refusing to push`);
       return undefined;
     }
-    return compressed.toString("base64");
+    // The rebuilt document must decode to the desired formatting, verified
+    // independently from the reconciler's own bookkeeping (fresh decode of
+    // the actual bytes about to be uploaded).
+    const rebuiltString = decodeNoteString(compressed);
+    const rebuiltFormat = decodeNoteFormat(rebuiltString.string, rebuiltString.attributeRun);
+    if (rebuiltFormat.status !== "ok" || !formatsRoundTripEqual(rebuiltFormat.paragraphs, desired.paragraphs)) {
+      summary.refused.push(`${entry.file}: rebuilt document failed formatting verification - refusing to push`);
+      return undefined;
+    }
+    return { status: "ok", payloadBase64: compressed.toString("base64") };
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
     summary.refused.push(`${entry.file}: ${message}`);

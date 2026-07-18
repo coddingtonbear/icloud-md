@@ -43,14 +43,20 @@ const IMAGE_ATTACHMENT_TEXT_DATA =
 
 test("a plain-text note decodes as ok with no attachments", () => {
   const record = makeRecord({ TextDataEncrypted: encodeTextField("Grocery list\nEggs\nMilk") });
-  assert.deepEqual(classifyNoteRecord(record), {
-    status: "ok",
-    title: "",
-    bodyText: "Grocery list\nEggs\nMilk",
-    embedSlots: [],
-    attachments: [],
-    publishable: true,
-  });
+  const result = classifyNoteRecord(record);
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.equal(result.bodyText, "Grocery list\nEggs\nMilk");
+  // No attribute runs means every line is a plain Body paragraph, and the
+  // markdown rendering is the text itself.
+  assert.equal(result.markdownText, "Grocery list\nEggs\nMilk");
+  assert.deepEqual(result.embedSlots, []);
+  assert.deepEqual(result.attachments, []);
+  assert.equal(result.publishable, true);
+  assert.deepEqual(
+    result.format?.map((paragraph) => paragraph.kind),
+    ["body", "body", "body"],
+  );
 });
 
 test("a real audio-attachment note decodes as ok, surfacing the embedded attachment reference", () => {
@@ -85,14 +91,14 @@ test("a placeholder character with no matching attachment run becomes an unknown
   // (2026-07-17) it's localized as an `unknown` slot (pull renders an inline
   // marker there) instead of banner-marking the whole note.
   const record = makeRecord({ TextDataEncrypted: encodeTextField("Some note\n\uFFFC") });
-  assert.deepEqual(classifyNoteRecord(record), {
-    status: "ok",
-    title: "",
-    bodyText: "Some note\n\uFFFC",
-    embedSlots: [{ kind: "unknown", typeUti: undefined }],
-    attachments: [],
-    publishable: true,
-  });
+  const result = classifyNoteRecord(record);
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.equal(result.bodyText, "Some note\n\uFFFC");
+  assert.equal(result.markdownText, "Some note\n\uFFFC");
+  assert.deepEqual(result.embedSlots, [{ kind: "unknown", typeUti: undefined }]);
+  assert.deepEqual(result.attachments, []);
+  assert.equal(result.publishable, true);
 });
 
 test("a partially-identified attachment run yields an unknown slot carrying its UTI", () => {
@@ -124,6 +130,8 @@ test("an attachmentInfo run not sitting on a lone placeholder banner-marks the n
     status: "ok",
     title: "",
     bodyText: `${UNKNOWN_CONTENT_BANNER}Hi\n\uFFFC`,
+    markdownText: `${UNKNOWN_CONTENT_BANNER}Hi\n\uFFFC`,
+    format: undefined,
     embedSlots: [],
     attachments: [],
     publishable: false,

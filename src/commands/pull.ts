@@ -205,7 +205,7 @@ export async function runPull(
         const placement = placeNote(layout, record, source.sharedZoneOwner);
         const noteDir = existing ? noteDirOf(existing.file) : placement.dir;
 
-        let bodyText = decoded.bodyText;
+        let bodyText = decoded.markdownText;
         const unpublishableReason = decoded.unpublishableReason;
         if (decoded.embedSlots.length > 0) {
           const zoneID = source.sharedZoneOwner
@@ -217,7 +217,7 @@ export async function runPull(
             zoneID,
             targetDir,
             record.recordName,
-            decoded.bodyText,
+            decoded.markdownText,
             decoded.embedSlots,
             attachments,
             tableAttachments,

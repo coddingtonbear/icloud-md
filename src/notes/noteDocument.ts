@@ -205,10 +205,16 @@ export function applyTextEdit(doc: NoteDocument, newText: string, options: Apply
 
   const { start, deleteLength, insertText } = computeSplice(oldText, newText);
   const replicaIndex = ensureReplica(doc, options.replicaId);
+  const opNumber = doc.replicas[replicaIndex - 1]?.counters[1] ?? 0;
 
   let structuralChange = false;
   if (deleteLength > 0) {
-    tombstoneVisibleRange(doc, start, deleteLength);
+    // A deletion is a formatting op in Apple's model: the tombstoned
+    // substrings are restamped with (opReplica, opNumber) - confirmed on the
+    // 2026-07-17 formatting-evolution capture (see proto/topotext.proto's
+    // Substring.timestamp comment). The op number consumed here is the one
+    // the structural-change bump below advances past.
+    tombstoneVisibleRange(doc, start, deleteLength, { replica: replicaIndex, clock: opNumber });
     structuralChange = true;
   }
   if (insertText.length > 0) {
@@ -216,15 +222,17 @@ export function applyTextEdit(doc: NoteDocument, newText: string, options: Apply
   }
   adjustAttributeRuns(doc, start, deleteLength, insertText.length);
 
-  // The second replica counter behaves as an edit-event counter in captured
-  // traffic: a pure extension of the replica's own trailing run leaves it
-  // alone (observed across two consecutive web-client saves of an append),
-  // while saves containing splits/tombstones/new runs advance it (observed
-  // 1 -> 9 -> 10 across the "Test Note" capture). One push = one event.
+  // The second replica counter is the formatting-op clock (identified on the
+  // 2026-07-17 formatting-evolution capture; see proto/topotext.proto): a
+  // pure extension of the replica's own trailing run leaves it alone
+  // (observed across two consecutive web-client saves of an append), while
+  // saves containing splits/tombstones/new runs advance it (observed
+  // 1 -> 9 -> 10 across the "Test Note" capture). One push = one op, whose
+  // number stamped the tombstones above.
   if (structuralChange) {
     const replica = doc.replicas[replicaIndex - 1];
     if (replica) {
-      replica.counters[1] = (replica.counters[1] ?? 0) + 1;
+      replica.counters[1] = opNumber + 1;
     }
   }
 
@@ -405,10 +413,12 @@ function isLowSurrogate(code: number): boolean {
 }
 
 /** Marks the visible range [start, start+length) as tombstoned, splitting
- * runs where the range boundaries fall inside one. Clock arithmetic follows
- * the pattern in captured notes: a run starting at clock c, split at offset
- * k, continues at clock c+k. */
-function tombstoneVisibleRange(doc: NoteDocument, start: number, length: number): void {
+ * runs where the range boundaries fall inside one, and restamps the newly
+ * tombstoned pieces' style timestamp with `stamp` - the deletion's
+ * formatting-op coordinate, matching Apple's own client (dev log
+ * 2026-07-17T10:16). Clock arithmetic follows the pattern in captured
+ * notes: a run starting at clock c, split at offset k, continues at c+k. */
+function tombstoneVisibleRange(doc: NoteDocument, start: number, length: number, stamp: RunCoord): void {
   const end = start + length;
   const out: TextRun[] = [];
   let visible = 0;
@@ -432,7 +442,9 @@ function tombstoneVisibleRange(doc: NoteDocument, start: number, length: number)
     if (overlapStart > runStart) {
       out.push(pieceOf(run, 0, overlapStart - runStart, false));
     }
-    out.push(pieceOf(run, overlapStart - runStart, overlapEnd - overlapStart, true));
+    const tombstoned = pieceOf(run, overlapStart - runStart, overlapEnd - overlapStart, true);
+    tombstoned.anchor = { replica: stamp.replica, clock: stamp.clock };
+    out.push(tombstoned);
     if (runEnd > overlapEnd) {
       out.push(pieceOf(run, overlapEnd - runStart, runEnd - overlapEnd, false));
     }
@@ -440,6 +452,60 @@ function tombstoneVisibleRange(doc: NoteDocument, start: number, length: number)
 
   if (visible < end) {
     throw new Error("Tombstone range extends past the end of the visible text - CRDT model out of sync");
+  }
+  doc.runs = out;
+}
+
+/**
+ * Applies one formatting operation covering the given visible ranges, the
+ * way Apple's client does (dev log 2026-07-17T10:16): the replica's
+ * formatting-op clock (second counter) advances by one, and every substring
+ * overlapping a range - split at range boundaries - has its style timestamp
+ * restamped with the consumed op number. The caller is responsible for the
+ * attribute-run rewrite the op corresponds to (`formatReconcile.ts`).
+ */
+export function applyFormattingOp(doc: NoteDocument, ranges: readonly { start: number; end: number }[], replicaId: Uint8Array): void {
+  const replicaIndex = ensureReplica(doc, replicaId);
+  const replica = doc.replicas[replicaIndex - 1]!;
+  const opNumber = replica.counters[1] ?? 0;
+  replica.counters[1] = opNumber + 1;
+  for (const range of ranges) {
+    restampVisibleRange(doc, range.start, range.end, { replica: replicaIndex, clock: opNumber });
+  }
+  renumberSequences(doc);
+}
+
+/** Restamps the style timestamp of every visible substring overlapping
+ * [start, end), splitting runs at the boundaries. */
+function restampVisibleRange(doc: NoteDocument, start: number, end: number, stamp: RunCoord): void {
+  const out: TextRun[] = [];
+  let visible = 0;
+
+  for (const run of doc.runs) {
+    if (run.tombstone || run.length === 0 || isSentinel(run)) {
+      out.push(run);
+      continue;
+    }
+    const runStart = visible;
+    const runEnd = visible + run.length;
+    visible = runEnd;
+
+    if (runEnd <= start || runStart >= end) {
+      out.push(run);
+      continue;
+    }
+
+    const overlapStart = Math.max(start, runStart);
+    const overlapEnd = Math.min(end, runEnd);
+    if (overlapStart > runStart) {
+      out.push(pieceOf(run, 0, overlapStart - runStart, false));
+    }
+    const restamped = pieceOf(run, overlapStart - runStart, overlapEnd - overlapStart, false);
+    restamped.anchor = { replica: stamp.replica, clock: stamp.clock };
+    out.push(restamped);
+    if (runEnd > overlapEnd) {
+      out.push(pieceOf(run, overlapEnd - runStart, runEnd - overlapEnd, false));
+    }
   }
   doc.runs = out;
 }
@@ -550,11 +616,16 @@ function ensureReplica(doc: NoteDocument, replicaId: Uint8Array): number {
   if (existing !== -1) {
     return existing + 1;
   }
-  // Counters start at zero: the text clock advances as we insert, and the
-  // event counter is advanced by applyTextEdit's structural-change bump
-  // (making a brand-new replica's first edit land on [inserted, 1], which
-  // matches the captured create of a fresh note).
-  doc.replicas.push({ id: replicaId, counters: [0, 0] });
+  // A replica joining an existing document initializes both clocks to the
+  // maxima observed across the table - the 2026-07-17 formatting-evolution
+  // follow-up capture shows Apple's own fresh web replica picking up the
+  // previous session's text clock and continuing the global formatting-op
+  // numbering (so its ops win LWW against every older op, as intended). On
+  // a brand-new document (empty table) both maxima are zero, which is
+  // exactly the captured create shape.
+  const maxTextClock = Math.max(0, ...doc.replicas.map((replica) => replica.counters[0] ?? 0));
+  const maxOpClock = Math.max(0, ...doc.replicas.map((replica) => replica.counters[1] ?? 0));
+  doc.replicas.push({ id: replicaId, counters: [maxTextClock, maxOpClock] });
   return doc.replicas.length;
 }
 

@@ -25,9 +25,16 @@ import { parseVersionedDocument } from "./versionedDocument.js";
  * needs them.
  */
 export function decodeNoteBodyText(compressedProtobuf: Buffer): string {
+  return decodeNoteString(compressedProtobuf).string;
+}
+
+/** The full decoded `topotext.String` - visible text plus attribute runs -
+ * for callers that need formatting too (Step 2 of the formatting plan:
+ * `classifyNoteRecord`'s render gate, `push`'s post-edit verification). */
+export function decodeNoteString(compressedProtobuf: Buffer) {
   const raw = decompressNoteDocument(compressedProtobuf);
   const { data } = parseVersionedDocument(raw);
-  return fromBinary(StringSchema, data).string;
+  return fromBinary(StringSchema, data);
 }
 
 export function decompressNoteDocument(buf: Buffer): Buffer {

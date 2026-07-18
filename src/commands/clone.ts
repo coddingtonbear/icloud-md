@@ -119,7 +119,7 @@ export async function runClone(
 
         const placement = placeNote(layout, record, source.sharedZoneOwner);
 
-        let bodyText = decoded.bodyText;
+        let bodyText = decoded.markdownText;
         const unpublishableReason = decoded.unpublishableReason;
         if (decoded.embedSlots.length > 0) {
           const zoneID = source.sharedZoneOwner
@@ -131,7 +131,7 @@ export async function runClone(
             zoneID,
             targetDir,
             record.recordName,
-            decoded.bodyText,
+            decoded.markdownText,
             decoded.embedSlots,
             attachments,
             tableAttachments,

@@ -136,9 +136,12 @@ test("appending as a new replica adds a replica entry and a new run", () => {
   assert.equal(applyTextEdit(doc, "Hello!", { replicaId: REPLICA_B }), true);
 
   assert.equal(doc.replicas.length, 2);
-  assert.deepEqual(doc.replicas[1]?.counters, [1, 1]);
+  // A joining replica initializes both clocks to the observed maxima (text
+  // clock 5 from replica A, op clock 1) - the 2026-07-17 formatting-evolution
+  // follow-up capture's behavior - then advances them with its own edit.
+  assert.deepEqual(doc.replicas[1]?.counters, [6, 2]);
   const inserted = doc.runs[doc.runs.length - 2];
-  assert.deepEqual(inserted?.coord, { replica: 2, clock: 0 });
+  assert.deepEqual(inserted?.coord, { replica: 2, clock: 5 });
   assert.equal(inserted?.length, 1);
   assert.equal(visibleText(doc), "Hello!");
   assert.equal(reencodeAndDecode(doc), "Hello!");
@@ -159,7 +162,8 @@ test("mid-text insertion splits the containing run", () => {
     contentRuns.map((run) => ({ replica: run.coord.replica, clock: run.coord.clock, length: run.length })),
     [
       { replica: 1, clock: 0, length: 6 },
-      { replica: 2, clock: 0, length: 6 },
+      // The joining replica's text clock starts at the observed maximum (11).
+      { replica: 2, clock: 11, length: 6 },
       { replica: 1, clock: 6, length: 5 },
     ],
   );
@@ -178,10 +182,14 @@ test("deletion tombstones the removed range instead of dropping it", () => {
   assert.equal(tombstones.length, 1);
   assert.equal(tombstones[0]?.length, 6);
   assert.equal(tombstones[0]?.coord.clock, 6); // split from the middle of the original run
-  // Our replica is registered (the deletion is an edit event it must record)
-  // but inserted no text.
+  // A deletion is a formatting op: the tombstoned substring is restamped
+  // with the deleting replica's (index, op number) - here replica 2, whose
+  // op clock initialized to the observed maximum (1) and stamped that value.
+  assert.deepEqual(tombstones[0]?.anchor, { replica: 2, clock: 1 });
+  // Our replica is registered (the deletion consumed one of its op numbers)
+  // but inserted no text - its text clock stays at the joined maximum.
   assert.equal(doc.replicas.length, 2);
-  assert.deepEqual(doc.replicas[1]?.counters, [0, 1]);
+  assert.deepEqual(doc.replicas[1]?.counters, [17, 2]);
   assert.equal(reencodeAndDecode(doc), "Hello world");
   validateDocumentInvariants(doc);
 });
