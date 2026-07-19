@@ -180,6 +180,11 @@ resolution live.
   edit that adds/removes rows and columns in the same save, are refused
   rather than risking a bad write — split a reorder into a delete push
   followed by an insert push instead.
+- **Local-only YAML frontmatter.** A leading `---` frontmatter block (for
+  Obsidian tags, aliases, and the like) is treated as local metadata: it's
+  skipped when deriving the note's title (the title is the first line *after*
+  the frontmatter) and preserved across `pull`/`push`, so editing it never
+  looks like a note change. See Known limitations for the catch.
 - **`delete`/`delete --hard`**, and the `object` repair-kit commands, for
   cleaning up notes this tool (or anything else) leaves in a broken state.
 - **`history`/`diff`/`revert`**, and push-time auto-merge via version
@@ -208,6 +213,10 @@ resolution live.
   shared folder you only have read access to is correctly refused, but
   that path is still unverified live (no read-only share has been
   available to test against).
+- **Frontmatter never leaves your machine.** Apple Notes has nowhere to
+  store a YAML frontmatter block, so it's kept purely local — never uploaded,
+  and never visible on your other devices. It survives `pull`/`push` because
+  this tool reattaches it locally, not because iCloud knows about it.
 - **No real-time or continuous sync.** This is a deliberate fetch/push
   tool, not a background daemon.
 - **Concurrent edits from *other* Apple devices aren't merged the way Notes

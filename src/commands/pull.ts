@@ -19,6 +19,7 @@ import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { isEnoent } from "../fsUtil.js";
 import { noteFileName, uniqueFileName } from "../notes/filename.js";
+import { joinFrontmatter, splitFrontmatter } from "../notes/frontmatter.js";
 import { buildVaultLayout, noteDirOf, placeNote, previousLayoutDirs, type SharedZoneRecords } from "../notes/folderLayout.js";
 import { reconcileNotePlacements, removeStaleDirs } from "../notes/folderReconcile.js";
 import { mergeNoteVersions } from "../notes/mergeConflict.js";
@@ -295,7 +296,11 @@ export async function runPull(
         const local = await localFileState(targetDir, existing, record.recordName);
         if (local === "clean" || local === "missing") {
           const filePath = path.join(targetDir, existing.file);
-          await writeFile(filePath, bodyText, "utf-8");
+          // Preserve any local-only frontmatter on a clean file (a missing
+          // file has none to keep); the base copy stays body-only.
+          const frontmatter =
+            local === "clean" ? splitFrontmatter(await readFile(filePath, "utf-8")).frontmatter : "";
+          await writeFile(filePath, joinFrontmatter(frontmatter, bodyText), "utf-8");
           await applyNoteFileTimes(filePath, record);
           await writeBaseCopy(targetDir, record.recordName, bodyText);
           if (local === "missing") {
@@ -313,11 +318,15 @@ export async function runPull(
         }
 
         // local === "modified": real 3-way merge against the base copy.
+        // The merge runs on the body only; the local-only frontmatter envelope
+        // is split off and re-attached above the merged result.
         const base = (await readBaseCopy(targetDir, record.recordName)) ?? "";
-        const localContent = await readFile(path.join(targetDir, existing.file), "utf-8");
+        const { frontmatter, body: localContent } = splitFrontmatter(
+          await readFile(path.join(targetDir, existing.file), "utf-8"),
+        );
         const outcome = mergeNoteVersions(base, localContent, bodyText);
 
-        await writeFile(path.join(targetDir, existing.file), outcome.text, "utf-8");
+        await writeFile(path.join(targetDir, existing.file), joinFrontmatter(frontmatter, outcome.text), "utf-8");
         notes[record.recordName] = {
           ...existing,
           recordChangeTag: record.recordChangeTag ?? existing.recordChangeTag,
@@ -497,12 +506,15 @@ async function handleRemoteDeletion(
   }
 
   // A delete/modify conflict is never auto-resolved either direction - merge
-  // against an empty remote so the markers show exactly what local kept.
+  // against an empty remote so the markers show exactly what local kept. The
+  // local-only frontmatter is split off first and kept above the markers.
   const base = (await readBaseCopy(targetDir, record.recordName)) ?? "";
-  const localContent = await readFile(path.join(targetDir, existing.file), "utf-8");
+  const { frontmatter, body: localContent } = splitFrontmatter(
+    await readFile(path.join(targetDir, existing.file), "utf-8"),
+  );
   const outcome = mergeNoteVersions(base, localContent, "");
 
-  await writeFile(path.join(targetDir, existing.file), outcome.text, "utf-8");
+  await writeFile(path.join(targetDir, existing.file), joinFrontmatter(frontmatter, outcome.text), "utf-8");
   summary.conflicts.push(`${existing.file}: deleted remotely, but has local edits - merged with conflict markers, resolve manually`);
   // Keep tracking (state entry + base copy) so this doesn't silently drop
   // out of state.json; there's no new recordChangeTag to advance to since

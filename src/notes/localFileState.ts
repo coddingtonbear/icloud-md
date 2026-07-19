@@ -3,6 +3,7 @@ import path from "node:path";
 import { isEnoent } from "../fsUtil.js";
 import { readBaseCopy } from "./baseCopy.js";
 import type { CloneStateNoteEntry } from "./cloneState.js";
+import { splitFrontmatter } from "./frontmatter.js";
 
 /**
  * Whether a tracked note's local file still matches its base copy (the last
@@ -35,5 +36,8 @@ export async function localFileState(
     // if it does, we can't verify cleanliness - treat conservatively.
     return "modified";
   }
-  return content === base ? "clean" : "modified";
+  // Compare body-only: the base copy never carries frontmatter, so a local-
+  // only frontmatter edit leaves the body equal to base and stays "clean" -
+  // it must not read as a note change (which would trigger a spurious push).
+  return splitFrontmatter(content).body === base ? "clean" : "modified";
 }

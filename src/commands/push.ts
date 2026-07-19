@@ -30,6 +30,7 @@ import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.
 import { serializePlanEntry, stripFilePrefix, type PlanEntry, type SerializedPlanEntry } from "../notes/pushPlan.js";
 import { decodeNoteFormat, formatsRoundTripEqual, type FormatParagraph } from "../notes/noteFormat.js";
 import { compressNoteDocument, decodeNoteBodyText, decodeNoteString, decompressNoteDocument } from "../notes/noteText.js";
+import { joinFrontmatter, splitFrontmatter } from "../notes/frontmatter.js";
 import { parseNoteMarkdown } from "../notes/parseNoteMarkdown.js";
 import { reconcileNoteFormat } from "../notes/formatReconcile.js";
 import { prepareTableAttachmentUpdate } from "../notes/tablePushEdit.js";
@@ -98,7 +99,13 @@ export interface PushResult {
 interface PushCandidate {
   recordName: string;
   entry: CloneStateNoteEntry;
+  /** The note body only - the local-only frontmatter envelope (if any) has
+   * already been split off and is carried separately in `frontmatter`. */
   localText: string;
+  /** The local-only frontmatter envelope stripped from the working file,
+   * re-attached verbatim if a remote-merge rewrites the file (see the
+   * `mergeNoteVersions` path below). Empty string when the file has none. */
+  frontmatter: string;
 }
 
 interface PushSummary {
@@ -168,7 +175,11 @@ export async function buildPushPlan(
 
   const untracked: { file: string; localText: string }[] = [];
   for (const file of await listUntrackedMarkdownFiles(targetDir, state)) {
-    untracked.push({ file, localText: await readFile(path.join(targetDir, file), "utf-8") });
+    // Body only: an untracked file's local-only frontmatter never reaches
+    // parse/create or move-matching (which compares against body-only base
+    // copies), and push never rewrites the untracked file itself.
+    const { body } = splitFrontmatter(await readFile(path.join(targetDir, file), "utf-8"));
+    untracked.push({ file, localText: body });
   }
 
   const updateCandidates: PushCandidate[] = [];
@@ -184,7 +195,11 @@ export async function buildPushPlan(
       continue;
     }
 
-    const localText = await readFile(path.join(targetDir, entry.file), "utf-8");
+    // Split the local-only frontmatter envelope off before anything below
+    // touches the note: every check, parse, merge, and base-copy comparison
+    // operates on the body, and `frontmatter` is re-attached only if a
+    // remote-merge rewrites the working file.
+    const { frontmatter, body: localText } = splitFrontmatter(await readFile(path.join(targetDir, entry.file), "utf-8"));
 
     const sharedRefusal = sharedNoteWriteRefusal(state, entry);
     if (sharedRefusal !== undefined) {
@@ -241,7 +256,7 @@ export async function buildPushPlan(
       });
       continue;
     }
-    updateCandidates.push({ recordName, entry, localText });
+    updateCandidates.push({ recordName, entry, localText, frontmatter });
   }
 
   // --- Local-move pairing: a missing tracked file plus an untracked one
@@ -725,7 +740,7 @@ export async function buildPushPlan(
   }
 
   for (const candidate of updateCandidates) {
-    const { recordName, entry, localText } = candidate;
+    const { recordName, entry, localText, frontmatter } = candidate;
     const record = recordsByName.get(recordName);
     if (!record || record.deleted === true) {
       entries.push({
@@ -776,7 +791,9 @@ export async function buildPushPlan(
       // with push --dry-run" project notes.
       const base = (await readBaseCopy(targetDir, recordName)) ?? "";
       const outcome = mergeNoteVersions(base, localText, classified.markdownText);
-      await writeFile(path.join(targetDir, entry.file), outcome.text, "utf-8");
+      // Re-attach the local-only frontmatter above the merged body so the
+      // envelope survives the rewrite (the merge and base copy stay body-only).
+      await writeFile(path.join(targetDir, entry.file), joinFrontmatter(frontmatter, outcome.text), "utf-8");
 
       if (outcome.hasConflict) {
         entries.push({
