@@ -1,0 +1,61 @@
+name: Release
+
+# Cuts a GitHub release whenever a version tag is pushed. The release notes
+# come from the annotated tag's *body* (everything after the first line), the
+# same way obsidian-local-rest-api does it - so `git tag -a vX.Y.Z` with your
+# notes in the message is all it takes. If a tag has no body (e.g. the bare
+# "Release X.Y.Z" that `npm version` writes), it falls back to GitHub's
+# auto-generated notes rather than publishing an empty release.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Checkout doesn't always materialize the annotated tag object; force a
+      # fetch so `git tag --format=%(contents:body)` can read the notes.
+      - name: Fetch annotated tag objects
+        run: git fetch --tags --force
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          notes="$(git tag -l --format='%(contents:body)' "${{ github.ref_name }}")"
+          if [ -z "$notes" ]; then
+            gh release create "${{ github.ref_name }}" \
+              --title "${{ github.ref_name }}" \
+              --generate-notes
+          else
+            gh release create "${{ github.ref_name }}" \
+              --title "${{ github.ref_name }}" \
+              --notes "$notes"
+          fi
