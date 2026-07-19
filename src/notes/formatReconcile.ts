@@ -102,10 +102,25 @@ export function reconcileNoteFormat(doc: NoteDocument, desired: readonly FormatP
     }
   }
 
+  // Repair scan for this tool's own early Step 2 writes: an *explicit*
+  // startingListItemNumber of 0 makes Apple number the list from 0 (its
+  // client omits the field when the start is the default 1 - live-verified
+  // 2026-07-18). Invisible in the projection (explicit 0 and absent both
+  // read as "default"), so affected paragraphs are forced into the rewrite
+  // set; the overlay's repair clause then clears the field.
+  const needsStartRepair = new Set<number>();
+  for (let i = 0; i < current.paragraphs.length; i += 1) {
+    const paragraph = current.paragraphs[i]!;
+    if (paragraph.kind === "numberedList" && desired[i]!.kind === "numberedList" && hasExplicitZeroStart(doc, paragraph, i === current.paragraphs.length - 1)) {
+      needsStartRepair.add(i);
+    }
+  }
+
   const changedIndexes: number[] = [];
   for (let i = 0; i < desired.length; i += 1) {
     if (
       needsFreshTodoUuid.has(i) ||
+      needsStartRepair.has(i) ||
       !paragraphProjectionsEqual(current.paragraphs[i]!, desired[i]!, current.paragraphs[i - 1], desired[i - 1])
     ) {
       changedIndexes.push(i);
@@ -170,6 +185,25 @@ function buildParagraphPlan(
     todoUuid: uuidBytes(),
     forceFreshTodoUuid,
   };
+}
+
+/** Whether any run overlapping the paragraph carries an explicit
+ * startingListItemNumber of 0 - the shape this tool's early Step 2 writes
+ * produced and Apple renders as a 0-numbered list (see the repair scan). */
+function hasExplicitZeroStart(doc: NoteDocument, paragraph: FormatParagraph, isLastParagraph: boolean): boolean {
+  const start = paragraph.start;
+  const end = start + paragraph.text.length + (isLastParagraph ? 0 : 1);
+  let offset = 0;
+  for (const run of doc.attributeRuns) {
+    const runStart = offset;
+    const runEnd = offset + run.length;
+    offset = runEnd;
+    const ps = run.paragraphStyle;
+    if (runStart < end && runEnd > start && ps && isFieldSet(ps, PS_START_FIELD) && ps.startingListItemNumber === 0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** The todo uuid carried by the first run overlapping the paragraph's range
@@ -294,7 +328,11 @@ function overlayParagraphStyle(piece: AttributeRun, plan: ParagraphPlan): void {
   const needDone = desired.kind === "todoList" && (current.done ?? false) !== (desired.done ?? false);
   const needStart = desired.kind === "numberedList" && effectiveStart(current.startNumber) !== effectiveStart(desired.startNumber);
   const needIdentity = desired.kind === "todoList" && plan.forceFreshTodoUuid;
-  if (!needIndent && !needQuote && !needDone && !needStart && !needIdentity) {
+  const needStartRepair =
+    piece.paragraphStyle !== undefined &&
+    isFieldSet(piece.paragraphStyle, PS_START_FIELD) &&
+    piece.paragraphStyle.startingListItemNumber === 0;
+  if (!needIndent && !needQuote && !needDone && !needStart && !needIdentity && !needStartRepair) {
     return;
   }
   if (!piece.paragraphStyle) {

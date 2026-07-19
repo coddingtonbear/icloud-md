@@ -231,6 +231,21 @@ test("numbered lists omit startingListItemNumber at the default start (explicit 
   assert.equal(started.attributeRuns[0]?.paragraphStyle?.startingListItemNumber, 5);
 });
 
+test("an explicit startingListItemNumber of 0 is repaired even when nothing rendered changed", () => {
+  const startField = ParagraphStyleSchema.fields.find((f) => f.localName === "startingListItemNumber")!;
+  // The shape this tool's early Step 2 writes produced: explicit 0.
+  const doc = docWith("num one\nnum two", [
+    { length: 8, paragraphStyle: { style: 102, alignment: 4, startingListItemNumber: 0 } },
+    { length: 7, paragraphStyle: { style: 102, alignment: 4, startingListItemNumber: 0 } },
+  ]);
+  const result = reconcileNoteFormat(doc, desired("1. num one\n2. num two").paragraphs, REPLICA_A);
+  assert.deepEqual(result, { ok: true, changed: true });
+  for (const run of doc.attributeRuns) {
+    assert.equal(run.paragraphStyle?.style, 102);
+    assert.equal(isFieldSet(run.paragraphStyle!, startField), false);
+  }
+});
+
 test("misaligned desired paragraphs refuse rather than guess", () => {
   const doc = docWith("one line", [{ length: 8 }]);
   const result = reconcileNoteFormat(doc, desired("different text").paragraphs, REPLICA_A);
