@@ -278,6 +278,47 @@ except the final upload; table edits go through an analogous check.
   limitations for exactly what's refused — creating and editing shared
   notes *is* supported).
 
+## Comparison with other projects
+
+Several other projects read or write Apple Notes. Most fall into two camps:
+tools that drive a live `Notes.app` on macOS (so they can't run anywhere
+else), and read-only parsers of the on-device `NoteStore.sqlite` database.
+`icloud-md` is the only one that talks to iCloud directly from any OS *and*
+syncs edits back.
+
+Legend: ✅ yes · ⚠️ partial / with caveats · ❌ no · — not applicable ·
+❓ unverified. In the content table, cells are marked **read / write**.
+
+### Platform & direction
+
+| | icloud-md | [Notes-Of-Fruit](https://github.com/ericmigi/Notes-Of-Fruit) | [macnotesapp](https://github.com/RhetTbull/macnotesapp) | [memo](https://github.com/antoniorodr/memo) | [notesutils](https://github.com/dunhamsteve/notesutils) | [apple_cloud_notes_parser](https://github.com/threeplanetssoftware/apple_cloud_notes_parser) | [apple-notes-parser](https://github.com/RhetTbull/apple-notes-parser) |
+|---|---|---|---|---|---|---|---|
+| Usable outside a Mac | ✅ | ✅ (Android) | ❌ | ❌ | ⚠️¹ | ⚠️¹ | ⚠️¹ |
+| Language | TypeScript / Node | Kotlin | Python | Python | Python | Ruby | Python |
+| Data source | CloudKit | CloudKit | live Notes.app | live Notes.app | local SQLite | local SQLite | local SQLite |
+| Reads notes | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Writes notes | ✅ | ⚠️ legacy only | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Reconciling sync² | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+
+### Fidelity & content types (read / write)
+
+| | icloud-md | [Notes-Of-Fruit](https://github.com/ericmigi/Notes-Of-Fruit) | [macnotesapp](https://github.com/RhetTbull/macnotesapp) | [memo](https://github.com/antoniorodr/memo) | [notesutils](https://github.com/dunhamsteve/notesutils) | [apple_cloud_notes_parser](https://github.com/threeplanetssoftware/apple_cloud_notes_parser) | [apple-notes-parser](https://github.com/RhetTbull/apple-notes-parser) |
+|---|---|---|---|---|---|---|---|
+| Decodes note format | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| Surgical writes | ✅ | ✅ | ❌ | ❌ | — | — | — |
+| Rich text | ✅ / ✅ | ✅ / ✅ | ✅ / ✅ | ✅ / ⚠️ | ✅ / ❌ | ✅ / ❌ | ⚠️ / ❌ |
+| Tables | ✅ / ✅ | ✅ / ❌ | ⚠️ / ⚠️ | ⚠️ / ❌ | ✅ / ❌ | ✅ / ❌ | ❓ / ❌ |
+| Checklists | ✅ / ✅ | ✅ / ❌ | ❌ / ❌ | ❌ / ❌ | ✅ / ❌ | ✅ / ❌ | ❓ / ❌ |
+| Attachments | ✅ / ❌ | ✅ / ❌ | ✅ / ✅ | ⚠️ / ⚠️ | ✅ / ❌ | ✅ / ❌ | ✅ / ❌ |
+| Folders | ✅ / ✅ | ❓ | ✅ / ✅ | ✅ / ⚠️ | ❌ / ❌ | ✅ / ❌ | ✅ / ❌ |
+| Markdown | ✅ native | ❌ | ⚠️ generic | ⚠️ generic | ⚠️ | ❌ | ❌ |
+
+¹ Runs on any OS, but only parses a `NoteStore.sqlite` database that must
+first be copied off an Apple device — so not really Mac-free in practice.
+
+² Others can read and write individual notes, but only `icloud-md`
+reconciles changes made on both sides.
+
 ## Reporting bugs
 
 Every reported issue must include three things:
