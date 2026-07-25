@@ -5,10 +5,13 @@ of real Markdown files, on Linux, Windows, or macOS, editable in whatever tool
 you already use (Vim, VS Code, Obsidian, `grep`) and syncs your edits
 back to iCloud as if you'd typed them into Notes.app all along.
 
-```
-$ icloud-md clone ./my-notes
-$ cd my-notes && $EDITOR "Grocery list.md"
-$ icloud-md push
+```bash
+# First, clone your notes somewhere
+icloud-md clone ./my-notes
+# Then make some changes to one of those notes
+cd my-notes && $EDITOR "Grocery list.md"
+# Finally, push them up to iCloud
+icloud-md push
 ```
 
 <!-- toc -->
@@ -22,12 +25,12 @@ $ icloud-md push
 - [How it works](#how-it-works)
 - [Non-goals](#non-goals)
 - [Comparison with other projects](#comparison-with-other-projects)
-  * [Platform & direction](#platform--direction)
-  * [Fidelity & content types (read / write)](#fidelity--content-types-read--write)
+  - [Platform \& direction](#platform--direction)
+  - [Fidelity \& content types (read / write)](#fidelity--content-types-read--write)
 - [Reporting bugs](#reporting-bugs)
-  * [Getting a Bug Report Export](#getting-a-bug-report-export)
-  * [Reproduction Steps](#reproduction-steps)
-  * [File Identities](#file-identities)
+  - [Getting a Bug Report Export](#getting-a-bug-report-export)
+  - [Reproduction Steps](#reproduction-steps)
+  - [File Identities](#file-identities)
 - [Contributing / development](#contributing--development)
 - [License](#license)
 
@@ -91,7 +94,7 @@ $ icloud-md push
 
 Requires Node.js 20+.
 
-```
+```bash
 npm install -g icloud-md
 ```
 
@@ -99,7 +102,7 @@ This puts the `icloud-md` command on your `PATH`.
 
 Building from a clone of this repo instead:
 
-```
+```bash
 git clone https://github.com/coddingtonbear/icloud-md.git
 cd icloud-md
 npm install
@@ -110,7 +113,7 @@ npm run build && npm link
 
 ## Quick start
 
-```
+```bash
 icloud-md clone ./my-notes
 ```
 
@@ -127,7 +130,7 @@ attachments alongside their note.
 
 After that:
 
-```
+```bash
 cd my-notes
 icloud-md status        # what would `push` do right now?
 icloud-md pull          # fetch remote changes, merging with local edits
@@ -363,7 +366,7 @@ For each of these, read more below.
 
 Run
 
-```
+```bash
 icloud-md bug-report --since <duration>
 ```
 
@@ -429,7 +432,7 @@ The bug report export above intentionally does not include the names
 of any files in your notes. To find relevant log entries, you will need
 to get the bug report identity for any relevant files; to do that, you can run:
 
-```
+```bash
 icloud-md bug-report --identify FILENAME
 ```
 
@@ -443,7 +446,7 @@ For example:
 
 ## Contributing / development
 
-```
+```bash
 npm install
 npm run typecheck
 npm test
