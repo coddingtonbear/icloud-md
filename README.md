@@ -11,6 +11,28 @@ $ cd my-notes && $EDITOR "Grocery list.md"
 $ icloud-md push
 ```
 
+<!-- toc -->
+
+- [Why](#why)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Commands](#commands)
+- [What works today](#what-works-today)
+- [Known limitations](#known-limitations)
+- [How it works](#how-it-works)
+- [Non-goals](#non-goals)
+- [Comparison with other projects](#comparison-with-other-projects)
+  * [Platform & direction](#platform--direction)
+  * [Fidelity & content types (read / write)](#fidelity--content-types-read--write)
+- [Reporting bugs](#reporting-bugs)
+  * [Getting a Bug Report Export](#getting-a-bug-report-export)
+  * [Reproduction Steps](#reproduction-steps)
+  * [File Identities](#file-identities)
+- [Contributing / development](#contributing--development)
+- [License](#license)
+
+<!-- tocstop -->
+
 ## Why
 
 - **Your notes become real files** — one Markdown file per note, editable,

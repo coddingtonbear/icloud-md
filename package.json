@@ -35,6 +35,7 @@
     "build": "tsc -p tsconfig.json",
     "prepublishOnly": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "toc": "markdown-toc -i README.md",
     "import-har": "tsx src/scripts/importHar.ts",
     "test": "tsx --test $(find src -name '*.test.ts')",
     "proto:generate": "buf generate",
@@ -46,6 +47,7 @@
     "@types/cli-progress": "^3.11.6",
     "@types/mdast": "^4.0.4",
     "@types/node": "^20.14.0",
+    "markdown-toc": "^1.2.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   },

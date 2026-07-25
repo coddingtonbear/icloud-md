@@ -27,6 +27,9 @@ All contributions that modify behavior or add features are expected to:
 - Update or add tests covering the new behavior
 - Update documentation (README and/or code comments) to describe the change or new functionality
 
+If you add, remove, or rename a README heading, run `npm run toc` to regenerate the
+table of contents between the `<!-- toc -->` / `<!-- tocstop -->` markers.
+
 Changes without corresponding tests or documentation are unlikely to be accepted.
 
 ### Verifying Your Change
