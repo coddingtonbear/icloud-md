@@ -172,6 +172,12 @@ export async function buildPushPlan(
 
   const entries: ExecutablePlanEntry[] = [];
   const dirIndex = stateDirIndex(state);
+  // Set when planning itself rewrites tracked state (the eager remote-merge
+  // path advances recordChangeTags); the plan must then be persisted even by
+  // callers that never execute anything (`status`, an all-conflict `push`) -
+  // leaving the tag stale while the base copy and file had already been
+  // rewritten is what silently stranded local edits (dev log 2026-07-29).
+  let planningMutatedState = false;
 
   const untracked: { file: string; localText: string }[] = [];
   for (const file of await listUntrackedMarkdownFiles(targetDir, state)) {
@@ -783,37 +789,13 @@ export async function buildPushPlan(
         });
         continue;
       }
-      // Real 3-way merge, same machinery `pull` already uses - the file
-      // ends up in exactly the state a manual `pull` would have left it in.
-      // This runs during planning (not gated on actually executing a push)
-      // - deliberately unchanged from `push --dry-run`'s long-standing
-      // behavior, which already merges eagerly; see the "status converges
-      // with push --dry-run" project notes.
-      const base = (await readBaseCopy(targetDir, recordName)) ?? "";
-      const outcome = mergeNoteVersions(base, localText, classified.markdownText);
-      // Re-attach the local-only frontmatter above the merged body so the
-      // envelope survives the rewrite (the merge and base copy stay body-only).
-      await writeFile(path.join(targetDir, entry.file), joinFrontmatter(frontmatter, outcome.text), "utf-8");
-
-      if (outcome.hasConflict) {
-        entries.push({
-          kind: "update",
-          file: entry.file,
-          resolution: "conflict",
-          reason: "changed remotely since the last pull - merged with conflict markers, resolve manually",
-        });
-        // Base copy deliberately NOT advanced, matching `pull`'s own
-        // discipline - the next merge needs the right common ancestor.
-      } else {
-        await writeBaseCopy(targetDir, recordName, outcome.text);
-        state.notes[recordName] = { ...entry, recordChangeTag: record.recordChangeTag ?? entry.recordChangeTag };
-        entries.push({
-          kind: "update",
-          file: entry.file,
-          resolution: "conflict",
-          reason: "merged remote changes into your local edit - re-run push to upload",
-        });
-      }
+      entries.push(
+        await planRemoteChangedMerge(targetDir, state, recordName, entry, frontmatter, localText, {
+          remoteText: classified.markdownText,
+          remoteTag: record.recordChangeTag ?? entry.recordChangeTag,
+        }),
+      );
+      planningMutatedState = true;
       continue;
     }
 
@@ -917,7 +899,61 @@ export async function buildPushPlan(
     });
   }
 
+  if (planningMutatedState) {
+    await writeCloneState(targetDir, state);
+  }
+
   return { state, entries };
+}
+
+/**
+ * The remote-changed update path: a real 3-way merge of the remote text into
+ * the local edit, using the same machinery `pull` does, run during planning
+ * so `status` and `push --dry-run` show the merged reality (see the "status
+ * converges with push --dry-run" project notes).
+ *
+ * State discipline (established by the 2026-07-29 device-in-the-loop
+ * experiments, vault dev log): the base copy must always hold the *remote*
+ * text at the recorded recordChangeTag - it is the merge ancestor for
+ * everything that follows. Writing the merged text instead made the merged
+ * file compare "clean", so the promised "re-run push to upload" found
+ * nothing to push, and the next merge then read the stranded local edit as
+ * a deliberate remote revert and silently deleted it.
+ */
+export async function planRemoteChangedMerge(
+  targetDir: string,
+  state: CloneState,
+  recordName: string,
+  entry: CloneStateNoteEntry,
+  frontmatter: string,
+  localText: string,
+  remote: { remoteText: string; remoteTag: string },
+): Promise<ExecutablePlanEntry> {
+  const base = (await readBaseCopy(targetDir, recordName)) ?? "";
+  const outcome = mergeNoteVersions(base, localText, remote.remoteText);
+  // Re-attach the local-only frontmatter above the merged body so the
+  // envelope survives the rewrite (the merge and base copy stay body-only).
+  await writeFile(path.join(targetDir, entry.file), joinFrontmatter(frontmatter, outcome.text), "utf-8");
+
+  if (outcome.hasConflict) {
+    // Base copy deliberately NOT advanced, matching `pull`'s own
+    // discipline - the next merge needs the right common ancestor.
+    return {
+      kind: "update",
+      file: entry.file,
+      resolution: "conflict",
+      reason: "changed remotely since the last pull - merged with conflict markers, resolve manually",
+    };
+  }
+
+  await writeBaseCopy(targetDir, recordName, remote.remoteText);
+  state.notes[recordName] = { ...entry, recordChangeTag: remote.remoteTag };
+  return {
+    kind: "update",
+    file: entry.file,
+    resolution: "conflict",
+    reason: "merged remote changes into your local edit - re-run push to upload",
+  };
 }
 
 /**

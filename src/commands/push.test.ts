@@ -1,12 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { writeBaseCopy } from "../notes/baseCopy.js";
+import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { writeCloneState, type CloneState } from "../notes/cloneState.js";
+import { localFileState } from "../notes/localFileState.js";
 import { NotClonedDirectoryError, UnboundAccountError } from "../errors.js";
-import { buildPushPlan, runPush } from "./push.js";
+import { buildPushPlan, planRemoteChangedMerge, runPush } from "./push.js";
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), "push-test-"));
@@ -425,6 +426,97 @@ test("buildPushPlan no longer refuses deleting a note with a tracked table attac
     await writeCloneState(dir, s);
 
     await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
+  }));
+
+// --- planRemoteChangedMerge: the remote-changed eager-merge state discipline
+// (2026-07-29 device experiments - see the vault dev log). The invariant
+// under test: the base copy always holds the REMOTE text afterward, so the
+// merged file still reads "modified" and the re-run push actually uploads.
+
+test("planRemoteChangedMerge keeps the merged file 'modified' - base copy holds the remote text, not the merged text", () =>
+  withTempDir(async (dir) => {
+    const s = state();
+    const entry = s.notes.REC1!;
+    await writeBaseCopy(dir, "REC1", "line one\n\nline two\n");
+    await writeVaultFile(dir, "Notes/Tracked.md", "line one edited locally\n\nline two\n");
+
+    const planEntry = await planRemoteChangedMerge(dir, s, "REC1", entry, "", "line one edited locally\n\nline two\n", {
+      remoteText: "line one\n\nline two edited remotely\n",
+      remoteTag: "2b",
+    });
+
+    assert.equal(planEntry.resolution, "conflict");
+    assert.match(planEntry.reason ?? "", /re-run push to upload/);
+    // The file holds the merged result of both sides...
+    assert.equal(
+      await readFile(path.join(dir, "Notes/Tracked.md"), "utf-8"),
+      "line one edited locally\n\nline two edited remotely\n",
+    );
+    // ...the base copy holds what the SERVER has (the future merge ancestor)...
+    assert.equal(await readBaseCopy(dir, "REC1"), "line one\n\nline two edited remotely\n");
+    // ...so the note still reads modified and the re-run push uploads it.
+    assert.equal(await localFileState(dir, s.notes.REC1!, "REC1"), "modified");
+    assert.equal(s.notes.REC1?.recordChangeTag, "2b");
+  }));
+
+test("planRemoteChangedMerge with a tag-only remote bump (note open on a device) still leaves the local edit uploadable", () =>
+  withTempDir(async (dir) => {
+    // The live-reproduced stranding case: iOS re-uploaded its replica state
+    // with IDENTICAL text (tag bump only) merely because the note was open.
+    // The old code wrote the merged (= local) text as base, making the edit
+    // read clean - it then never uploaded, and the next merge deleted it.
+    const s = state();
+    const entry = s.notes.REC1!;
+    await writeBaseCopy(dir, "REC1", "shared text\n");
+    await writeVaultFile(dir, "Notes/Tracked.md", "shared text plus my edit\n");
+
+    await planRemoteChangedMerge(dir, s, "REC1", entry, "", "shared text plus my edit\n", {
+      remoteText: "shared text\n",
+      remoteTag: "2b",
+    });
+
+    assert.equal(await readFile(path.join(dir, "Notes/Tracked.md"), "utf-8"), "shared text plus my edit\n");
+    assert.equal(await readBaseCopy(dir, "REC1"), "shared text\n");
+    assert.equal(await localFileState(dir, s.notes.REC1!, "REC1"), "modified");
+    assert.equal(s.notes.REC1?.recordChangeTag, "2b");
+  }));
+
+test("planRemoteChangedMerge preserves local-only frontmatter above the merged body", () =>
+  withTempDir(async (dir) => {
+    const s = state();
+    const entry = s.notes.REC1!;
+    await writeBaseCopy(dir, "REC1", "body\n");
+    await writeVaultFile(dir, "Notes/Tracked.md", "---\nkeep: me\n---\n\nbody edited\n");
+
+    await planRemoteChangedMerge(dir, s, "REC1", entry, "---\nkeep: me\n---\n\n", "body edited\n", {
+      remoteText: "body\n",
+      remoteTag: "2b",
+    });
+
+    const written = await readFile(path.join(dir, "Notes/Tracked.md"), "utf-8");
+    assert.match(written, /^---\nkeep: me\n---\n/);
+    assert.match(written, /body edited\n$/);
+  }));
+
+test("planRemoteChangedMerge on a genuine conflict writes markers and keeps the base copy as the merge ancestor", () =>
+  withTempDir(async (dir) => {
+    const s = state();
+    const entry = s.notes.REC1!;
+    await writeBaseCopy(dir, "REC1", "shared line\n");
+    await writeVaultFile(dir, "Notes/Tracked.md", "shared line edited locally\n");
+
+    const planEntry = await planRemoteChangedMerge(dir, s, "REC1", entry, "", "shared line edited locally\n", {
+      remoteText: "shared line edited remotely\n",
+      remoteTag: "2b",
+    });
+
+    assert.equal(planEntry.resolution, "conflict");
+    assert.match(planEntry.reason ?? "", /conflict markers/);
+    const written = await readFile(path.join(dir, "Notes/Tracked.md"), "utf-8");
+    assert.match(written, /<<<<<<< local/);
+    assert.match(written, />>>>>>> remote/);
+    // The ancestor is untouched: the next merge needs the right common point.
+    assert.equal(await readBaseCopy(dir, "REC1"), "shared line\n");
   }));
 
 test("runPush returns no entries and a zero pushed count when the plan is empty", () =>
