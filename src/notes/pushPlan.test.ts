@@ -26,9 +26,10 @@ test("renderPlan lists one line per ready entry, plus a create/update/delete sum
     { kind: "delete", file: "Gone.md", resolution: "ready" },
   ];
   assert.deepEqual(renderPlan(entries), [
-    "new file: New.md",
-    "modified: Edited.md",
-    "deleted:  Gone.md",
+    "",
+    "        new file: New.md",
+    "        modified: Edited.md",
+    "        deleted:  Gone.md",
     "",
     "1 to create, 1 changed, 1 to delete.",
   ]);
@@ -40,10 +41,11 @@ test("renderPlan shows a refused/conflict entry's label plus an indented reason 
     { kind: "delete", file: "Stale.md", resolution: "conflict", reason: "changed remotely since the last pull - run \"pull\" first" },
   ];
   assert.deepEqual(renderPlan(entries), [
-    "modified: Refused.md",
-    "          ! this note has an attachment",
-    "deleted:  Stale.md",
-    '          ! changed remotely since the last pull - run "pull" first',
+    "",
+    "        modified: Refused.md",
+    "                  ! this note has an attachment",
+    "        deleted:  Stale.md",
+    '                  ! changed remotely since the last pull - run "pull" first',
     "",
     "0 to create, 0 changed, 0 to delete. (1 conflict(s), 1 refused)",
   ]);
@@ -54,15 +56,15 @@ test("renderPlan omits noop entries from the listing but keeps the ready/refused
     { kind: "update", file: "Clean.md", resolution: "noop" },
     { kind: "update", file: "Edited.md", resolution: "ready" },
   ];
-  assert.deepEqual(renderPlan(entries), ["modified: Edited.md", "", "0 to create, 1 changed, 0 to delete."]);
+  assert.deepEqual(renderPlan(entries), ["", "        modified: Edited.md", "", "0 to create, 1 changed, 0 to delete."]);
 });
 
 test("renderPlan colors only the status label, leaving the filename in the terminal's own color", () => {
   const originalLevel = chalk.level;
   chalk.level = 1;
   try {
-    const [line] = renderPlan([{ kind: "create", file: "New.md", resolution: "ready" }]);
-    assert.match(line ?? "", /\x1b\[32mnew file:\x1b\[39m New\.md$/);
+    const lines = renderPlan([{ kind: "create", file: "New.md", resolution: "ready" }]);
+    assert.match(lines[1] ?? "", /\x1b\[32mnew file:\x1b\[39m New\.md$/);
   } finally {
     chalk.level = originalLevel;
   }
@@ -78,8 +80,8 @@ test("renderPlan sets refusal reasons black-on-red and conflict reasons magenta"
     ]);
     // Black text on a red background, with the indent left uncolored so the
     // background starts at the text.
-    assert.match(lines[1] ?? "", /^ {10}\x1b\[41m\x1b\[30m! this note has an attachment\x1b\[39m\x1b\[49m$/);
-    assert.match(lines[3] ?? "", /^ {10}\x1b\[35m! changed remotely\x1b\[39m$/);
+    assert.match(lines[2] ?? "", /^ {18}\x1b\[41m\x1b\[30m! this note has an attachment\x1b\[39m\x1b\[49m$/);
+    assert.match(lines[4] ?? "", /^ {18}\x1b\[35m! changed remotely\x1b\[39m$/);
   } finally {
     chalk.level = originalLevel;
   }
@@ -155,6 +157,6 @@ test("renderPlan re-expresses paths through formatPath, including inside reason 
     },
   ];
   const lines = renderPlan(entries, (file) => `../${file}`);
-  assert.match(lines[0] ?? "", /modified: \.\.\/Recipes\/Pie\.md/);
-  assert.match(lines[1] ?? "", /restore \.\.\/Recipes\/Pie\.md/);
+  assert.match(lines[1] ?? "", /modified: \.\.\/Recipes\/Pie\.md/);
+  assert.match(lines[2] ?? "", /restore \.\.\/Recipes\/Pie\.md/);
 });

@@ -54,10 +54,11 @@ const LABEL_WIDTH = Math.max(...Object.values(LABELS).map(([label]) => label.len
 
 export interface RenderPlanOptions {
   /** Dresses the listing as the status screen: a "Changes not yet pushed
-   * to iCloud:" heading with next-step hints above the change list, the
-   * list indented beneath it. Used by the previews (`status` and `push
-   * --dry-run`); a real `push` keeps the bare listing, since by then the
-   * entries are outcomes rather than things "not yet pushed". */
+   * to iCloud:" heading with next-step hints above the change list. Used
+   * by the previews (`status` and `push --dry-run`); a real `push` skips
+   * the heading - its own "Pushed N note(s) from ..." line sits above the
+   * listing instead - but keeps the same indentation and surrounding blank
+   * lines, so all the changelist screens share one shape. */
   preview?: boolean;
   /** How many tracked notes the plan left untouched (see
    * `countUnchangedNotes`) - enables the trailing "N other note(s) match
@@ -97,7 +98,6 @@ export function renderPlan(
     ];
   }
 
-  const indent = options.preview === true ? LISTING_INDENT : "";
   const lines: string[] = [];
   if (options.preview === true) {
     lines.push(
@@ -106,6 +106,8 @@ export function renderPlan(
       QUIET('  (use "icloud-md restore <file>" to discard a local edit)'),
       "",
     );
+  } else {
+    lines.push("");
   }
   let toCreate = 0;
   let toUpdate = 0;
@@ -120,10 +122,10 @@ export function renderPlan(
       entry.kind === "move"
         ? `${formatPath(entry.previousFile ?? entry.file)} -> ${formatPath(entry.file)}`
         : formatPath(entry.file);
-    lines.push(indent + labelledLine(label, color, LABEL_WIDTH, subject));
+    lines.push(LISTING_INDENT + labelledLine(label, color, LABEL_WIDTH, subject));
     if (entry.resolution === "refused" || entry.resolution === "conflict") {
       const reason = (entry.reason ?? "refused").split(entry.file).join(formatPath(entry.file));
-      lines.push(indent + remarkLine(entry.resolution === "refused" ? UNSYNCABLE : NEEDS_ATTENTION, LABEL_WIDTH, `! ${reason}`));
+      lines.push(LISTING_INDENT + remarkLine(entry.resolution === "refused" ? UNSYNCABLE : NEEDS_ATTENTION, LABEL_WIDTH, `! ${reason}`));
       if (entry.resolution === "refused") {
         refused += 1;
       } else {
