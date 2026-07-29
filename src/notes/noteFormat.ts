@@ -320,6 +320,36 @@ function mergeAdjacentEqualSpans(spans: readonly InlineSpan[]): InlineSpan[] {
   return out;
 }
 
+/**
+ * Trailing horizontal whitespace is invisible in Apple Notes and only
+ * representable in markdown as `&#x20;` character references, so it is not
+ * part of the projection (decided 2026-07-29): non-monospaced paragraphs
+ * render, parse, and compare with trailing spaces/tabs removed, and a push
+ * whose note carries them actively deletes them from the remote text.
+ * Monospaced paragraphs keep theirs - fenced code preserves trailing
+ * whitespace natively. Spans shrink to cover exactly the trimmed text.
+ */
+export function trimTrailingWhitespace(paragraph: FormatParagraph): FormatParagraph {
+  if (paragraph.kind === "monospaced") {
+    return paragraph;
+  }
+  const text = paragraph.text.replace(/[ \t]+$/, "");
+  if (text.length === paragraph.text.length) {
+    return paragraph;
+  }
+  const spans: InlineSpan[] = [];
+  let remaining = text.length;
+  for (const span of paragraph.spans) {
+    if (remaining === 0) {
+      break;
+    }
+    const length = Math.min(span.length, remaining);
+    spans.push({ ...span, length });
+    remaining -= length;
+  }
+  return { ...paragraph, text, spans };
+}
+
 const LIST_KINDS: ReadonlySet<ParagraphKind> = new Set(["bulletList", "dashList", "numberedList", "todoList"]);
 
 export function isListKind(kind: ParagraphKind): boolean {
@@ -344,11 +374,13 @@ function effectiveStartNumber(paragraph: FormatParagraph): number {
  * number, since markdown re-derives every later item's number by counting.
  */
 export function paragraphProjectionsEqual(
-  a: FormatParagraph,
-  b: FormatParagraph,
+  rawA: FormatParagraph,
+  rawB: FormatParagraph,
   previousA: FormatParagraph | undefined,
   previousB: FormatParagraph | undefined,
 ): boolean {
+  const a = trimTrailingWhitespace(rawA);
+  const b = trimTrailingWhitespace(rawB);
   if (projectedKind(a.kind) !== projectedKind(b.kind) || a.text !== b.text) {
     return false;
   }

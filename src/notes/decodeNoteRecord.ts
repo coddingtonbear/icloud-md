@@ -1,7 +1,7 @@
 import type { CloudKitFieldValue, CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { TRASH_FOLDER_RECORD_NAME } from "./encodeNoteRecord.js";
 import { decodeNoteEmbedSlots, type AttachmentReference, type EmbedSlot } from "./noteAttachments.js";
-import { decodeNoteFormat, formatsRoundTripEqual, type FormatParagraph } from "./noteFormat.js";
+import { decodeNoteFormat, formatsRoundTripEqual, trimTrailingWhitespace, type FormatParagraph } from "./noteFormat.js";
 import { decodeNoteString } from "./noteText.js";
 import { parseNoteMarkdown } from "./parseNoteMarkdown.js";
 import { renderNoteMarkdown } from "./renderNoteMarkdown.js";
@@ -105,7 +105,12 @@ export function classifyNoteRecord(record: CloudKitRecord): NoteDecodeResult {
   }
   const rendered = renderNoteMarkdown(format.paragraphs);
   const reparsed = parseNoteMarkdown(rendered);
-  if (reparsed.status !== "ok" || reparsed.text !== bodyText || !formatsRoundTripEqual(format.paragraphs, reparsed.paragraphs)) {
+  // The reparse must reproduce the *projected* text: trailing whitespace is
+  // outside the projection (`trimTrailingWhitespace`), so the raw bodyText
+  // may carry trailing spaces the rendered file deliberately drops - a push
+  // then deletes them remotely rather than the note going read-only here.
+  const projectedText = format.paragraphs.map((paragraph) => trimTrailingWhitespace(paragraph).text).join("\n");
+  if (reparsed.status !== "ok" || reparsed.text !== projectedText || !formatsRoundTripEqual(format.paragraphs, reparsed.paragraphs)) {
     return {
       ...base,
       markdownText: bodyText,

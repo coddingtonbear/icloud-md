@@ -33,6 +33,7 @@ import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import remarkStringify from "remark-stringify";
 import { unified } from "unified";
+import { textPhrasing } from "./renderNoteMarkdown.js";
 
 /** `tablePipeAlign: false` is the closest available match to the previous
  * renderer's format: no column-width alignment padding. */
@@ -78,7 +79,7 @@ function cellChildren(text: string): PhrasingContent[] {
       children.push({ type: "html", value: "<br>" });
     }
     if (part.length > 0) {
-      children.push({ type: "text", value: part });
+      children.push(...textPhrasing(part));
     }
   });
   return children;

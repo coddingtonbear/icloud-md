@@ -37,7 +37,13 @@ import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import remarkStringify from "remark-stringify";
 import { unified } from "unified";
-import { normalizeSpans, type FormatParagraph, type InlineSpan, type ParagraphKind } from "./noteFormat.js";
+import {
+  normalizeSpans,
+  trimTrailingWhitespace,
+  type FormatParagraph,
+  type InlineSpan,
+  type ParagraphKind,
+} from "./noteFormat.js";
 
 /** Same plugin set as the parser and `markdownTable.ts`, so escaping
  * decisions and construct recognition always agree. */
@@ -49,7 +55,10 @@ const HEADING_DEPTHS: Partial<Record<ParagraphKind, 1 | 2 | 3>> = {
   subheading: 3,
 };
 
-export function renderNoteMarkdown(paragraphs: readonly FormatParagraph[]): string {
+export function renderNoteMarkdown(rawParagraphs: readonly FormatParagraph[]): string {
+  // Trailing whitespace is outside the projection (`trimTrailingWhitespace`);
+  // rendering it would need `&#x20;` references to survive reparsing.
+  const paragraphs = rawParagraphs.map(trimTrailingWhitespace);
   const lines: string[] = [];
   let i = 0;
   while (i < paragraphs.length) {
@@ -203,6 +212,90 @@ function buildListNodes(paragraphs: readonly FormatParagraph[]): List[] {
 interface StyledText {
   text: string;
   span: InlineSpan;
+  /** UTF-16 offset of this piece within its paragraph's text. */
+  start: number;
+}
+
+/**
+ * Bare URLs in the note's plain text would be escaped by remark-stringify
+ * (`https\://...` - it must keep reparsing from manufacturing a GFM autolink
+ * literal), which reads as mangling in the local file. URL tokens made only
+ * of characters that can't open an inline construct or decode as a character
+ * reference are safe to emit as raw `html` nodes instead (the same
+ * escape-dodging device as `<u>` and the empty-todo checkbox): reparsing
+ * turns them into autolink literals, which the parser collapses back to
+ * plain text (`normalizeSpans`), so the round-trip gate stays green either
+ * way. Anything outside that character set - `*` `_` `~` `` ` `` brackets,
+ * backslashes, entity-shaped `&...;` runs - falls back to escaped text.
+ *
+ * Boundaries are checked against the *whole line*, not the styled piece:
+ * a raw token must be preceded by start/whitespace/`(` and followed by
+ * whitespace or end of line, because an autolink literal swallows any
+ * following non-whitespace on reparse - including a backslash escape the
+ * adjacent text node needed (`https://x` + `\_B` would reparse with a
+ * literal backslash inside the URL).
+ */
+const RAW_URL_PATTERN = /https?:\/\/[A-Za-z0-9./?=&%#+:,;@!$'()-]+/g;
+const ENTITY_SHAPED = /&(?:#|[A-Za-z][A-Za-z0-9]*;)/;
+
+interface RawUrlRange {
+  start: number;
+  end: number;
+}
+
+function findRawUrlRanges(text: string): RawUrlRange[] {
+  const out: RawUrlRange[] = [];
+  for (const match of text.matchAll(RAW_URL_PATTERN)) {
+    const end = match.index + match[0].length;
+    const before = match.index === 0 ? "" : text[match.index - 1]!;
+    const after = end >= text.length ? "" : text[end]!;
+    if (before !== "" && before !== "(" && !/\s/.test(before)) {
+      continue;
+    }
+    if (after !== "" && !/\s/.test(after)) {
+      continue;
+    }
+    if (ENTITY_SHAPED.test(match[0])) {
+      continue;
+    }
+    out.push({ start: match.index, end });
+  }
+  return out;
+}
+
+/** Splits one piece of plain text (starting at `absoluteStart` within its
+ * line) into text nodes and raw-html URL nodes, honoring only the ranges
+ * that fall entirely inside this piece - a range split across a style
+ * boundary renders escaped instead. */
+function textPieces(value: string, absoluteStart: number, rawRanges: readonly RawUrlRange[]): PhrasingContent[] {
+  const out: PhrasingContent[] = [];
+  let at = 0;
+  for (const range of rawRanges) {
+    const start = range.start - absoluteStart;
+    const end = range.end - absoluteStart;
+    if (start < at || end > value.length) {
+      continue;
+    }
+    if (start > at) {
+      out.push({ type: "text", value: value.slice(at, start) });
+    }
+    out.push({ type: "html", value: value.slice(start, end) });
+    at = end;
+  }
+  if (at === 0) {
+    return [{ type: "text", value }];
+  }
+  if (at < value.length) {
+    out.push({ type: "text", value: value.slice(at) });
+  }
+  return out;
+}
+
+/** URL-aware plain-text phrasing for single-line contexts where end-of-string
+ * is a safe boundary (table cells: what follows is `<br>`, `|` notation, or
+ * nothing - none of which an autolink literal can swallow). */
+export function textPhrasing(value: string): PhrasingContent[] {
+  return textPieces(value, 0, findRawUrlRanges(value));
 }
 
 function phrasingFromParagraph(paragraph: FormatParagraph): PhrasingContent[] {
@@ -211,11 +304,11 @@ function phrasingFromParagraph(paragraph: FormatParagraph): PhrasingContent[] {
   let at = 0;
   for (const span of spans) {
     if (span.length > 0) {
-      pieces.push({ text: paragraph.text.slice(at, at + span.length), span });
+      pieces.push({ text: paragraph.text.slice(at, at + span.length), span, start: at });
     }
     at += span.length;
   }
-  return buildPhrasing(pieces, ["link", "bold", "italic", "strikethrough", "underline"]);
+  return buildPhrasing(pieces, ["link", "bold", "italic", "strikethrough", "underline"], findRawUrlRanges(paragraph.text));
 }
 
 type InlineDimension = "link" | "bold" | "italic" | "strikethrough" | "underline";
@@ -245,7 +338,11 @@ function dimensionValue(span: InlineSpan, dimension: InlineDimension): string | 
  * becomes a raw `<u>`/`</u>` html pair around its group (fidelity mapping,
  * decided 2026-07-15).
  */
-function buildPhrasing(pieces: readonly StyledText[], dimensions: readonly InlineDimension[]): PhrasingContent[] {
+function buildPhrasing(
+  pieces: readonly StyledText[],
+  dimensions: readonly InlineDimension[],
+  rawRanges: readonly RawUrlRange[],
+): PhrasingContent[] {
   let dimension: InlineDimension | undefined;
   let fewestGroups = Number.POSITIVE_INFINITY;
   for (const candidate of dimensions) {
@@ -268,7 +365,7 @@ function buildPhrasing(pieces: readonly StyledText[], dimensions: readonly Inlin
     }
   }
   if (dimension === undefined) {
-    return pieces.map((piece): PhrasingContent => ({ type: "text", value: piece.text }));
+    return pieces.flatMap((piece) => textPieces(piece.text, piece.start, rawRanges));
   }
   const rest = dimensions.filter((candidate) => candidate !== dimension);
   const out: PhrasingContent[] = [];
@@ -279,7 +376,7 @@ function buildPhrasing(pieces: readonly StyledText[], dimensions: readonly Inlin
     while (end < pieces.length && dimensionValue(pieces[end]!.span, dimension) === value) {
       end += 1;
     }
-    const inner = buildPhrasing(pieces.slice(i, end), rest);
+    const inner = buildPhrasing(pieces.slice(i, end), rest, rawRanges);
     if (value === false || value === "") {
       out.push(...inner);
     } else if (dimension === "link") {

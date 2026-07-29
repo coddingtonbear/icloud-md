@@ -194,3 +194,10 @@ test("findMarkdownTableBlocks reads old-format tables (--- separators) identical
     ["", ""],
   ]);
 });
+
+test("renderMarkdownTable leaves safe bare URLs unescaped in cells", () => {
+  const rendered = renderMarkdownTable([["link", "https://maps.app.goo.gl/abc123"]]);
+  assert.match(rendered, /https:\/\/maps\.app\.goo\.gl\/abc123/);
+  assert.doesNotMatch(rendered, /https\\:/);
+  assert.deepEqual(parseMarkdownTable(rendered), [["link", "https://maps.app.goo.gl/abc123"]]);
+});

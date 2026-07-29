@@ -155,3 +155,16 @@ test("a note in the Trash folder is treated as deleted", () => {
   });
   assert.deepEqual(classifyNoteRecord(record), { status: "deleted" });
 });
+
+test("a note with trailing spaces stays publishable; the rendering trims them", () => {
+  // Regression: the round-trip gate once compared the reparse against the
+  // raw bodyText, so any device-typed trailing space made the whole note
+  // read-only the moment trimming entered the projection (2026-07-29).
+  const record = makeRecord({ TextDataEncrypted: encodeTextField("Title \nFried Egg \nplain") });
+  const result = classifyNoteRecord(record);
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.equal(result.publishable, true, result.status === "ok" ? result.unpublishableReason : undefined);
+  assert.equal(result.bodyText, "Title \nFried Egg \nplain");
+  assert.equal(result.markdownText, "Title\nFried Egg\nplain");
+});

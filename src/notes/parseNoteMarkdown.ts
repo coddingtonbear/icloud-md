@@ -43,6 +43,7 @@ import { unified } from "unified";
 import {
   inlineStylesEqual,
   PLAIN_STYLE,
+  trimTrailingWhitespace,
   type FormatParagraph,
   type InlineSpan,
   type InlineStyle,
@@ -68,7 +69,10 @@ export function parseNoteMarkdown(markdown: string): ParseNoteMarkdownResult {
     for (const child of root.children) {
       parser.walkBlock(child, 0);
     }
-    paragraphs = parser.sweep();
+    // Trailing whitespace (typed on-device, or `&#x20;` references in older
+    // files) is outside the projection; trimming here means a push deletes
+    // it from the remote text rather than refusing format verification.
+    paragraphs = parser.sweep().map(trimTrailingWhitespace);
   } catch (cause) {
     if (cause instanceof Unsupported) {
       return { status: "unsupported", reason: cause.message };

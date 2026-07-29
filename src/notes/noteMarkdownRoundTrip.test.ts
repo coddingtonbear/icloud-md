@@ -200,3 +200,61 @@ test("parser accepts common hand-written variants the renderer never emits", () 
     );
   }
 });
+
+test("trailing whitespace is trimmed out of the projection instead of rendering as &#x20;", () => {
+  // A device-typed trailing space (with bold covering it, like the real
+  // "Outfits " heading) renders trimmed, with the span shrunk to match.
+  const bold: InlineSpan = { ...PLAIN_STYLE, bold: true, length: 8 };
+  const heading = renderNoteMarkdown([p("title", "Outfits ", { spans: [bold] })]);
+  assert.equal(heading, "# **Outfits**");
+
+  assert.equal(renderNoteMarkdown([p("body", "Fried Egg ")]), "Fried Egg");
+  assert.equal(renderNoteMarkdown([p("bulletList", "item\t ")]), "- item");
+
+  // The projection comparison agrees: trailing whitespace is not a difference.
+  assert.equal(formatsRoundTripEqual([p("body", "Fried Egg ")], [p("body", "Fried Egg")]), true);
+
+  // Monospaced paragraphs keep trailing whitespace - fences preserve it.
+  const mono = renderNoteMarkdown([p("monospaced", "code  ")]);
+  assert.equal(mono, "```\ncode  \n```");
+  const monoBack = parseNoteMarkdown(mono);
+  assert.equal(monoBack.status, "ok");
+  if (monoBack.status === "ok") assert.equal(monoBack.paragraphs[0]?.text, "code  ");
+});
+
+test("parser trims trailing whitespace, including &#x20; references in older files", () => {
+  const parsed = parseNoteMarkdown("# **Outfits**&#x20;\nplain trailing \nFried Egg&#x20;");
+  assert.equal(parsed.status, "ok");
+  if (parsed.status !== "ok") return;
+  assert.deepEqual(
+    parsed.paragraphs.map((q) => [q.kind, q.text]),
+    [
+      ["title", "Outfits"],
+      ["body", "plain trailing"],
+      ["body", "Fried Egg"],
+    ],
+  );
+  assert.equal(parsed.text, "Outfits\nplain trailing\nFried Egg");
+});
+
+test("bare URLs render unescaped and round-trip as plain text", () => {
+  const rendered = assertRoundTrips([p("body", "Possibly Montrose Beach?: https://maps.app.goo.gl/cXebu5pyuyk9sNsG6")]);
+  assert.equal(rendered, "Possibly Montrose Beach?: https://maps.app.goo.gl/cXebu5pyuyk9sNsG6");
+
+  // Whole-line URL, URL in a bullet, URL in a heading, parenthesized URL.
+  assert.equal(assertRoundTrips([p("body", "https://example.com/a?b=1&c=2")]), "https://example.com/a?b=1&c=2");
+  assert.equal(assertRoundTrips([p("bulletList", "see https://example.com/x")]), "- see https://example.com/x");
+  assert.equal(assertRoundTrips([p("heading", "See https://example.com")]), "## See https://example.com");
+  assert.equal(assertRoundTrips([p("body", "(https://example.com)")]), "(https://example.com)");
+});
+
+test("URLs that could open inline constructs fall back to escaped text but still round-trip", () => {
+  // `_` is outside the raw-URL character set; the tail renders escaped.
+  assertRoundTrips([p("body", "https://en.wikipedia.org/wiki/A_B")]);
+  // Entity-shaped runs must not be emitted raw (they would decode on reparse).
+  assertRoundTrips([p("body", "https://example.com/?a&amp;b")]);
+  // Mid-word URLs aren't autolink candidates; they stay escaped text.
+  assertRoundTrips([p("body", "foohttps://example.com")]);
+  // Emphasis-active characters in the URL.
+  assertRoundTrips([p("body", "https://example.com/*star*")]);
+});
