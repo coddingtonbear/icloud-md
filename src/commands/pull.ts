@@ -22,7 +22,7 @@ import { noteFileName, uniqueFileName } from "../notes/filename.js";
 import { joinFrontmatter, splitFrontmatter } from "../notes/frontmatter.js";
 import { buildVaultLayout, noteDirOf, placeNote, previousLayoutDirs, type SharedZoneRecords } from "../notes/folderLayout.js";
 import { reconcileNotePlacements, removeStaleDirs } from "../notes/folderReconcile.js";
-import { mergeNoteVersions } from "../notes/mergeConflict.js";
+import { hasConflictMarkers, mergeNoteVersions } from "../notes/mergeConflict.js";
 import { readBaseCopy, removeBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { localFileState } from "../notes/localFileState.js";
 import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
@@ -319,6 +319,15 @@ export async function runPull(
 
         // local === "modified": real 3-way merge against the base copy.
         const merged = await mergeRemoteChangeIntoLocalFile(targetDir, record.recordName, existing.file, bodyText);
+        if (merged.status === "unresolvedMarkers") {
+          // Nothing advanced - not the file, not the base copy, not the tag:
+          // the remote change stays pending for `push` (which fetches live
+          // records) to reconcile once the markers are resolved.
+          summary.conflicts.push(
+            `${existing.file}: still contains diff3 conflict markers - resolve them, then run "push" to reconcile`,
+          );
+          continue;
+        }
         notes[record.recordName] = {
           ...existing,
           recordChangeTag: record.recordChangeTag ?? existing.recordChangeTag,
@@ -327,7 +336,7 @@ export async function runPull(
           folderRecordName: placement.folderRecordName,
         };
 
-        if (merged.hasConflict) {
+        if (merged.status === "conflict") {
           summary.conflicts.push(`${existing.file}: merged with conflict markers - resolve manually`);
         } else {
           summary.merged += 1;
@@ -570,16 +579,24 @@ export async function mergeRemoteChangeIntoLocalFile(
   recordName: string,
   file: string,
   remoteBodyText: string,
-): Promise<{ hasConflict: boolean }> {
+): Promise<{ status: "merged" | "conflict" | "unresolvedMarkers" }> {
   const base = (await readBaseCopy(targetDir, recordName)) ?? "";
   const { frontmatter, body: localContent } = splitFrontmatter(await readFile(path.join(targetDir, file), "utf-8"));
+  if (hasConflictMarkers(localContent)) {
+    // Diff3 over text that already carries conflict markers nests markers
+    // into soup (reproduced live, dev log 2026-07-29). Leave the file, the
+    // base copy, and - via the caller - the tracked tag alone: the remote
+    // change stays pending, and `push` (which always fetches the live
+    // record) reconciles it after the user resolves the markers.
+    return { status: "unresolvedMarkers" };
+  }
   const outcome = mergeNoteVersions(base, localContent, remoteBodyText);
 
   await writeFile(path.join(targetDir, file), joinFrontmatter(frontmatter, outcome.text), "utf-8");
   if (!outcome.hasConflict) {
     await writeBaseCopy(targetDir, recordName, remoteBodyText);
   }
-  return { hasConflict: outcome.hasConflict };
+  return { status: outcome.hasConflict ? "conflict" : "merged" };
 }
 
 async function safeUnlink(filePath: string): Promise<void> {

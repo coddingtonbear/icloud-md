@@ -37,7 +37,7 @@ test("mergeRemoteChangeIntoLocalFile keeps the local half of a clean merge uploa
 
     const merged = await mergeRemoteChangeIntoLocalFile(dir, "REC1", "Notes/Note.md", "line one\n\nline two edited remotely\n");
 
-    assert.equal(merged.hasConflict, false);
+    assert.equal(merged.status, "merged");
     // The file holds both sides of the merge...
     assert.equal(
       await readFile(path.join(dir, "Notes/Note.md"), "utf-8"),
@@ -58,7 +58,7 @@ test("mergeRemoteChangeIntoLocalFile with a content-identical remote (tag-only c
 
     const merged = await mergeRemoteChangeIntoLocalFile(dir, "REC1", "Notes/Note.md", "shared text\n");
 
-    assert.equal(merged.hasConflict, false);
+    assert.equal(merged.status, "merged");
     assert.equal(await readFile(path.join(dir, "Notes/Note.md"), "utf-8"), "shared text plus my edit\n");
     assert.equal(await readBaseCopy(dir, "REC1"), "shared text\n");
     assert.equal(await localFileState(dir, entryFor("Notes/Note.md"), "REC1"), "modified");
@@ -83,9 +83,28 @@ test("mergeRemoteChangeIntoLocalFile on a genuine conflict writes markers and ke
 
     const merged = await mergeRemoteChangeIntoLocalFile(dir, "REC1", "Notes/Note.md", "shared line edited remotely\n");
 
-    assert.equal(merged.hasConflict, true);
+    assert.equal(merged.status, "conflict");
     const written = await readFile(path.join(dir, "Notes/Note.md"), "utf-8");
     assert.match(written, /<<<<<<< local/);
     assert.match(written, />>>>>>> remote/);
+    assert.equal(await readBaseCopy(dir, "REC1"), "shared line\n");
+  }));
+
+test("mergeRemoteChangeIntoLocalFile refuses to merge a file that still carries conflict markers - no nested marker soup", () =>
+  withTempDir(async (dir) => {
+    // Reproduced live (dev log 2026-07-29): pulling while the file held
+    // unresolved markers ran diff3 over the marker text itself, nesting a
+    // second set of markers around the first. The file, the base copy, and
+    // (via the caller skipping its bookkeeping) the tracked tag must all
+    // stay untouched.
+    const conflicted =
+      "<<<<<<< local\nshared line edited locally\n||||||| base\nshared line\n=======\nshared line edited remotely\n>>>>>>> remote\n";
+    await writeBaseCopy(dir, "REC1", "shared line\n");
+    await writeVaultFile(dir, "Notes/Note.md", conflicted);
+
+    const merged = await mergeRemoteChangeIntoLocalFile(dir, "REC1", "Notes/Note.md", "shared line edited remotely again\n");
+
+    assert.equal(merged.status, "unresolvedMarkers");
+    assert.equal(await readFile(path.join(dir, "Notes/Note.md"), "utf-8"), conflicted);
     assert.equal(await readBaseCopy(dir, "REC1"), "shared line\n");
   }));

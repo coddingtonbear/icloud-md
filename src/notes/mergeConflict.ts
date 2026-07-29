@@ -25,3 +25,11 @@ export function mergeNoteVersions(base: string, local: string, remote: string): 
 function splitLines(text: string): string[] {
   return text.split("\n");
 }
+
+/** Matches the diff3 markers `mergeNoteVersions` writes (and git's own, same
+ * format). Text carrying these must never be merged again (diff3 over marker
+ * text nests markers into soup) nor uploaded - both `push` and `pull` gate
+ * on this before touching a modified file. */
+export function hasConflictMarkers(text: string): boolean {
+  return /^(<{7}( .*)?|\|{7}( .*)?|={7}|>{7}( .*)?)$/m.test(text);
+}

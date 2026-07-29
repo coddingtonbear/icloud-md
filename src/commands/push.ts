@@ -21,7 +21,7 @@ import { buildNoteCreateFields, buildNoteMoveFields, buildNoteTrashFields, build
 import { noteDirOf, stateDirIndex } from "../notes/folderLayout.js";
 import { planEmbedRepresentations } from "../notes/embedPushEdit.js";
 import { isEnoent } from "../fsUtil.js";
-import { mergeNoteVersions } from "../notes/mergeConflict.js";
+import { hasConflictMarkers, mergeNoteVersions } from "../notes/mergeConflict.js";
 import { decodeNoteEmbedSlots, hasAttachmentReference, OBJECT_REPLACEMENT_CHARACTER, type EmbedSlot } from "../notes/noteAttachments.js";
 import { hasEmbedMarker, hasUnknownContentMarker } from "../notes/unknownContent.js";
 import { localFileState } from "../notes/localFileState.js";
@@ -1394,7 +1394,3 @@ function embedSlotsEqual(a: readonly EmbedSlot[], b: readonly EmbedSlot[]): bool
   });
 }
 
-/** Matches the diff3 markers `pull` writes (and git's own, same format). */
-function hasConflictMarkers(text: string): boolean {
-  return /^(<{7}( .*)?|\|{7}( .*)?|={7}|>{7}( .*)?)$/m.test(text);
-}
