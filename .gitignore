@@ -16,3 +16,8 @@ dist/
 # Cloned test vaults (real note content) - never commit these. Anchored to
 # the repo root so it doesn't also swallow src/notes/.
 /notes/
+
+# iOS device-automation harness (see harness/HARNESS.md): deliberately kept
+# out of the public repo - it carries the device UDID, plus real note
+# content and screenshots under forensics/ and shots/.
+/harness/
