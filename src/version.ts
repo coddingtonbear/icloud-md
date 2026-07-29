@@ -13,7 +13,7 @@ export interface EnvironmentInfo {
  * reports this install's own version regardless of where the CLI is run
  * from - works identically from `src/version.ts` (via tsx) and the compiled
  * `dist/version.js`, since both sit one directory below the package root. */
-function readOwnPackageVersion(): string {
+export function readOwnPackageVersion(): string {
   const packageJsonPath = fileURLToPath(new URL("../package.json", import.meta.url));
   const raw = readFileSync(packageJsonPath, "utf-8");
   const parsed: unknown = JSON.parse(raw);

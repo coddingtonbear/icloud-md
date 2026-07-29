@@ -28,6 +28,7 @@ import { recordLastError } from "./lastError.js";
 import { readCloneState } from "./notes/cloneState.js";
 import { renderPlan } from "./notes/pushPlan.js";
 import { displayPath, findVaultRoot } from "./vaultRoot.js";
+import { readOwnPackageVersion } from "./version.js";
 import type { SyncProgress } from "./progress.js";
 
 /**
@@ -249,6 +250,13 @@ const program = new Command();
 program
   .name("icloud-md")
   .description("Your iCloud notes as real Markdown files, on any OS, bidirectionally synced with a git-flavored CLI")
+  // `--version` honors the `--json` contract (pure JSON on stdout). It has
+  // to use the argv pre-scan: commander fires the version action the moment
+  // it encounters the flag, so a `--json` appearing later in argv wouldn't
+  // have been parsed yet.
+  .version(
+    preParsedJson ? JSON.stringify({ version: readOwnPackageVersion() }, null, 2) : readOwnPackageVersion(),
+  )
   .option("--json", "emit machine-readable JSON on stdout instead of human-readable text")
   .exitOverride();
 
