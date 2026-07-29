@@ -67,6 +67,7 @@
  */
 
 import { clone, create, fromBinary, isFieldSet, toBinary } from "@bufbuild/protobuf";
+import { diffIndices } from "node-diff3";
 import {
   AttributeRunSchema,
   CharIDSchema,
@@ -188,11 +189,20 @@ export interface ApplyTextEditOptions {
 }
 
 /**
- * Applies a plain-text edit to the document in place, the way the captured
- * web client does: the old and new text are compared (common prefix/suffix),
- * the removed visible range is tombstoned - never physically deleted, other
- * replicas need it to merge - and the inserted text becomes a new run (or
- * extends our own trailing run) with clocks from our replica's counter.
+ * Applies a plain-text edit to the document in place: the old and new text
+ * are diffed into per-hunk splices (`computeSplices`), each removed visible
+ * range is tombstoned - never physically deleted, other replicas need it to
+ * merge - and each inserted piece becomes a new run (or extends our own
+ * trailing run) with clocks from our replica's counter.
+ *
+ * Per-hunk rather than one spanning splice because the untouched text
+ * BETWEEN two edits must keep its original runs and authorship: the
+ * 2026-07-29 fusion investigation (vault dev log) caught the old
+ * single-splice version tombstoning another replica's live runs and
+ * re-authoring their text under our replica id merely because a second,
+ * distant difference (a trailing newline) had destroyed the common suffix.
+ * A device replica with unmerged history then revived its concurrently
+ * edited runs alongside our re-authored copy, fusing the text.
  *
  * Returns false if the text is unchanged (nothing to push).
  */
@@ -203,24 +213,33 @@ export function applyTextEdit(doc: NoteDocument, newText: string, options: Apply
   }
   validateDocumentInvariants(doc);
 
-  const { start, deleteLength, insertText } = computeSplice(oldText, newText);
+  const splices = computeSplices(oldText, newText);
   const replicaIndex = ensureReplica(doc, options.replicaId);
   const opNumber = doc.replicas[replicaIndex - 1]?.counters[1] ?? 0;
 
   let structuralChange = false;
-  if (deleteLength > 0) {
-    // A deletion is a formatting op in Apple's model: the tombstoned
-    // substrings are restamped with (opReplica, opNumber) - confirmed on the
-    // 2026-07-17 formatting-evolution capture (see proto/topotext.proto's
-    // Substring.timestamp comment). The op number consumed here is the one
-    // the structural-change bump below advances past.
-    tombstoneVisibleRange(doc, start, deleteLength, { replica: replicaIndex, clock: opNumber });
-    structuralChange = true;
+  // Splices carry oldText offsets, ascending and non-overlapping; applying
+  // them in order shifts every later offset by the net length change so far.
+  let delta = 0;
+  for (const { start: oldStart, deleteLength, insertText } of splices) {
+    const start = oldStart + delta;
+    if (deleteLength > 0) {
+      // A deletion is a formatting op in Apple's model: the tombstoned
+      // substrings are restamped with (opReplica, opNumber) - confirmed on the
+      // 2026-07-17 formatting-evolution capture (see proto/topotext.proto's
+      // Substring.timestamp comment). One push = one op regardless of hunk
+      // count (the multi-range precedent is `applyFormattingOp`); the op
+      // number consumed here is the one the structural-change bump below
+      // advances past.
+      tombstoneVisibleRange(doc, start, deleteLength, { replica: replicaIndex, clock: opNumber });
+      structuralChange = true;
+    }
+    if (insertText.length > 0) {
+      structuralChange = insertVisibleText(doc, start, insertText, replicaIndex) || structuralChange;
+    }
+    adjustAttributeRuns(doc, start, deleteLength, insertText.length);
+    delta += insertText.length - deleteLength;
   }
-  if (insertText.length > 0) {
-    structuralChange = insertVisibleText(doc, start, insertText, replicaIndex) || structuralChange;
-  }
-  adjustAttributeRuns(doc, start, deleteLength, insertText.length);
 
   // The second replica counter is the formatting-op clock (identified on the
   // 2026-07-17 formatting-evolution capture; see proto/topotext.proto): a
@@ -402,6 +421,67 @@ export function computeSplice(oldText: string, newText: string): Splice {
     deleteLength: oldText.length - prefix - suffix,
     insertText: newText.slice(prefix, newText.length - suffix),
   };
+}
+
+/**
+ * Multi-hunk diff over UTF-16 code units: line-level LCS (node-diff3, the
+ * same engine `mergeConflict.ts` merges with) locates each changed region,
+ * then `computeSplice` tightens every hunk to character precision. Returned
+ * splices carry non-overlapping, ascending `oldText` offsets.
+ *
+ * This is what keeps a push's CRDT edit minimal when the file differs from
+ * the server text in more than one place (two edited paragraphs, or an edit
+ * plus the markdown pipeline's trailing newline): only genuinely changed
+ * characters are tombstoned/inserted, and everything between hunks keeps its
+ * original runs and authorship - see `applyTextEdit`'s doc comment for the
+ * fusion this prevents.
+ */
+export function computeSplices(oldText: string, newText: string): Splice[] {
+  if (oldText === newText) {
+    return [];
+  }
+  const oldLines = splitLinesInclusive(oldText);
+  const newLines = splitLinesInclusive(newText);
+  const oldOffsets = lineStartOffsets(oldLines);
+  const newOffsets = lineStartOffsets(newLines);
+
+  const splices: Splice[] = [];
+  for (const hunk of diffIndices(oldLines, newLines)) {
+    const oldStart = oldOffsets[hunk.buffer1[0]]!;
+    const oldHunk = hunk.buffer1Content.join("");
+    const newStart = newOffsets[hunk.buffer2[0]]!;
+    const newHunk = hunk.buffer2Content.join("");
+    const inner = computeSplice(oldHunk, newHunk);
+    if (inner.deleteLength === 0 && inner.insertText.length === 0) {
+      continue;
+    }
+    splices.push({ start: oldStart + inner.start, deleteLength: inner.deleteLength, insertText: inner.insertText });
+  }
+  return splices;
+}
+
+/** Splits into lines with their "\n" terminators kept attached, so line
+ * indexes convert to character offsets by plain accumulation. */
+function splitLinesInclusive(text: string): string[] {
+  const lines = text.split("\n").map((line) => `${line}\n`);
+  const last = lines[lines.length - 1]!;
+  if (last === "\n") {
+    lines.pop();
+  } else {
+    lines[lines.length - 1] = last.slice(0, -1);
+  }
+  return lines;
+}
+
+/** `result[i]` = character offset where line `i` starts; one extra trailing
+ * entry (the text's total length) so a hunk starting past the last line -
+ * a pure append - still resolves. */
+function lineStartOffsets(lines: readonly string[]): number[] {
+  const offsets: number[] = [0];
+  for (const line of lines) {
+    offsets.push(offsets[offsets.length - 1]! + line.length);
+  }
+  return offsets;
 }
 
 function isHighSurrogate(code: number): boolean {
@@ -587,9 +667,11 @@ function insertVisibleText(doc: NoteDocument, start: number, text: string, repli
   doc.runs.splice(insertIndex, 0, {
     coord: { replica: replicaIndex, clock },
     length: text.length,
-    // Anchor (replica, 0) matches most live runs in the captures; its exact
-    // semantics are still unknown (see dev notes). Sequence is assigned by
-    // the caller's renumbering pass.
+    // The anchor is the run's style timestamp in the formatting-op clock
+    // domain (`counters[1]`), not a position: (replica, 0) = "never
+    // restyled", exactly what the iOS client writes for its own plain typed
+    // runs (2026-07-29 device captures, vault dev log). Clients bulk-restamp
+    // it on style ops. Sequence is assigned by the caller's renumbering pass.
     anchor: { replica: replicaIndex, clock: 0 },
     tombstone: false,
     sequence: [],

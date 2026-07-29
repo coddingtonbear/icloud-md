@@ -40,7 +40,7 @@ import { applyLocalNoteDeletion, isInTrash, isPurged, rememberTrashedNote } from
 import {
   applyTextEdit,
   buildInitialNoteDocument,
-  computeSplice,
+  computeSplices,
   encodeNoteDocument,
   noteDocumentRoundTrips,
   parseNoteDocument,
@@ -1310,14 +1310,15 @@ function prepareNoteTextUpdate(
     return undefined;
   }
 
-  // The single-splice diff must steer clear of every U+FFFC placeholder:
+  // The splice diff must steer clear of every U+FFFC placeholder:
   // tombstoning one (or typing a literal one) would sever the CRDT character
   // its attachmentInfo run points at, even if the visible text ends up with
   // the right placeholder count. Embeds can't be moved through this tool.
-  const splice = computeSplice(currentBodyText, desired.text);
-  const spliceTouchesPlaceholder =
-    currentBodyText.slice(splice.start, splice.start + splice.deleteLength).includes(OBJECT_REPLACEMENT_CHARACTER) ||
-    splice.insertText.includes(OBJECT_REPLACEMENT_CHARACTER);
+  const spliceTouchesPlaceholder = computeSplices(currentBodyText, desired.text).some(
+    (splice) =>
+      currentBodyText.slice(splice.start, splice.start + splice.deleteLength).includes(OBJECT_REPLACEMENT_CHARACTER) ||
+      splice.insertText.includes(OBJECT_REPLACEMENT_CHARACTER),
+  );
   if (spliceTouchesPlaceholder) {
     summary.refused.push(
       `${entry.file}: this edit would delete or move an embedded object - embeds can only be edited in Notes itself. ` +

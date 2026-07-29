@@ -5,6 +5,7 @@ import {
   applyTextEdit,
   buildInitialNoteDocument,
   computeSplice,
+  computeSplices,
   encodeNoteDocument,
   isSentinel,
   noteDocumentRoundTrips,
@@ -327,6 +328,72 @@ test("computeSplice finds minimal edits", () => {
   assert.deepEqual(computeSplice("abc", "aXc"), { start: 1, deleteLength: 1, insertText: "X" });
   assert.deepEqual(computeSplice("abc", "abc def"), { start: 3, deleteLength: 0, insertText: " def" });
   assert.deepEqual(computeSplice("", "new"), { start: 0, deleteLength: 0, insertText: "new" });
+});
+
+test("computeSplices keeps separated edits as separate hunks, leaving the lines between untouched", () => {
+  assert.deepEqual(computeSplices("same", "same"), []);
+  // A single changed region degenerates to computeSplice's answer.
+  assert.deepEqual(computeSplices("abc def", "abc XX def"), [{ start: 4, deleteLength: 0, insertText: "XX " }]);
+  // Edits on two different lines: two hunks, "two\n" belongs to neither.
+  assert.deepEqual(computeSplices("one\ntwo\nthree\n", "one EDIT\ntwo\nthree, EDITED\n"), [
+    { start: 3, deleteLength: 0, insertText: " EDIT" },
+    { start: 13, deleteLength: 0, insertText: ", EDITED" },
+  ]);
+});
+
+test("computeSplices: a mid-document insert plus a trailing-newline difference stays two small hunks (2026-07-29 fusion regression)", () => {
+  // The live-reproduced fusion shape: the local edit inserts into an early
+  // paragraph while the markdown pipeline's trailing newline differs from
+  // the server text. The old single-splice diff lost its common suffix and
+  // rewrote everything from the insert to the end of the note.
+  const remote = "p2 bravo dev-E1\n\np3 charlie\ntyped-on-device tail";
+  const local = "p2 bravo EDIT-E1 dev-E1\n\np3 charlie\ntyped-on-device tail\n";
+  assert.deepEqual(computeSplices(remote, local), [
+    { start: 9, deleteLength: 0, insertText: "EDIT-E1 " },
+    { start: remote.length, deleteLength: 0, insertText: "\n" },
+  ]);
+});
+
+test("a multi-hunk edit never re-authors another replica's text between the hunks (2026-07-29 fusion regression)", () => {
+  const doc = makeDocument(
+    "alpha\n\nmid\nbravo-device",
+    [
+      { coord: { replica: 1, clock: 0 }, length: 11, anchor: { replica: 1, clock: 0 }, tombstone: false, sequence: [2] },
+      { coord: { replica: 2, clock: 0 }, length: 12, anchor: { replica: 2, clock: 0 }, tombstone: false, sequence: [3] },
+    ],
+    [11, 12],
+  );
+
+  assert.equal(applyTextEdit(doc, "alpha EDIT\n\nmid\nbravo-device\n", { replicaId: REPLICA_A }), true);
+
+  // Replica B's run must come through byte-identical: same single run, same
+  // coord, still visible - not tombstoned and re-typed under replica A.
+  const foreignRuns = doc.runs.filter((run) => run.coord.replica === 2);
+  assert.equal(foreignRuns.length, 1);
+  assert.deepEqual(foreignRuns[0], { coord: { replica: 2, clock: 0 }, length: 12, anchor: { replica: 2, clock: 0 }, tombstone: false, sequence: foreignRuns[0]!.sequence });
+  // Pure inserts: nothing was deleted, so nothing may be tombstoned.
+  assert.equal(doc.runs.some((run) => run.tombstone), false);
+  // Replica A authored exactly the 6 inserted units (" EDIT" + "\n").
+  const inserted = doc.runs.filter((run) => run.coord.replica === 1 && run.coord.clock >= 11);
+  assert.equal(inserted.reduce((sum, run) => sum + run.length, 0), 6);
+
+  assert.equal(visibleText(doc), "alpha EDIT\n\nmid\nbravo-device\n");
+  assert.equal(reencodeAndDecode(doc), "alpha EDIT\n\nmid\nbravo-device\n");
+});
+
+test("multi-hunk deletions consume a single formatting op - every tombstone carries the same stamp", () => {
+  const doc = simpleDocument("aa bb\nmid\ncc dd\n");
+
+  assert.equal(applyTextEdit(doc, "aa\nmid\ncc\n", { replicaId: REPLICA_A }), true);
+
+  const tombstones = doc.runs.filter((run) => run.tombstone);
+  assert.equal(tombstones.length, 2);
+  for (const run of tombstones) {
+    assert.deepEqual(run.anchor, { replica: 1, clock: 1 });
+  }
+  // One push = one op, regardless of hunk count.
+  assert.equal(doc.replicas[0]?.counters[1], 2);
+  assert.equal(visibleText(doc), "aa\nmid\ncc\n");
 });
 
 test("buildInitialNoteDocument builds a first-save document whose encoding decodes back to the text", () => {
