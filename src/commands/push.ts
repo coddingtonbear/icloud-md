@@ -937,7 +937,14 @@ export async function planRemoteChangedMerge(
 
   if (outcome.hasConflict) {
     // Base copy deliberately NOT advanced, matching `pull`'s own
-    // discipline - the next merge needs the right common ancestor.
+    // discipline - the next merge needs the right common ancestor. The TAG
+    // advances, though: with it stale, the run after the user resolved the
+    // markers re-entered this merge and overwrote the resolution with fresh
+    // markers, making the conflict unresolvable (dev log 2026-07-29). With
+    // the tag current, the resolved file takes the plain upload path; the
+    // marker gate above this branch keeps a still-unresolved file from ever
+    // being merged again or uploaded.
+    state.notes[recordName] = { ...entry, recordChangeTag: remote.remoteTag };
     return {
       kind: "update",
       file: entry.file,

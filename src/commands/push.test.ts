@@ -517,6 +517,32 @@ test("planRemoteChangedMerge on a genuine conflict writes markers and keeps the 
     assert.match(written, />>>>>>> remote/);
     // The ancestor is untouched: the next merge needs the right common point.
     assert.equal(await readBaseCopy(dir, "REC1"), "shared line\n");
+    // But the tag advances: once the markers are resolved, the next push must
+    // take the plain upload path - re-entering the merge here overwrote the
+    // user's resolution with fresh conflict markers, forever.
+    assert.equal(s.notes.REC1?.recordChangeTag, "2b");
+  }));
+
+test("buildPushPlan never re-merges a file that still carries conflict markers - the resolution flow is marker gate, resolve, upload", () =>
+  withTempDir(async (dir) => {
+    // With the conflict-path tag advanced, a still-unresolved file must be
+    // held at the marker gate (never merged again, never uploaded) - this is
+    // what makes writing markers + advancing the tag safe.
+    const s = state();
+    await writeBaseCopy(dir, "REC1", "shared line\n");
+    await writeVaultFile(
+      dir,
+      "Notes/Tracked.md",
+      "<<<<<<< local\nshared line edited locally\n=======\nshared line edited remotely\n>>>>>>> remote\n",
+    );
+    await writeCloneState(dir, s);
+
+    const { entries } = await buildPushPlan(dir);
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.resolution, "conflict");
+    assert.match(entries[0]?.reason ?? "", /still contains diff3 conflict markers/);
+    assert.equal(entries[0]?.execute, undefined);
   }));
 
 test("runPush returns no entries and a zero pushed count when the plan is empty", () =>
