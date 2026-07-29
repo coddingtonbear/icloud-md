@@ -318,15 +318,7 @@ export async function runPull(
         }
 
         // local === "modified": real 3-way merge against the base copy.
-        // The merge runs on the body only; the local-only frontmatter envelope
-        // is split off and re-attached above the merged result.
-        const base = (await readBaseCopy(targetDir, record.recordName)) ?? "";
-        const { frontmatter, body: localContent } = splitFrontmatter(
-          await readFile(path.join(targetDir, existing.file), "utf-8"),
-        );
-        const outcome = mergeNoteVersions(base, localContent, bodyText);
-
-        await writeFile(path.join(targetDir, existing.file), joinFrontmatter(frontmatter, outcome.text), "utf-8");
+        const merged = await mergeRemoteChangeIntoLocalFile(targetDir, record.recordName, existing.file, bodyText);
         notes[record.recordName] = {
           ...existing,
           recordChangeTag: record.recordChangeTag ?? existing.recordChangeTag,
@@ -335,13 +327,9 @@ export async function runPull(
           folderRecordName: placement.folderRecordName,
         };
 
-        if (outcome.hasConflict) {
+        if (merged.hasConflict) {
           summary.conflicts.push(`${existing.file}: merged with conflict markers - resolve manually`);
-          // Base copy deliberately NOT advanced: it stays the merge ancestor
-          // until the conflict markers are actually resolved, so the next pull
-          // (if this note changes again) merges against the right common point.
         } else {
-          await writeBaseCopy(targetDir, record.recordName, outcome.text);
           summary.merged += 1;
         }
       } finally {
@@ -562,6 +550,36 @@ async function dropUnsyncableNote(
   for (const removed of removeTableAttachmentsForNote(record.recordName, tableAttachments)) {
     delete tableAttachments[removed];
   }
+}
+
+/**
+ * The 3-way merge `pull` runs when a note changed both remotely and locally.
+ * The merge runs on the body only; the local-only frontmatter envelope is
+ * split off and re-attached above the merged result.
+ *
+ * State discipline (established by the 2026-07-29 device-in-the-loop
+ * experiments, vault dev log, matching push's planRemoteChangedMerge): on a
+ * clean merge the base copy holds the *remote* text - the merge ancestor
+ * going forward - never the merged result. Writing the merged text made the
+ * merged file compare clean, so the local half of the merge silently never
+ * uploaded on the next push. On a conflict the base copy stays untouched:
+ * it remains the common ancestor until the markers are actually resolved.
+ */
+export async function mergeRemoteChangeIntoLocalFile(
+  targetDir: string,
+  recordName: string,
+  file: string,
+  remoteBodyText: string,
+): Promise<{ hasConflict: boolean }> {
+  const base = (await readBaseCopy(targetDir, recordName)) ?? "";
+  const { frontmatter, body: localContent } = splitFrontmatter(await readFile(path.join(targetDir, file), "utf-8"));
+  const outcome = mergeNoteVersions(base, localContent, remoteBodyText);
+
+  await writeFile(path.join(targetDir, file), joinFrontmatter(frontmatter, outcome.text), "utf-8");
+  if (!outcome.hasConflict) {
+    await writeBaseCopy(targetDir, recordName, remoteBodyText);
+  }
+  return { hasConflict: outcome.hasConflict };
 }
 
 async function safeUnlink(filePath: string): Promise<void> {
