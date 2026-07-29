@@ -23,6 +23,7 @@ import { runRestore } from "./commands/restore.js";
 import { renderRevertResult, runRevert } from "./commands/revert.js";
 import { runStatus } from "./commands/status.js";
 import { createOutputContext, emitError, emitResult, emitUsageError, makeStatusSink, type OutputContext } from "./cli/output.js";
+import { renderPullReport } from "./cli/pullReport.js";
 import { NotClonedDirectoryError } from "./errors.js";
 import { recordLastError } from "./lastError.js";
 import { readCloneState } from "./notes/cloneState.js";
@@ -135,15 +136,13 @@ function printCloneSummary(targetDir: string, summary: CloneSummary): void {
   }
 }
 
+/** The changelist (with its per-file conflict and read-only remarks) renders
+ * through `renderPullReport`; conflicts and read-only notes therefore no
+ * longer get their own trailing listings here. The zone-level asides that
+ * aren't file changes stay as plain lines after it. */
 function printPullSummary(targetDir: string, summary: PullSummary): void {
-  console.log(
-    `Pulled into ${targetDir}: ${summary.added} added, ${summary.updated} updated, ${summary.merged} auto-merged, ` +
-      `${summary.removed} removed, ${summary.attachmentsDownloaded} attachment(s) downloaded`,
-  );
-  if (summary.unpublishable > 0) {
-    console.log(
-      `${summary.unpublishable} note(s) contain content this tool couldn't fully parse - read-only`,
-    );
+  for (const line of renderPullReport(summary, (file) => displayPath(targetDir, file))) {
+    console.log(line);
   }
   if (summary.skippedNewUnsyncable > 0 || summary.droppedUnsyncable > 0) {
     console.log(
@@ -158,12 +157,6 @@ function printPullSummary(targetDir: string, summary: PullSummary): void {
   }
   for (const notice of summary.notices) {
     (notice.level === "warn" ? console.warn : console.log)(notice.message);
-  }
-  if (summary.conflicts.length > 0) {
-    console.log(`${summary.conflicts.length} conflict(s) - resolve manually:`);
-    for (const conflict of summary.conflicts) {
-      console.log(`  - ${conflict}`);
-    }
   }
 }
 

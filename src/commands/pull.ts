@@ -36,6 +36,29 @@ const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 
 export type PullNotice = SyncNotice;
 
+/** Which of the ways a pull can touch a local file this change represents.
+ * "untrack" is a note left on disk but dropped from tracking (it became
+ * unsyncable remotely) - the file stays, the sync relationship goes. */
+export type PullChangeKind = "add" | "update" | "merge" | "remove" | "move" | "untrack";
+
+export interface PullChangeRemark {
+  /** "conflict": the reader must act, then re-sync (magenta on screen);
+   * "unsyncable": content this tool can't sync as-is (black-on-red) -
+   * mirroring the plan listing's conflict/refused split. */
+  tone: "conflict" | "unsyncable";
+  message: string;
+}
+
+/** One file-level thing this pull did, in the order it happened - both the
+ * human changelist and `--json` consumers read from this. */
+export interface PullChange {
+  kind: PullChangeKind;
+  file: string;
+  /** kind "move" only: where the note lived before the remote folder change. */
+  previousFile?: string;
+  remarks?: PullChangeRemark[];
+}
+
 export interface PullSummary {
   added: number;
   updated: number;
@@ -46,9 +69,19 @@ export interface PullSummary {
   skippedNewUnsyncable: number;
   droppedUnsyncable: number;
   unsharedUntracked: number;
+  changes: PullChange[];
   conflicts: string[];
   notices: PullNotice[];
 }
+
+/** The per-file counterpart to the whole-vault "N note(s) contain content
+ * this tool couldn't fully parse" line this remark replaced: attached to any
+ * pulled note carrying an `unpublishableReason`, so the reader learns *which*
+ * files came down read-only, not just how many. */
+const READ_ONLY_REMARK: PullChangeRemark = {
+  tone: "unsyncable",
+  message: "read-only: contains content this tool couldn't fully parse",
+};
 
 export async function runPull(
   targetDir: string,
@@ -113,6 +146,7 @@ export async function runPull(
     skippedNewUnsyncable: 0,
     droppedUnsyncable: 0,
     unsharedUntracked: 0,
+    changes: [],
     conflicts: [],
     notices: [],
   };
@@ -303,6 +337,11 @@ export async function runPull(
             folderRecordName: placement.folderRecordName,
           };
           summary.added += 1;
+          summary.changes.push({
+            kind: "add",
+            file: relativeFile,
+            ...(unpublishableReason !== undefined ? { remarks: [READ_ONLY_REMARK] } : {}),
+          });
           continue;
         }
 
@@ -327,6 +366,11 @@ export async function runPull(
             folderRecordName: placement.folderRecordName,
           };
           summary.updated += 1;
+          summary.changes.push({
+            kind: "update",
+            file: existing.file,
+            ...(unpublishableReason !== undefined ? { remarks: [READ_ONLY_REMARK] } : {}),
+          });
           continue;
         }
 
@@ -339,6 +383,13 @@ export async function runPull(
           summary.conflicts.push(
             `${existing.file}: still contains diff3 conflict markers - resolve them, then run "push" to reconcile`,
           );
+          summary.changes.push({
+            kind: "update",
+            file: existing.file,
+            remarks: [
+              { tone: "conflict", message: 'still contains diff3 conflict markers - resolve them, then run "push" to reconcile' },
+            ],
+          });
           continue;
         }
         notes[record.recordName] = {
@@ -351,8 +402,21 @@ export async function runPull(
 
         if (merged.status === "conflict") {
           summary.conflicts.push(`${existing.file}: merged with conflict markers - resolve manually`);
+          summary.changes.push({
+            kind: "merge",
+            file: existing.file,
+            remarks: [
+              { tone: "conflict", message: "merged with conflict markers - resolve manually" },
+              ...(unpublishableReason !== undefined ? [READ_ONLY_REMARK] : []),
+            ],
+          });
         } else {
           summary.merged += 1;
+          summary.changes.push({
+            kind: "merge",
+            file: existing.file,
+            ...(unpublishableReason !== undefined ? { remarks: [READ_ONLY_REMARK] } : {}),
+          });
         }
       } finally {
         progress?.onRecordProcessed?.();
@@ -374,7 +438,7 @@ export async function runPull(
   // previous layout used that are now empty.
   const relocations = await reconcileNotePlacements(targetDir, layout, notes, attachments);
   for (const relocation of relocations) {
-    summary.notices.push({ level: "info", message: `Moved ${relocation.from} -> ${relocation.to} (folder changed remotely)` });
+    summary.changes.push({ kind: "move", file: relocation.to, previousFile: relocation.from });
   }
   await removeStaleDirs(
     targetDir,
@@ -517,6 +581,7 @@ async function handleRemoteDeletion(
       delete tableAttachments[removed];
     }
     summary.removed += 1;
+    summary.changes.push({ kind: "remove", file: existing.file });
     return;
   }
 
@@ -531,6 +596,11 @@ async function handleRemoteDeletion(
 
   await writeFile(path.join(targetDir, existing.file), joinFrontmatter(frontmatter, outcome.text), "utf-8");
   summary.conflicts.push(`${existing.file}: deleted remotely, but has local edits - merged with conflict markers, resolve manually`);
+  summary.changes.push({
+    kind: "update",
+    file: existing.file,
+    remarks: [{ tone: "conflict", message: "deleted remotely, but has local edits - merged with conflict markers, resolve manually" }],
+  });
   // Keep tracking (state entry + base copy) so this doesn't silently drop
   // out of state.json; there's no new recordChangeTag to advance to since
   // the record no longer exists remotely.
@@ -560,12 +630,18 @@ async function dropUnsyncableNote(
     summary.conflicts.push(
       `${existing.file}: became unsyncable remotely (${reason}), and has local edits - left in place, untracked`,
     );
+    summary.changes.push({
+      kind: "untrack",
+      file: existing.file,
+      remarks: [{ tone: "conflict", message: `became unsyncable remotely (${reason}), and has local edits - left in place` }],
+    });
   } else {
     summary.droppedUnsyncable += 1;
     if (local === "clean") {
-      summary.notices.push({
-        level: "warn",
-        message: `${existing.file}: no longer syncable remotely (${reason}) - leaving existing local copy but no longer tracking it`,
+      summary.changes.push({
+        kind: "untrack",
+        file: existing.file,
+        remarks: [{ tone: "unsyncable", message: `no longer syncable remotely (${reason}) - local copy left in place` }],
       });
     }
   }

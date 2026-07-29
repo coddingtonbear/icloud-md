@@ -2,6 +2,7 @@ import type { ChalkInstance } from "chalk";
 import {
   CHANGED,
   GONE,
+  LISTING_INDENT,
   MOVED,
   NEEDS_ATTENTION,
   NEW,
@@ -50,9 +51,6 @@ const LABELS: Record<PlanEntryKind, [label: string, color: ChalkInstance]> = {
  * rather than a ragged list. */
 const LABEL_WIDTH = Math.max(...Object.values(LABELS).map(([label]) => label.length));
 
-/** The preview screens (`status`, `push --dry-run`) indent their change
- * list under the "Changes not yet pushed" heading, `git status`-style. */
-const PREVIEW_INDENT = " ".repeat(8);
 
 export interface RenderPlanOptions {
   /** Dresses the listing as the status screen: a "Changes not yet pushed
@@ -99,7 +97,7 @@ export function renderPlan(
     ];
   }
 
-  const indent = options.preview === true ? PREVIEW_INDENT : "";
+  const indent = options.preview === true ? LISTING_INDENT : "";
   const lines: string[] = [];
   if (options.preview === true) {
     lines.push(

@@ -2,7 +2,7 @@ import chalk, { type ChalkInstance } from "chalk";
 
 /**
  * The one palette every human-readable listing (`status`, `push`, and
- * eventually `pull`) draws from, after paprika-recipes' reporting module:
+ * `pull`) draws from, after paprika-recipes' reporting module:
  * colour says what *kind* of thing happened, consistently everywhere -
  * green for something appearing, yellow for something changing in place,
  * red for something going away, cyan for something relocating.
@@ -29,6 +29,11 @@ export const UNSYNCABLE: ChalkInstance = chalk.bgRed.black;
  * push.") - an attribute rather than a colour, so it dims the reader's own
  * foreground instead of replacing it. */
 export const QUIET: ChalkInstance = chalk.dim;
+
+/** The indent every changelist sits at beneath its heading, `git status`-
+ * style - shared by the push previews (`status`, `push --dry-run`) and
+ * `pull`'s report so the screens read as one family. */
+export const LISTING_INDENT = " ".repeat(8);
 
 /**
  * One listing line: the status label coloured and padded to a common
