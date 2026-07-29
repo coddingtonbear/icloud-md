@@ -168,17 +168,43 @@ export class AccountMismatchError extends IcloudNotesSyncError {
  * A CloudKit/network request came back non-OK with only an HTTP status to go
  * on - could be a transient network or service blip, could be a real
  * protocol-level bug. There's no specific fix to point at either way, so the
- * hint stays generic; the message keeps the operation/status detail for
- * anyone filing an issue.
+ * hint defaults to generic advice; a caller (or subclass) with a more
+ * specific diagnosis can pass its own. The message keeps the
+ * operation/status detail for anyone filing an issue.
  */
 export class CloudKitRequestFailedError extends IcloudNotesSyncError {
-  constructor(message: string, options: ErrorOptions = {}) {
+  constructor(message: string, options: IcloudNotesSyncErrorOptions = {}) {
     super(message, {
       ...options,
       hint:
+        options.hint ??
         "This may be a transient network or iCloud-service issue - wait a moment and try again. If it keeps " +
-        "happening, please open a GitHub issue including this message.",
+          "happening, please open a GitHub issue including this message.",
     });
+  }
+}
+
+/**
+ * A zone-level failure delivered inside an HTTP 200 `changes/zone` response:
+ * the zone entry carries `serverErrorCode`/`reason` instead of records. The
+ * code is exposed as a field so callers can react to one specific condition
+ * (e.g. tolerating ZONE_NOT_FOUND for a shared zone whose share was revoked)
+ * without string-matching the message. ZONE_NOT_FOUND also replaces the
+ * generic "wait and retry" hint, which is actively wrong for a zone that no
+ * longer exists - retrying fails identically every time.
+ */
+export class CloudKitZoneFetchFailedError extends CloudKitRequestFailedError {
+  readonly serverErrorCode: string;
+
+  constructor(serverErrorCode: string, reason: string) {
+    const options: IcloudNotesSyncErrorOptions = {};
+    if (serverErrorCode === "ZONE_NOT_FOUND") {
+      options.hint =
+        "The server no longer has this zone - most likely a share that was revoked or deleted. Retrying won't " +
+        "change that; if this keeps aborting a clone or pull, please open a GitHub issue including this message.";
+    }
+    super(`changes/zone failed for a zone: ${serverErrorCode} (${reason})`, options);
+    this.serverErrorCode = serverErrorCode;
   }
 }
 

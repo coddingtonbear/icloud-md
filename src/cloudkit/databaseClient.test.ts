@@ -9,6 +9,7 @@ import {
   parseSharedZoneList,
   type CloudKitRecord,
 } from "./databaseClient.js";
+import { CloudKitZoneFetchFailedError } from "../errors.js";
 
 test("parseSharedZoneList extracts zoneName and ownerRecordName per zone", () => {
   // Shape observed from a real `shared/changes/database` response.
@@ -47,6 +48,22 @@ test("parseSharedZoneList rejects responses without a zones array", () => {
   assert.throws(() => parseSharedZoneList({ syncToken: "x" }), /missing zones array/);
 });
 
+test("parseSharedZoneList skips tombstoned (deleted) zones instead of feeding them to the fetch loop", () => {
+  // A revoked/deleted share can stay enumerated by changes/database as a
+  // tombstone; fetching it answers ZONE_NOT_FOUND (issue #3).
+  const body = {
+    zones: [
+      { zoneID: { zoneName: "Notes", ownerRecordName: "_live", zoneType: "REGULAR_CUSTOM_ZONE" } },
+      {
+        zoneID: { zoneName: "Notes", ownerRecordName: "_revoked", zoneType: "REGULAR_CUSTOM_ZONE" },
+        deleted: true,
+      },
+    ],
+  };
+
+  assert.deepEqual(parseSharedZoneList(body), [{ zoneName: "Notes", ownerRecordName: "_live" }]);
+});
+
 test("firstZone throws on a zone-level server error instead of returning an empty zone", () => {
   // Real response observed live: HTTP 200, but the zone entry carries an
   // error (here: from sending `reverse: true` to the shared database).
@@ -61,6 +78,60 @@ test("firstZone throws on a zone-level server error instead of returning an empt
   };
 
   assert.throws(() => firstZone(body), /BAD_REQUEST.*Reverse sync of share db is unsupported/);
+});
+
+test("firstZone's zone-level throw carries a typed serverErrorCode, and ZONE_NOT_FOUND drops the retry hint", () => {
+  // Shape from the issue #3 report: the shared database's listing advertised
+  // a zone whose changes/zone fetch answers ZONE_NOT_FOUND inside an HTTP 200.
+  const body = {
+    zones: [
+      {
+        zoneID: { zoneName: "Notes", ownerRecordName: "_revoked", zoneType: "REGULAR_CUSTOM_ZONE" },
+        reason: "Zone does not exist",
+        serverErrorCode: "ZONE_NOT_FOUND",
+      },
+    ],
+  };
+
+  const error = (() => {
+    try {
+      firstZone(body);
+    } catch (thrown) {
+      return thrown;
+    }
+    return undefined;
+  })();
+
+  assert.ok(error instanceof CloudKitZoneFetchFailedError);
+  assert.equal(error.serverErrorCode, "ZONE_NOT_FOUND");
+  // "Wait a moment and try again" is actively wrong for a zone that's gone.
+  assert.doesNotMatch(error.hint ?? "", /transient|try again/);
+  assert.match(error.hint ?? "", /revoked or deleted/);
+});
+
+test("firstZone's throw keeps the generic transient hint for other zone-level codes", () => {
+  const body = {
+    zones: [
+      {
+        zoneID: { zoneName: "Notes", zoneType: "REGULAR_CUSTOM_ZONE" },
+        reason: "internal server error",
+        serverErrorCode: "INTERNAL_ERROR",
+      },
+    ],
+  };
+
+  const error = (() => {
+    try {
+      firstZone(body);
+    } catch (thrown) {
+      return thrown;
+    }
+    return undefined;
+  })();
+
+  assert.ok(error instanceof CloudKitZoneFetchFailedError);
+  assert.equal(error.serverErrorCode, "INTERNAL_ERROR");
+  assert.match(error.hint ?? "", /transient/);
 });
 
 test("firstZone parses a deletion tombstone record instead of throwing on its missing recordType/fields", () => {

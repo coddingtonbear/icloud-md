@@ -1,6 +1,6 @@
 import type { IcloudSession } from "../session.js";
 import { loggedFetch } from "../debugLog.js";
-import { CloudKitRequestFailedError } from "../errors.js";
+import { CloudKitRequestFailedError, CloudKitZoneFetchFailedError } from "../errors.js";
 
 export interface CloudKitFieldValue {
   value: unknown;
@@ -318,15 +318,23 @@ export function parseSharedZoneList(body: unknown): CloudKitZoneID[] {
   if (!isRecord(body) || !Array.isArray(body.zones)) {
     throw new Error("Unexpected response shape from shared changes/database (missing zones array)");
   }
-  return body.zones.map((zone: unknown) => {
+  return body.zones.flatMap((zone: unknown) => {
     if (!isRecord(zone) || !isRecord(zone.zoneID) || typeof zone.zoneID.zoneName !== "string") {
       throw new Error("Unexpected zone shape in shared changes/database response");
     }
-    return {
-      zoneName: zone.zoneID.zoneName,
-      ownerRecordName:
-        typeof zone.zoneID.ownerRecordName === "string" ? zone.zoneID.ownerRecordName : undefined,
-    };
+    // A tombstoned zone (a share revoked or deleted, but still enumerated by
+    // `changes/database`) is unfetchable - `changes/zone` answers
+    // ZONE_NOT_FOUND for it - so don't let it into the fetch loop.
+    if (zone.deleted === true) {
+      return [];
+    }
+    return [
+      {
+        zoneName: zone.zoneID.zoneName,
+        ownerRecordName:
+          typeof zone.zoneID.ownerRecordName === "string" ? zone.zoneID.ownerRecordName : undefined,
+      },
+    ];
   });
 }
 
@@ -369,11 +377,32 @@ export async function lookupRecords(
     .map(parseRecord);
 }
 
+/** A shared zone the `changes/database` listing advertised but whose
+ * `changes/zone` fetch answered ZONE_NOT_FOUND - a share revoked or deleted
+ * out from under the listing. Skipped rather than fatal; see
+ * `fetchSharedNoteRecords`. */
+export interface SkippedSharedZone {
+  zoneID: CloudKitZoneID;
+  serverErrorCode: string;
+}
+
+export interface SharedNoteRecordsResult {
+  zones: SharedZoneChanges[];
+  skippedZones: SkippedSharedZone[];
+}
+
 /**
  * Fetches every shared zone's note records, filling in note bodies (via
  * `records/lookup`) for live Note records the zone listing returned without
  * `TextDataEncrypted`. `sinceSyncTokens` is keyed by the zone owner's
  * recordName; zones without an entry are fetched from scratch.
+ *
+ * A zone that answers ZONE_NOT_FOUND (a share revoked/deleted but still
+ * enumerated by `changes/database`) is reported in `skippedZones` instead of
+ * aborting the run - one unfetchable share shouldn't discard every other
+ * zone's successful results. Any other zone-level error stays fatal: that's
+ * a broken fetch, not a missing zone, and swallowing it would make it look
+ * like a clean sync.
  */
 export async function fetchSharedNoteRecords(
   session: IcloudSession,
@@ -381,40 +410,49 @@ export async function fetchSharedNoteRecords(
   dsid: string,
   sinceSyncTokens: Record<string, string> = {},
   onPage?: (pageRecordCount: number) => void,
-): Promise<SharedZoneChanges[]> {
+): Promise<SharedNoteRecordsResult> {
   const zoneIds = await fetchSharedZoneIds(session, ckDatabaseHost, dsid);
-  const results: SharedZoneChanges[] = [];
+  const zones: SharedZoneChanges[] = [];
+  const skippedZones: SkippedSharedZone[] = [];
 
   for (const zoneID of zoneIds) {
     const owner = zoneID.ownerRecordName;
     const sinceSyncToken = owner ? sinceSyncTokens[owner] : undefined;
-    const { records, syncToken } = await fetchZoneNoteRecords(
-      session,
-      ckDatabaseHost,
-      dsid,
-      "shared",
-      zoneID,
-      sinceSyncToken,
-      onPage,
-    );
-
-    const missingBody = records.filter(needsBodyLookup);
-    if (missingBody.length > 0) {
-      const lookedUp = await lookupRecords(
+    try {
+      const { records, syncToken } = await fetchZoneNoteRecords(
         session,
         ckDatabaseHost,
         dsid,
         "shared",
         zoneID,
-        missingBody.map((record) => record.recordName),
+        sinceSyncToken,
+        onPage,
       );
-      mergeLookedUpRecords(records, lookedUp);
-    }
 
-    results.push({ zoneID, records, syncToken });
+      const missingBody = records.filter(needsBodyLookup);
+      if (missingBody.length > 0) {
+        const lookedUp = await lookupRecords(
+          session,
+          ckDatabaseHost,
+          dsid,
+          "shared",
+          zoneID,
+          missingBody.map((record) => record.recordName),
+        );
+        mergeLookedUpRecords(records, lookedUp);
+      }
+
+      zones.push({ zoneID, records, syncToken });
+    } catch (error) {
+      if (error instanceof CloudKitZoneFetchFailedError && error.serverErrorCode === "ZONE_NOT_FOUND") {
+        skippedZones.push({ zoneID, serverErrorCode: error.serverErrorCode });
+        continue;
+      }
+      throw error;
+    }
   }
 
-  return results;
+  return { zones, skippedZones };
 }
 
 function needsBodyLookup(record: CloudKitRecord): boolean {
@@ -739,7 +777,7 @@ export function firstZone(body: unknown): ParsedZone {
   // would make a broken fetch look like a clean empty sync.
   if (typeof zone.serverErrorCode === "string") {
     const reason = typeof zone.reason === "string" ? zone.reason : "no reason given";
-    throw new CloudKitRequestFailedError(`changes/zone failed for a zone: ${zone.serverErrorCode} (${reason})`);
+    throw new CloudKitZoneFetchFailedError(zone.serverErrorCode, reason);
   }
 
   const records = Array.isArray(zone.records) ? zone.records.map(parseZoneRecord) : undefined;

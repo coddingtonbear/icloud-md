@@ -4,6 +4,16 @@
  * this is the only channel they use to report progress; rendering it (or
  * not) is entirely up to the caller.
  */
+/**
+ * A human-readable event worth surfacing in a command's final summary
+ * (`runClone`/`runPull` collect these instead of printing - same
+ * stay-usable-as-a-library rule as `SyncProgress` below).
+ */
+export interface SyncNotice {
+  level: "info" | "warn";
+  message: string;
+}
+
 export interface SyncProgress {
   /**
    * Fetching is about to begin - sign-in (which may print its own output,

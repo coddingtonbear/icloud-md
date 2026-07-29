@@ -11,7 +11,7 @@ import { writeBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState, writeCloneState, type CloneState } from "../notes/cloneState.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { AlreadyClonedDirectoryError, NotesUnavailableError } from "../errors.js";
-import type { SyncProgress } from "../progress.js";
+import type { SyncNotice, SyncProgress } from "../progress.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 
@@ -22,6 +22,7 @@ export interface CloneSummary {
   attachmentsDownloaded: number;
   skippedDeleted: number;
   skippedUndecodable: number;
+  notices: SyncNotice[];
 }
 
 /**
@@ -61,7 +62,13 @@ export async function runClone(
     undefined,
     onPage,
   );
-  const sharedZones = await fetchSharedNoteRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, {}, onPage);
+  const { zones: sharedZones, skippedZones } = await fetchSharedNoteRecords(
+    auth.session,
+    auth.ckdatabasewsUrl,
+    auth.dsid,
+    {},
+    onPage,
+  );
 
   const summary: CloneSummary = {
     written: 0,
@@ -70,7 +77,16 @@ export async function runClone(
     attachmentsDownloaded: 0,
     skippedDeleted: 0,
     skippedUndecodable: 0,
+    notices: [],
   };
+  for (const skipped of skippedZones) {
+    summary.notices.push({
+      level: "warn",
+      message:
+        `Skipped a shared zone the server no longer has (owner ${skipped.zoneID.ownerRecordName ?? "unknown"}, ` +
+        `${skipped.serverErrorCode}) - its share was likely revoked or deleted; no notes from it were cloned`,
+    });
+  }
   const notes: CloneState["notes"] = {};
   const attachments: NonNullable<CloneState["attachments"]> = {};
   const tableAttachments: NonNullable<CloneState["tableAttachments"]> = {};

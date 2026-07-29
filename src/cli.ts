@@ -129,6 +129,9 @@ function printCloneSummary(targetDir: string, summary: CloneSummary): void {
     );
   }
   console.log(`Skipped: ${summary.skippedDeleted} deleted, ${summary.skippedUndecodable} undecodable`);
+  for (const notice of summary.notices) {
+    (notice.level === "warn" ? console.warn : console.log)(notice.message);
+  }
 }
 
 function printPullSummary(targetDir: string, summary: PullSummary): void {

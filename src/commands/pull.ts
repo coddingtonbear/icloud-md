@@ -29,15 +29,12 @@ import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEn
 import { recordEpoch } from "../notes/noteEpoch.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { recordVersion } from "../notes/versionHistory.js";
-import type { SyncProgress } from "../progress.js";
+import type { SyncNotice, SyncProgress } from "../progress.js";
 import { isPurged } from "./delete.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 
-export interface PullNotice {
-  level: "info" | "warn";
-  message: string;
-}
+export type PullNotice = SyncNotice;
 
 export interface PullSummary {
   added: number;
@@ -81,7 +78,7 @@ export async function runPull(
     state.syncToken,
     onPage,
   );
-  const sharedZones = await fetchSharedNoteRecords(
+  const { zones: sharedZones, skippedZones } = await fetchSharedNoteRecords(
     auth.session,
     auth.ckdatabasewsUrl,
     auth.dsid,
@@ -131,6 +128,22 @@ export async function runPull(
       sharedZoneRecords.push({ ownerRecordName: zone.zoneID.ownerRecordName, records: zone.records });
     }
     sources.push({ records: zone.records, sharedZoneOwner: zone.zoneID.ownerRecordName });
+  }
+  // A skipped zone (ZONE_NOT_FOUND on fetch) yielded no new sync token -
+  // carry the stored one forward so a zone that turns out to be reachable
+  // again later resumes incrementally instead of refetching from scratch.
+  for (const skipped of skippedZones) {
+    const owner = skipped.zoneID.ownerRecordName;
+    const carried = owner ? (state.sharedZoneSyncTokens ?? {})[owner] : undefined;
+    if (owner && carried) {
+      sharedZoneSyncTokens[owner] = carried;
+    }
+    summary.notices.push({
+      level: "warn",
+      message:
+        `Skipped a shared zone the server no longer has (owner ${owner ?? "unknown"}, ${skipped.serverErrorCode}) - ` +
+        "its share was likely revoked or deleted; its local notes were left in place and stay tracked for now",
+    });
   }
 
   // Rebuild the directory layout from carried state + this run's folder
@@ -349,7 +362,12 @@ export async function runPull(
 
   progress?.onProcessComplete?.();
 
-  await handleVanishedSharedZones(targetDir, sharedZones, notes, attachments, tableAttachments, summary);
+  // A skipped zone is unreachable, not proven vanished: ZONE_NOT_FOUND on
+  // its fetch could be a service-side inconsistency, and untracking every
+  // note in it would be destructive if so. Count it as still-live here; a
+  // share that's genuinely gone will also drop out of the
+  // `changes/database` listing on a later pull and be untracked then.
+  await handleVanishedSharedZones(targetDir, [...sharedZones, ...skippedZones], notes, attachments, tableAttachments, summary);
 
   // Tree reconciliation: move notes (and their attachments) whose directory
   // no longer matches the current layout, then sweep out directories the
