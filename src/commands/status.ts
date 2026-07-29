@@ -1,4 +1,4 @@
-import { serializePlanEntry, type SerializedPlanEntry } from "../notes/pushPlan.js";
+import { countUnchangedNotes, serializePlanEntry, type SerializedPlanEntry } from "../notes/pushPlan.js";
 import { buildPushPlan } from "./push.js";
 
 export interface StatusOptions {
@@ -7,6 +7,9 @@ export interface StatusOptions {
 
 export interface StatusResult {
   entries: SerializedPlanEntry[];
+  /** Tracked notes the plan left untouched - the "N other notes match the
+   * last pull." figure on the human status screen. */
+  unchanged: number;
 }
 
 /**
@@ -22,6 +25,9 @@ export interface StatusResult {
  * also staying offline.
  */
 export async function runStatus(targetDir: string, options: StatusOptions = {}): Promise<StatusResult> {
-  const { entries } = await buildPushPlan(targetDir, { onLoginStatus: options.onLoginStatus });
-  return { entries: entries.map(serializePlanEntry) };
+  const { state, entries } = await buildPushPlan(targetDir, { onLoginStatus: options.onLoginStatus });
+  return {
+    entries: entries.map(serializePlanEntry),
+    unchanged: countUnchangedNotes(entries, Object.keys(state.notes).length),
+  };
 }

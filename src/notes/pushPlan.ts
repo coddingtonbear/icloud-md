@@ -1,4 +1,15 @@
-import chalk from "chalk";
+import type { ChalkInstance } from "chalk";
+import {
+  CHANGED,
+  GONE,
+  MOVED,
+  NEEDS_ATTENTION,
+  NEW,
+  QUIET,
+  UNSYNCABLE,
+  labelledLine,
+  remarkLine,
+} from "../cli/reportStyle.js";
 
 /** Which of the ways a local file can differ from `state.json` this entry
  * represents. "move" is a locally-relocated tracked note (detected by
@@ -25,17 +36,43 @@ export interface PlanEntry {
   previousFile?: string;
 }
 
-const LABELS: Record<Exclude<PlanEntryKind, "move">, (file: string) => string> = {
-  create: (file) => chalk.green(`new file:   ${file}`),
-  update: (file) => chalk.yellow(`modified:   ${file}`),
-  delete: (file) => chalk.red(`deleted:    ${file}`),
+/** Borrowed from `git status` verbatim, because a person who has used git
+ * already knows what these words mean. Only the label carries the colour -
+ * the filename after it stays in the terminal's own foreground. */
+const LABELS: Record<PlanEntryKind, [label: string, color: ChalkInstance]> = {
+  create: ["new file:", NEW],
+  update: ["modified:", CHANGED],
+  delete: ["deleted:", GONE],
+  move: ["moved:", MOVED],
 };
 
+/** Labels are padded to a common width so the listing reads as a column
+ * rather than a ragged list. */
+const LABEL_WIDTH = Math.max(...Object.values(LABELS).map(([label]) => label.length));
+
+/** The preview screens (`status`, `push --dry-run`) indent their change
+ * list under the "Changes not yet pushed" heading, `git status`-style. */
+const PREVIEW_INDENT = " ".repeat(8);
+
+export interface RenderPlanOptions {
+  /** Dresses the listing as the status screen: a "Changes not yet pushed
+   * to iCloud:" heading with next-step hints above the change list, the
+   * list indented beneath it. Used by the previews (`status` and `push
+   * --dry-run`); a real `push` keeps the bare listing, since by then the
+   * entries are outcomes rather than things "not yet pushed". */
+  preview?: boolean;
+  /** How many tracked notes the plan left untouched (see
+   * `countUnchangedNotes`) - enables the trailing "N other note(s) match
+   * the last pull." remark, and its "Nothing to push" variant. */
+  unchanged?: number;
+}
+
 /**
- * Renders a push plan `git status --short`-style: one colored line per
- * non-noop entry (green new/yellow modified/red deleted), an indented
- * magenta reason line immediately under anything refused or conflicting,
- * and a trailing summary line. Shared by `push --dry-run`, real `push`, and
+ * Renders a push plan `git status`-style: one line per non-noop entry with
+ * a colored label column and plain filename, an indented reason line
+ * immediately under anything refused (black-on-red - push will never sync
+ * it as-is) or conflicting (magenta - resolvable, then retry), and a
+ * trailing summary line. Shared by `push --dry-run`, real `push`, and
  * `status` so the three can never show different things for the same state
  * - see the "Push becomes the full reconciler" project notes.
  *
@@ -46,13 +83,32 @@ const LABELS: Record<Exclude<PlanEntryKind, "move">, (file: string) => string> =
  * lines (restore-command hints and the like), so suggested commands stay
  * copy-pasteable from wherever the user is standing.
  */
-export function renderPlan(entries: readonly PlanEntry[], formatPath: (file: string) => string = (file) => file): string[] {
+export function renderPlan(
+  entries: readonly PlanEntry[],
+  formatPath: (file: string) => string = (file) => file,
+  options: RenderPlanOptions = {},
+): string[] {
   const visible = entries.filter((entry) => entry.resolution !== "noop");
   if (visible.length === 0) {
-    return ["Nothing to push."];
+    return [
+      QUIET(
+        options.unchanged !== undefined && options.unchanged > 0
+          ? `Nothing to push; all ${options.unchanged} ${options.unchanged === 1 ? "note matches" : "notes match"} the last pull.`
+          : "Nothing to push.",
+      ),
+    ];
   }
 
+  const indent = options.preview === true ? PREVIEW_INDENT : "";
   const lines: string[] = [];
+  if (options.preview === true) {
+    lines.push(
+      "Changes not yet pushed to iCloud:",
+      QUIET('  (use "icloud-md push" to send them)'),
+      QUIET('  (use "icloud-md restore <file>" to discard a local edit)'),
+      "",
+    );
+  }
   let toCreate = 0;
   let toUpdate = 0;
   let toDelete = 0;
@@ -61,14 +117,15 @@ export function renderPlan(entries: readonly PlanEntry[], formatPath: (file: str
   let conflicts = 0;
 
   for (const entry of visible) {
-    lines.push(
+    const [label, color] = LABELS[entry.kind];
+    const subject =
       entry.kind === "move"
-        ? chalk.cyan(`moved:      ${formatPath(entry.previousFile ?? entry.file)} -> ${formatPath(entry.file)}`)
-        : LABELS[entry.kind](formatPath(entry.file)),
-    );
+        ? `${formatPath(entry.previousFile ?? entry.file)} -> ${formatPath(entry.file)}`
+        : formatPath(entry.file);
+    lines.push(indent + labelledLine(label, color, LABEL_WIDTH, subject));
     if (entry.resolution === "refused" || entry.resolution === "conflict") {
       const reason = (entry.reason ?? "refused").split(entry.file).join(formatPath(entry.file));
-      lines.push(chalk.magenta(`  ! ${reason}`));
+      lines.push(indent + remarkLine(entry.resolution === "refused" ? UNSYNCABLE : NEEDS_ATTENTION, LABEL_WIDTH, `! ${reason}`));
       if (entry.resolution === "refused") {
         refused += 1;
       } else {
@@ -98,8 +155,30 @@ export function renderPlan(entries: readonly PlanEntry[], formatPath: (file: str
     }
     summary += ` (${parts.join(", ")})`;
   }
-  lines.push(summary);
+  lines.push("", summary);
+  if (options.unchanged !== undefined && options.unchanged > 0) {
+    lines.push(
+      QUIET(
+        options.unchanged === 1
+          ? "1 other note matches the last pull."
+          : `${options.unchanged} other notes match the last pull.`,
+      ),
+    );
+  }
   return lines;
+}
+
+/**
+ * How many tracked notes a plan left untouched - the "N other notes match
+ * the last pull." figure. Every non-create entry (update/delete/move)
+ * accounts for exactly one tracked note; creates are untracked files, and a
+ * clean tracked note produces no entry at all. A "noop" update (a byte-level
+ * difference that resolved to no server-side change) counts as unchanged,
+ * matching how the listing hides it.
+ */
+export function countUnchangedNotes(entries: readonly Pick<PlanEntry, "kind" | "resolution">[], trackedNotes: number): number {
+  const touched = entries.filter((entry) => entry.kind !== "create" && entry.resolution !== "noop").length;
+  return Math.max(0, trackedNotes - touched);
 }
 
 /** Strips a `"<file>: "` prefix a refusal/conflict message was built with, so

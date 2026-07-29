@@ -317,7 +317,11 @@ program
       if (r.pushed !== undefined) {
         console.log(`Pushed ${r.pushed} note(s) from ${targetDir}`);
       }
-      for (const line of renderPlan(r.entries, (file) => displayPath(targetDir, file))) {
+      for (const line of renderPlan(
+        r.entries,
+        (file) => displayPath(targetDir, file),
+        r.dryRun ? { preview: true, unchanged: r.unchanged } : {},
+      )) {
         console.log(line);
       }
     });
@@ -337,7 +341,10 @@ program
     const targetDir = await resolveTargetDir(directory);
     const result = await runStatus(targetDir, { onLoginStatus: makeStatusSink(context) });
     emitResult(context, result, (r) => {
-      for (const line of renderPlan(r.entries, (file) => displayPath(targetDir, file))) {
+      for (const line of renderPlan(r.entries, (file) => displayPath(targetDir, file), {
+        preview: true,
+        unchanged: r.unchanged,
+      })) {
         console.log(line);
       }
     });

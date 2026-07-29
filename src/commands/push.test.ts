@@ -554,5 +554,5 @@ test("runPush returns no entries and a zero pushed count when the plan is empty"
 
     const result = await runPush(dir);
 
-    assert.deepEqual(result, { dryRun: false, pushed: 0, entries: [] });
+    assert.deepEqual(result, { dryRun: false, pushed: 0, entries: [], unchanged: 1 });
   }));

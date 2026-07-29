@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import chalk from "chalk";
-import { renderPlan, stripFilePrefix, type PlanEntry } from "./pushPlan.js";
+import { countUnchangedNotes, renderPlan, stripFilePrefix, type PlanEntry } from "./pushPlan.js";
 
 // Stable, non-ANSI assertions - colorized rendering itself is exercised by
 // the color-specific test below, forcing chalk back on for that one case.
@@ -26,9 +26,10 @@ test("renderPlan lists one line per ready entry, plus a create/update/delete sum
     { kind: "delete", file: "Gone.md", resolution: "ready" },
   ];
   assert.deepEqual(renderPlan(entries), [
-    "new file:   New.md",
-    "modified:   Edited.md",
-    "deleted:    Gone.md",
+    "new file: New.md",
+    "modified: Edited.md",
+    "deleted:  Gone.md",
+    "",
     "1 to create, 1 changed, 1 to delete.",
   ]);
 });
@@ -39,10 +40,11 @@ test("renderPlan shows a refused/conflict entry's label plus an indented reason 
     { kind: "delete", file: "Stale.md", resolution: "conflict", reason: "changed remotely since the last pull - run \"pull\" first" },
   ];
   assert.deepEqual(renderPlan(entries), [
-    "modified:   Refused.md",
-    "  ! this note has an attachment",
-    "deleted:    Stale.md",
-    '  ! changed remotely since the last pull - run "pull" first',
+    "modified: Refused.md",
+    "          ! this note has an attachment",
+    "deleted:  Stale.md",
+    '          ! changed remotely since the last pull - run "pull" first',
+    "",
     "0 to create, 0 changed, 0 to delete. (1 conflict(s), 1 refused)",
   ]);
 });
@@ -52,18 +54,87 @@ test("renderPlan omits noop entries from the listing but keeps the ready/refused
     { kind: "update", file: "Clean.md", resolution: "noop" },
     { kind: "update", file: "Edited.md", resolution: "ready" },
   ];
-  assert.deepEqual(renderPlan(entries), ["modified:   Edited.md", "0 to create, 1 changed, 0 to delete."]);
+  assert.deepEqual(renderPlan(entries), ["modified: Edited.md", "", "0 to create, 1 changed, 0 to delete."]);
 });
 
-test("renderPlan actually applies color when chalk is enabled", () => {
+test("renderPlan colors only the status label, leaving the filename in the terminal's own color", () => {
   const originalLevel = chalk.level;
   chalk.level = 1;
   try {
     const [line] = renderPlan([{ kind: "create", file: "New.md", resolution: "ready" }]);
-    assert.match(line ?? "", /\x1b\[/);
+    assert.match(line ?? "", /\x1b\[32mnew file:\x1b\[39m New\.md$/);
   } finally {
     chalk.level = originalLevel;
   }
+});
+
+test("renderPlan sets refusal reasons black-on-red and conflict reasons magenta", () => {
+  const originalLevel = chalk.level;
+  chalk.level = 1;
+  try {
+    const lines = renderPlan([
+      { kind: "update", file: "Refused.md", resolution: "refused", reason: "this note has an attachment" },
+      { kind: "update", file: "Stale.md", resolution: "conflict", reason: "changed remotely" },
+    ]);
+    // Black text on a red background, with the indent left uncolored so the
+    // background starts at the text.
+    assert.match(lines[1] ?? "", /^ {10}\x1b\[41m\x1b\[30m! this note has an attachment\x1b\[39m\x1b\[49m$/);
+    assert.match(lines[3] ?? "", /^ {10}\x1b\[35m! changed remotely\x1b\[39m$/);
+  } finally {
+    chalk.level = originalLevel;
+  }
+});
+
+test("renderPlan's preview mode wraps the listing in a heading, next-step hints, indentation, and an unchanged remark", () => {
+  const entries: PlanEntry[] = [
+    { kind: "update", file: "Edited.md", resolution: "ready" },
+    { kind: "update", file: "Refused.md", resolution: "refused", reason: "this note has an attachment" },
+  ];
+  assert.deepEqual(renderPlan(entries, undefined, { preview: true, unchanged: 41 }), [
+    "Changes not yet pushed to iCloud:",
+    '  (use "icloud-md push" to send them)',
+    '  (use "icloud-md restore <file>" to discard a local edit)',
+    "",
+    "        modified: Edited.md",
+    "        modified: Refused.md",
+    "                  ! this note has an attachment",
+    "",
+    "0 to create, 1 changed, 0 to delete. (1 refused)",
+    "41 other notes match the last pull.",
+  ]);
+});
+
+test("renderPlan says which single note matches the last pull grammatically", () => {
+  const entries: PlanEntry[] = [{ kind: "update", file: "Edited.md", resolution: "ready" }];
+  const lines = renderPlan(entries, undefined, { unchanged: 1 });
+  assert.equal(lines.at(-1), "1 other note matches the last pull.");
+});
+
+test("renderPlan omits the unchanged remark when nothing else is tracked", () => {
+  const entries: PlanEntry[] = [{ kind: "update", file: "Edited.md", resolution: "ready" }];
+  const lines = renderPlan(entries, undefined, { preview: true, unchanged: 0 });
+  assert.equal(lines.at(-1), "0 to create, 1 changed, 0 to delete.");
+});
+
+test("renderPlan folds the unchanged count into \"Nothing to push\" for a clean vault", () => {
+  assert.deepEqual(renderPlan([], undefined, { preview: true, unchanged: 42 }), [
+    "Nothing to push; all 42 notes match the last pull.",
+  ]);
+  assert.deepEqual(renderPlan([], undefined, { preview: true, unchanged: 1 }), [
+    "Nothing to push; all 1 note matches the last pull.",
+  ]);
+  assert.deepEqual(renderPlan([], undefined, { preview: true, unchanged: 0 }), ["Nothing to push."]);
+});
+
+test("countUnchangedNotes counts tracked notes untouched by the plan, treating creates as untracked and noops as unchanged", () => {
+  const entries: PlanEntry[] = [
+    { kind: "create", file: "New.md", resolution: "ready" },
+    { kind: "update", file: "Edited.md", resolution: "ready" },
+    { kind: "update", file: "Cosmetic.md", resolution: "noop" },
+    { kind: "delete", file: "Gone.md", resolution: "conflict", reason: "changed remotely" },
+  ];
+  assert.equal(countUnchangedNotes(entries, 10), 8);
+  assert.equal(countUnchangedNotes([], 10), 10);
 });
 
 test("stripFilePrefix removes a leading \"<file>: \" prefix", () => {
@@ -84,6 +155,6 @@ test("renderPlan re-expresses paths through formatPath, including inside reason 
     },
   ];
   const lines = renderPlan(entries, (file) => `../${file}`);
-  assert.match(lines[0] ?? "", /modified: {3}\.\.\/Recipes\/Pie\.md/);
+  assert.match(lines[0] ?? "", /modified: \.\.\/Recipes\/Pie\.md/);
   assert.match(lines[1] ?? "", /restore \.\.\/Recipes\/Pie\.md/);
 });

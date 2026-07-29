@@ -27,7 +27,7 @@ import { hasEmbedMarker, hasUnknownContentMarker } from "../notes/unknownContent
 import { localFileState } from "../notes/localFileState.js";
 import { recordEpoch } from "../notes/noteEpoch.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
-import { serializePlanEntry, stripFilePrefix, type PlanEntry, type SerializedPlanEntry } from "../notes/pushPlan.js";
+import { countUnchangedNotes, serializePlanEntry, stripFilePrefix, type PlanEntry, type SerializedPlanEntry } from "../notes/pushPlan.js";
 import { decodeNoteFormat, formatsRoundTripEqual, type FormatParagraph } from "../notes/noteFormat.js";
 import { compressNoteDocument, decodeNoteBodyText, decodeNoteString, decompressNoteDocument } from "../notes/noteText.js";
 import { joinFrontmatter, splitFrontmatter } from "../notes/frontmatter.js";
@@ -94,6 +94,9 @@ export interface PushResult {
    * reported success - absent for a dry run. */
   pushed?: number;
   entries: PushEntryResult[];
+  /** Tracked notes the plan left untouched - the "N other notes match the
+   * last pull." figure on the dry-run preview screen. */
+  unchanged: number;
 }
 
 interface PushCandidate {
@@ -989,13 +992,14 @@ export async function planRemoteChangedMerge(
 export async function runPush(targetDir: string, options: PushOptions = {}): Promise<PushResult> {
   const dryRun = options.dryRun === true;
   const { state, entries } = await buildPushPlan(targetDir, { onLoginStatus: options.onLoginStatus });
+  const unchanged = countUnchangedNotes(entries, Object.keys(state.notes).length);
 
   if (entries.length === 0) {
-    return { dryRun, entries: [], ...(dryRun ? {} : { pushed: 0 }) };
+    return { dryRun, entries: [], unchanged, ...(dryRun ? {} : { pushed: 0 }) };
   }
 
   if (dryRun) {
-    return { dryRun, entries: entries.map(serializePlanEntry) };
+    return { dryRun, entries: entries.map(serializePlanEntry), unchanged };
   }
 
   let pushed = 0;
@@ -1013,7 +1017,7 @@ export async function runPush(targetDir: string, options: PushOptions = {}): Pro
   }
   await writeCloneState(targetDir, state);
 
-  return { dryRun, pushed, entries: results };
+  return { dryRun, pushed, entries: results, unchanged };
 }
 
 /** Untracked `.md` files anywhere in the vault, as vault-root-relative

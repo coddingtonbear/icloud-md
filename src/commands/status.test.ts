@@ -28,6 +28,7 @@ test("runStatus returns no entries for an already-clean, untracked-file-free dir
     const result = await runStatus(dir);
 
     assert.deepEqual(result.entries, []);
+    assert.equal(result.unchanged, 0);
   }));
 
 test("runStatus reports an untracked file's local refusal exactly like push --dry-run would, without needing a bound account", () =>
