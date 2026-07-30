@@ -282,16 +282,9 @@ program
     "Fetch all Notes into a fresh local directory; signs in via a browser window the first time a directory " +
       "(or a new account) is used",
   )
-  .option(
-    "--id-in-frontmatter",
-    "record each note's Apple note id in its file's frontmatter, so renames and moves are tracked exactly rather " +
-      "than guessed at (chosen once, for the life of the clone)",
-  )
-  .action(async (directory: string, opts: { idInFrontmatter?: boolean }, command: Command) => {
+  .action(async (directory: string, _opts: unknown, command: Command) => {
     const context = contextFor(command);
-    const summary = await runClone(directory, makeSyncProgress(context), makeStatusSink(context), {
-      idInFrontmatter: opts.idInFrontmatter === true,
-    });
+    const summary = await runClone(directory, makeSyncProgress(context), makeStatusSink(context));
     emitResult(context, summary, (result) => printCloneSummary(directory, result));
   });
 

@@ -18,17 +18,10 @@ const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 
 export interface CloneOptions {
   /**
-   * Record each note's CloudKit recordName in its file's local-only
-   * frontmatter, so renames and moves resolve exactly rather than by
-   * heuristic. Chosen here because it's a property of the whole vault: it
-   * lands in `state.json` and every later command reads it from there.
-   */
-  idInFrontmatter?: boolean;
-  /**
    * Carry note titles in file names rather than as each note's first line -
    * the Obsidian-shaped layout, where the file name is the document title.
-   * Implies `idInFrontmatter`: a rename *is* a retitle in this mode, so
-   * mistaking one for a delete plus a create would lose the note's history.
+   * Every vault records note ids in frontmatter, which is what makes a
+   * rename resolvable at all - and a rename *is* a retitle in this mode.
    */
   filenameAsTitle?: boolean;
 }
@@ -61,9 +54,6 @@ export async function runClone(
     throw new AlreadyClonedDirectoryError(targetDir);
   }
   const titleMode = options.filenameAsTitle === true ? "filename" : "in-body";
-  // The mode is unsafe without exact rename detection, so it turns ids on
-  // whether or not they were asked for.
-  const idInFrontmatter = options.idInFrontmatter === true || titleMode === "filename";
 
   const auth = await bindNewFolderAccount({ onStatus: onLoginStatus });
   if (!auth.ckdatabasewsUrl) {
@@ -190,7 +180,7 @@ export async function runClone(
         const relativeFile = path.posix.join(placement.dir, fileName);
 
         const filePath = path.join(targetDir, relativeFile);
-        await writeFile(filePath, composeNoteFile("", bodyText, { recordName: record.recordName, idInFrontmatter }), "utf-8");
+        await writeFile(filePath, composeNoteFile("", bodyText, record.recordName), "utf-8");
         await applyNoteFileTimes(filePath, record);
         await writeBaseCopy(targetDir, record.recordName, bodyText);
         if (source.sharedZoneOwner) {
@@ -222,7 +212,6 @@ export async function runClone(
 
   await writeCloneState(targetDir, {
     account: { appleId: auth.appleId, dsid: auth.dsid },
-    idInFrontmatter,
     titleMode,
     syncToken,
     sharedZoneSyncTokens,

@@ -132,14 +132,6 @@ export interface CloneState {
    */
   generator?: string | undefined;
   /**
-   * Whether this vault records each note's CloudKit recordName in its file's
-   * local-only frontmatter (`apple-note-id`), making renames and moves
-   * resolve exactly instead of by heuristic. Chosen at `clone` time and
-   * fixed for the vault afterwards; absent means false, which is the shape
-   * of every vault cloned before the option existed.
-   */
-  idInFrontmatter?: boolean | undefined;
-  /**
    * Where this vault carries note titles. "filename" is the Obsidian-shaped
    * mode: the file name is the title and the file holds only the body, so a
    * note doesn't show its title twice. "in-body" (the default, and the shape
@@ -149,8 +141,8 @@ export interface CloneState {
    * A property of the whole vault, never of one command: pulling a
    * filename-as-title vault in in-body mode would read as "every note
    * changed" and either duplicate or delete every title in a single run.
-   * `idInFrontmatter` is implied by "filename" - the mode isn't safe without
-   * exact rename detection, since a rename *is* a retitle here.
+   * Every vault records note ids in frontmatter regardless of this, which is
+   * what makes a rename resolvable at all - and a rename *is* a retitle here.
    */
   titleMode?: "in-body" | "filename" | undefined;
   /**
@@ -217,9 +209,8 @@ export const STATE_FILE_NAME = "state.json";
  * The on-disk layout generation this build reads and writes - see
  * CloneState.layoutVersion.
  *
- * Version 3 adds the title-mode fields (`titleMode`, `idInFrontmatter`) and
- * makes them explicit rather than inferred, so no code has to reason about
- * their absence. Bumping is a one-way door - an older icloud-md meeting a
+ * Version 3 records `titleMode` explicitly and stamps every note file with
+ * its `apple-note-id`, so no code has to reason about either being absent. Bumping is a one-way door - an older icloud-md meeting a
  * migrated vault refuses it - so it is spent only when the on-disk shape
  * genuinely changes, never on additive metadata.
  */
@@ -415,7 +406,6 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
   return {
     layoutVersion: CURRENT_LAYOUT_VERSION,
     generator: typeof value.generator === "string" ? value.generator : undefined,
-    idInFrontmatter: value.idInFrontmatter === true,
     titleMode: value.titleMode === "filename" ? "filename" : "in-body",
     account,
     syncToken,

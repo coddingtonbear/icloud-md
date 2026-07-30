@@ -87,6 +87,12 @@ export function readNoteId(frontmatter: string): string | undefined {
  * changing (see the module comment).
  */
 export function setNoteId(frontmatter: string, id: string): string {
+  // Never write something `readNoteId` would refuse to read back: the two
+  // would disagree forever, and every pull would rewrite the envelope trying
+  // to set an id that never sticks.
+  if (!isNoteId(id)) {
+    return frontmatter;
+  }
   if (readNoteId(frontmatter) === id) {
     return frontmatter;
   }
@@ -128,20 +134,19 @@ export function clearNoteId(frontmatter: string): string {
 
 /**
  * Assembles the text of a note's working file: the body, under an envelope
- * carrying its id when the vault records ids. The single place `clone` and
- * `pull` go through, so the two can't disagree about whether a freshly
- * written file is stamped.
+ * carrying its id. The single place `clone` and `pull` go through, so the two
+ * can't disagree about whether a freshly written file is stamped.
+ *
+ * Every note carries its id - there is no mode in which one doesn't. Making
+ * it optional bought no correctness (nothing about the sync needs the id
+ * absent) and cost a second pairing path through `push` forever, so the
+ * option was removed in favour of one shape.
  *
  * `frontmatter` is whatever envelope the file already had (empty for a file
  * being created), so a user's own keys survive every rewrite.
  */
-export function composeNoteFile(
-  frontmatter: string,
-  body: string,
-  options: { recordName: string; idInFrontmatter: boolean },
-): string {
-  const envelope = options.idInFrontmatter ? setNoteId(frontmatter, options.recordName) : frontmatter;
-  return joinFrontmatter(envelope, body);
+export function composeNoteFile(frontmatter: string, body: string, recordName: string): string {
+  return joinFrontmatter(setNoteId(frontmatter, recordName), body);
 }
 
 const FENCE = "---";

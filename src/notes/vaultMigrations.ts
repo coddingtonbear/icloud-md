@@ -28,6 +28,11 @@
  * rewritten.
  */
 
+import { readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { isEnoent } from "../fsUtil.js";
+import { joinFrontmatter, splitFrontmatter } from "./frontmatter.js";
+import { setNoteId } from "./noteIdFrontmatter.js";
 import {
   CURRENT_LAYOUT_VERSION,
   readCloneState,
@@ -65,28 +70,61 @@ export interface VaultMigration {
 }
 
 /**
- * Records where a version-2 vault keeps its note titles. Such a vault
- * predates the mode entirely, so it is in-body by definition and no file
- * needs rewriting - the migration only makes the implicit explicit, which is
- * what lets every later read treat `titleMode` as always present.
+ * Brings a version-2 vault up to the one shape every later read assumes:
+ * `titleMode` recorded explicitly, and every tracked note's file carrying its
+ * `apple-note-id`.
+ *
+ * A version-2 vault predates the title mode entirely, so it is in-body by
+ * definition and nothing about its *content* changes. The id stamping is the
+ * part that touches files, and it's what lets `push` have exactly one pairing
+ * path rather than an id path plus a heuristic one forever.
+ *
+ * Idempotent, as every migration must be: `setNoteId` returns the envelope
+ * untouched when the id is already right, so a re-run after an interrupted
+ * pass rewrites nothing. A tracked file that isn't on disk is skipped rather
+ * than created - `pull` recreates it, and stamping a file into existence here
+ * would resurrect notes the user deleted.
  *
  * Adopting `filename` in an existing vault is a *mode change*, not a version
- * migration: two vaults at version 3 legitimately differ on it. That's a
- * separate operation, since it has to rewrite every file.
+ * migration: two vaults at version 3 legitimately differ on it.
  */
-const recordTitleMode: VaultMigration = {
+const recordTitleModeAndIds: VaultMigration = {
   from: 2,
   to: 3,
-  describe: "recording where this vault keeps note titles",
-  run: async ({ state }) => ({
-    ...state,
-    titleMode: state.titleMode === "filename" ? "filename" : "in-body",
-    idInFrontmatter: state.idInFrontmatter === true,
-  }),
+  describe: "recording note ids in each file's frontmatter",
+  run: async ({ targetDir, state }) => {
+    const notes = isRecord(state.notes) ? state.notes : {};
+    for (const [recordName, entry] of Object.entries(notes)) {
+      const file = isRecord(entry) && typeof entry.file === "string" ? entry.file : undefined;
+      if (file === undefined) {
+        continue;
+      }
+      const filePath = path.join(targetDir, file);
+      let existing: string;
+      try {
+        existing = await readFile(filePath, "utf-8");
+      } catch (cause) {
+        if (isEnoent(cause)) {
+          continue;
+        }
+        throw cause;
+      }
+      const { frontmatter, body } = splitFrontmatter(existing);
+      const stamped = joinFrontmatter(setNoteId(frontmatter, recordName), body);
+      if (stamped !== existing) {
+        await writeFile(filePath, stamped, "utf-8");
+      }
+    }
+    return { ...state, titleMode: state.titleMode === "filename" ? "filename" : "in-body" };
+  },
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 /** The migration chain, ordered by `from`. */
-export const VAULT_MIGRATIONS: readonly VaultMigration[] = [recordTitleMode];
+export const VAULT_MIGRATIONS: readonly VaultMigration[] = [recordTitleModeAndIds];
 
 /** A chain and the version it climbs to. Separated from the module-level
  * constants purely so the runner can be exercised against synthetic chains -

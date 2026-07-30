@@ -11,7 +11,9 @@ import {
   writeCloneState,
   type RawStateFile,
 } from "./cloneState.js";
-import { openVault, runVaultMigrations, type VaultMigration } from "./vaultMigrations.js";
+import { openVault, runVaultMigrations, VAULT_MIGRATIONS, type VaultMigration } from "./vaultMigrations.js";
+import { writeBaseCopy } from "./baseCopy.js";
+import { localFileState } from "./localFileState.js";
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), "vault-migrations-test-"));
@@ -204,9 +206,8 @@ test("a version-2 vault migrates forward on first contact, in place", () =>
     // A pre-mode vault is in-body by definition, and nothing about its files
     // needs rewriting to say so.
     assert.equal(state?.titleMode, "in-body");
-    assert.equal(state?.idInFrontmatter, false);
     assert.equal(state?.notes["REC-1"]?.file, "Notes/A.md", "the vault's contents come through untouched");
-    assert.deepEqual(described, ["recording where this vault keeps note titles"]);
+    assert.deepEqual(described, [VAULT_MIGRATIONS[0]!.describe]);
 
     // Committed to disk, not just to the returned object.
     assert.equal((await readStateFile(dir)).layoutVersion, CURRENT_LAYOUT_VERSION);
@@ -232,11 +233,93 @@ test("a filename-as-title vault keeps its mode through migration", () =>
       syncToken: "token",
       notes: {},
       titleMode: "filename",
-      idInFrontmatter: true,
     });
 
     const state = await openVault(dir);
 
     assert.equal(state?.titleMode, "filename");
-    assert.equal(state?.idInFrontmatter, true);
+  }));
+
+test("the version-2 migration stamps every tracked note file with its id", () =>
+  withTempDir(async (dir) => {
+    const idA = "089D915D-C76E-4F44-AB80-2190073281A3";
+    const idB = "001b9e8a-c474-4311-af32-abe70026b346";
+    await mkdir(path.join(dir, "Notes"), { recursive: true });
+    await writeFile(path.join(dir, "Notes/A.md"), "# A\n\nBody A", "utf-8");
+    await writeFile(path.join(dir, "Notes/B.md"), "---\ntags: [keep]\n---\n\n# B\n\nBody B", "utf-8");
+    await writeStateAtVersion(dir, {
+      layoutVersion: 2,
+      syncToken: "token",
+      notes: {
+        [idA]: { file: "Notes/A.md", recordChangeTag: "t", modificationDate: 1 },
+        [idB]: { file: "Notes/B.md", recordChangeTag: "t", modificationDate: 1 },
+      },
+    });
+
+    await openVault(dir);
+
+    const a = await readFile(path.join(dir, "Notes/A.md"), "utf-8");
+    assert.match(a, new RegExp(`apple-note-id: ${idA}`));
+    assert.ok(a.includes("# A"), "the note body is untouched");
+
+    const b = await readFile(path.join(dir, "Notes/B.md"), "utf-8");
+    assert.match(b, new RegExp(`apple-note-id: ${idB}`));
+    assert.match(b, /tags:/, "the user's own frontmatter survives");
+  }));
+
+test("stamping ids doesn't make a clean file read as modified", () =>
+  withTempDir(async (dir) => {
+    // The property that keeps the migration from triggering a vault-wide
+    // spurious push: localFileState compares body-only.
+    const id = "089D915D-C76E-4F44-AB80-2190073281A3";
+    await mkdir(path.join(dir, "Notes"), { recursive: true });
+    await writeFile(path.join(dir, "Notes/A.md"), "# A\n\nBody A", "utf-8");
+    await writeBaseCopy(dir, id, "# A\n\nBody A");
+    await writeStateAtVersion(dir, {
+      layoutVersion: 2,
+      syncToken: "token",
+      notes: { [id]: { file: "Notes/A.md", recordChangeTag: "t", modificationDate: 1 } },
+    });
+
+    await openVault(dir);
+
+    assert.equal(await localFileState(dir, { file: "Notes/A.md", recordChangeTag: "t", modificationDate: 1 }, id), "clean");
+  }));
+
+test("the migration skips a tracked file that isn't on disk rather than creating one", () =>
+  withTempDir(async (dir) => {
+    // Stamping a file into existence here would resurrect a note the user
+    // deleted locally, turning a pending delete into a no-op.
+    const id = "089D915D-C76E-4F44-AB80-2190073281A3";
+    await writeStateAtVersion(dir, {
+      layoutVersion: 2,
+      syncToken: "token",
+      notes: { [id]: { file: "Notes/Gone.md", recordChangeTag: "t", modificationDate: 1 } },
+    });
+
+    const state = await openVault(dir);
+
+    assert.equal(state?.layoutVersion, CURRENT_LAYOUT_VERSION);
+    await assert.rejects(() => readFile(path.join(dir, "Notes/Gone.md"), "utf-8"));
+  }));
+
+test("re-running the migration rewrites nothing", () =>
+  withTempDir(async (dir) => {
+    const id = "089D915D-C76E-4F44-AB80-2190073281A3";
+    await mkdir(path.join(dir, "Notes"), { recursive: true });
+    await writeFile(path.join(dir, "Notes/A.md"), "# A", "utf-8");
+    await writeStateAtVersion(dir, {
+      layoutVersion: 2,
+      syncToken: "token",
+      notes: { [id]: { file: "Notes/A.md", recordChangeTag: "t", modificationDate: 1 } },
+    });
+
+    await openVault(dir);
+    const afterFirst = await readFile(path.join(dir, "Notes/A.md"), "utf-8");
+    // Replay the same step against the already-stamped vault.
+    await runVaultMigrations(dir, { migrations: VAULT_MIGRATIONS, targetVersion: CURRENT_LAYOUT_VERSION });
+    await writeStateAtVersion(dir, { ...(await readStateFile(dir)), layoutVersion: 2 });
+    await openVault(dir);
+
+    assert.equal(await readFile(path.join(dir, "Notes/A.md"), "utf-8"), afterFirst);
   }));

@@ -194,8 +194,6 @@ export async function buildPushPlan(
   let planningMutatedState = false;
   const notices: SyncNotice[] = [];
 
-  const idInFrontmatter = state.idInFrontmatter === true;
-
   const untracked: { file: string; localText: string; noteId?: string | undefined }[] = [];
   for (const file of await listUntrackedMarkdownFiles(targetDir, state)) {
     // Body only for the note itself: an untracked file's local-only
@@ -204,7 +202,7 @@ export async function buildPushPlan(
     // here, because in an id-recording vault it carries the one thing that
     // says which note this file *is*.
     const { frontmatter, body } = splitFrontmatter(await readFile(path.join(targetDir, file), "utf-8"));
-    untracked.push({ file, localText: body, noteId: idInFrontmatter ? readNoteId(frontmatter) : undefined });
+    untracked.push({ file, localText: body, noteId: readNoteId(frontmatter) });
   }
 
   const updateCandidates: PushCandidate[] = [];
@@ -304,10 +302,10 @@ export async function buildPushPlan(
   // copy is which.
   const ambiguousRecordNames = new Set<string>();
 
-  // In an id-recording vault the pairing is exact, and the heuristics below
-  // only ever see files that carry no usable id (pre-flag notes, hand-made
-  // files, envelopes someone stripped). See `noteIdPairing.ts`.
-  if (idInFrontmatter) {
+  // The pairing is exact, and the heuristics below only ever see files that
+  // carry no usable id - a brand-new file the user made, or one whose
+  // envelope was stripped by hand. See `noteIdPairing.ts`.
+  {
     const missingByRecordName = new Map(missingCandidates.map((candidate) => [candidate.recordName, candidate]));
     const resolution = resolveNoteIds({
       untracked,
@@ -816,11 +814,9 @@ export async function buildPushPlan(
         // next rename resolves exactly instead of by heuristic. This is also
         // what re-homes a *copied* file: it arrived carrying the original's
         // id, and leaves carrying its own.
-        if (idInFrontmatter) {
-          const filePath = path.join(targetDir, file);
-          const { frontmatter, body } = splitFrontmatter(await readFile(filePath, "utf-8"));
-          await writeFile(filePath, joinFrontmatter(setNoteId(frontmatter, recordName), body), "utf-8");
-        }
+        const filePath = path.join(targetDir, file);
+        const { frontmatter, body } = splitFrontmatter(await readFile(filePath, "utf-8"));
+        await writeFile(filePath, joinFrontmatter(setNoteId(frontmatter, recordName), body), "utf-8");
         await applyNoteFileTimes(path.join(targetDir, file), result.record);
         const textValue = result.record.fields.TextDataEncrypted?.value;
         if (typeof textValue === "string") {

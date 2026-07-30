@@ -567,12 +567,11 @@ test("runPush returns no entries and a zero pushed count when the plan is empty"
 const NOTE_ID = "089D915D-C76E-4F44-AB80-2190073281A3";
 const OTHER_NOTE_ID = "001b9e8a-c474-4311-af32-abe70026b346";
 
-/** state() with id recording on, and REC1's id set to NOTE_ID. */
+/** state() with REC1 keyed by a real note id. */
 function idState(): CloneState {
   const base = state();
   return {
     ...base,
-    idInFrontmatter: true,
     notes: { [NOTE_ID]: base.notes.REC1! },
   };
 }
@@ -597,15 +596,17 @@ test("an id pairs a note renamed, moved, and edited all at once - which no heuri
     assert.equal(entries[0]?.file, "Nowhere/Totally Different.md");
   }));
 
-test("without id recording, the same rename+move+edit falls back to delete plus create", () =>
+test("a file with its envelope stripped falls back to delete plus create", () =>
   withTempDir(async (dir) => {
-    const s = { ...idState(), idInFrontmatter: false };
     await writeBaseCopy(dir, NOTE_ID, "Synced text");
-    await writeVaultFile(dir, "Nowhere/Totally Different.md", withId(NOTE_ID, "Edited after renaming"));
-    await writeCloneState(dir, s);
+    // No id, different basename, different content: nothing left for either
+    // the id path or the heuristics to pair on. This is the degradation the
+    // heuristics can't rescue, and it must not silently pick a wrong note.
+    await writeVaultFile(dir, "Nowhere/Totally Different.md", "Edited after renaming");
+    await writeCloneState(dir, idState());
 
     // The unpaired missing file becomes a delete candidate, which needs the
-    // live record - reaching the network at all proves the id was ignored.
+    // live record - reaching the network at all proves nothing paired.
     await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
   }));
 

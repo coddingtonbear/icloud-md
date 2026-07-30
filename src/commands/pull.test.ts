@@ -123,7 +123,6 @@ test("a merge stamps the note id into a file that had lost its envelope", () =>
       MERGE_NOTE_ID,
       "Notes/Note.md",
       "line one\n\nline two edited remotely\n",
-      true,
     );
 
     assert.equal(merged.status, "merged");
@@ -134,14 +133,17 @@ test("a merge stamps the note id into a file that had lost its envelope", () =>
     assert.equal(await readBaseCopy(dir, MERGE_NOTE_ID), "line one\n\nline two edited remotely\n");
   }));
 
-test("a merge in a vault that doesn't record ids adds no frontmatter", () =>
+test("a merge doesn't disturb an id the file already carried", () =>
   withTempDir(async (dir) => {
+    const envelope = `---\napple-note-id: ${MERGE_NOTE_ID}\n---\n\n`;
     await writeBaseCopy(dir, MERGE_NOTE_ID, "line one\n");
-    await writeVaultFile(dir, "Notes/Note.md", "line one edited locally\n");
+    await writeVaultFile(dir, "Notes/Note.md", `${envelope}line one edited locally\n`);
 
     await mergeRemoteChangeIntoLocalFile(dir, MERGE_NOTE_ID, "Notes/Note.md", "line one\nline two\n");
 
-    assert.ok(!(await readFile(path.join(dir, "Notes/Note.md"), "utf-8")).includes("apple-note-id"));
+    const written = await readFile(path.join(dir, "Notes/Note.md"), "utf-8");
+    assert.ok(written.startsWith(envelope), "the envelope is left byte-identical when the id is already right");
+    assert.equal((written.match(/apple-note-id/g) ?? []).length, 1);
   }));
 
 test("a merge preserves a user's own frontmatter keys alongside the id", () =>
@@ -149,7 +151,7 @@ test("a merge preserves a user's own frontmatter keys alongside the id", () =>
     await writeBaseCopy(dir, MERGE_NOTE_ID, "line one\n");
     await writeVaultFile(dir, "Notes/Note.md", "---\ntags: [recipes]\n---\n\nline one edited locally\n");
 
-    await mergeRemoteChangeIntoLocalFile(dir, MERGE_NOTE_ID, "Notes/Note.md", "line one\nline two\n", true);
+    await mergeRemoteChangeIntoLocalFile(dir, MERGE_NOTE_ID, "Notes/Note.md", "line one\nline two\n");
 
     const written = await readFile(path.join(dir, "Notes/Note.md"), "utf-8");
     assert.match(written, /tags:/);

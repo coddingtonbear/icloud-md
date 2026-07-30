@@ -94,7 +94,6 @@ export async function runPull(
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
   }
-  const idInFrontmatter = state.idInFrontmatter === true;
   const titleMode = state.titleMode === "filename" ? "filename" : "in-body";
 
   const auth = await resolveFolderAccount(targetDir, state.account, { onStatus: onLoginStatus });
@@ -331,7 +330,7 @@ export async function runPull(
           const filePath = path.join(targetDir, relativeFile);
           await writeFile(
             filePath,
-            composeNoteFile("", bodyText, { recordName: record.recordName, idInFrontmatter }),
+            composeNoteFile("", bodyText, record.recordName),
             "utf-8",
           );
           await applyNoteFileTimes(filePath, record);
@@ -365,7 +364,7 @@ export async function runPull(
           // the next time the note changes remotely.
           await writeFile(
             filePath,
-            composeNoteFile(frontmatter, bodyText, { recordName: record.recordName, idInFrontmatter }),
+            composeNoteFile(frontmatter, bodyText, record.recordName),
             "utf-8",
           );
           await applyNoteFileTimes(filePath, record);
@@ -395,7 +394,6 @@ export async function runPull(
           record.recordName,
           existing.file,
           bodyText,
-          idInFrontmatter,
         );
         if (merged.status === "unresolvedMarkers") {
           // Nothing advanced - not the file, not the base copy, not the tag:
@@ -475,7 +473,6 @@ export async function runPull(
     // the vault's replica identity on every pull, forcing the next push to
     // mint a fresh replica.
     replicaId: state.replicaId,
-    idInFrontmatter: state.idInFrontmatter,
     titleMode: state.titleMode,
     notes,
     folders: layout.stateFolders,
@@ -696,7 +693,6 @@ export async function mergeRemoteChangeIntoLocalFile(
   recordName: string,
   file: string,
   remoteBodyText: string,
-  idInFrontmatter = false,
 ): Promise<{ status: "merged" | "conflict" | "unresolvedMarkers" }> {
   const base = (await readBaseCopy(targetDir, recordName)) ?? "";
   const { frontmatter, body: localContent } = splitFrontmatter(await readFile(path.join(targetDir, file), "utf-8"));
@@ -712,7 +708,7 @@ export async function mergeRemoteChangeIntoLocalFile(
 
   await writeFile(
     path.join(targetDir, file),
-    composeNoteFile(frontmatter, outcome.text, { recordName, idInFrontmatter }),
+    composeNoteFile(frontmatter, outcome.text, recordName),
     "utf-8",
   );
   if (!outcome.hasConflict) {

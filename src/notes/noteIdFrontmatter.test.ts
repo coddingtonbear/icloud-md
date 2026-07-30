@@ -124,3 +124,12 @@ test("isNoteId accepts real recordNames in both cases and rejects everything els
   assert.ok(!isNoteId("AccountData"));
   assert.ok(!isNoteId(`${ID}-extra`));
 });
+
+test("setNoteId refuses to write an id readNoteId wouldn't accept", () => {
+  // Otherwise the two disagree forever and every pull rewrites the envelope
+  // trying to set an id that never sticks.
+  for (const bad of ["REC1", "", "not-a-uuid", "AccountData"]) {
+    assert.equal(setNoteId("", bad), "", `setNoteId wrote ${bad}`);
+    assert.equal(setNoteId("---\ntags: [a]\n---\n\n", bad), "---\ntags: [a]\n---\n\n");
+  }
+});
