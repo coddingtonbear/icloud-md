@@ -4,7 +4,7 @@ import { lookupRecords, noteZone, type NoteZone } from "../cloudkit/databaseClie
 import { NotClonedDirectoryError, NotesUnavailableError, UnknownVersionSnapshotError, VersionContentUnavailableError } from "../errors.js";
 import { decodeTableAttachment } from "../notes/attachmentSync.js";
 import { type CloneState } from "../notes/cloneState.js";
-import { openVault } from "../notes/vaultMigrations.js";
+import { migrationReporter, openVault } from "../notes/vaultMigrations.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { decodeTableMarkdown } from "../notes/decodeTableRecord.js";
 import { findEpochById, type NoteEpoch } from "../notes/noteEpoch.js";
@@ -58,7 +58,7 @@ export async function runDiff(
   toId: string | undefined,
   onLoginStatus?: (message: string) => void,
 ): Promise<DiffResult> {
-  const state = await openVault(targetDir);
+  const state = await openVault(targetDir, migrationReporter(onLoginStatus));
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
   }

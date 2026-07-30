@@ -10,7 +10,7 @@ import {
   type CloneState,
   type CloneStateNoteEntry,
 } from "../notes/cloneState.js";
-import { openVault } from "../notes/vaultMigrations.js";
+import { migrationReporter, openVault } from "../notes/vaultMigrations.js";
 import { NoteDeleteRejectedError, NotClonedDirectoryError, NotesUnavailableError, UntrackedFileError } from "../errors.js";
 import { buildNotePurgeFields, buildNoteTrashFields, TRASH_FOLDER_RECORD_NAME } from "../notes/encodeNoteRecord.js";
 import { isEnoent } from "../fsUtil.js";
@@ -58,7 +58,7 @@ export interface DeleteResult {
  */
 export async function runDelete(targetDir: string, fileArg: string, options: DeleteOptions = {}): Promise<DeleteResult> {
   const hard = options.hard === true;
-  const state = await openVault(targetDir);
+  const state = await openVault(targetDir, migrationReporter(options.onLoginStatus));
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
   }

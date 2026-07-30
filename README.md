@@ -128,6 +128,17 @@ in the same (sub)folder it's in inside Notes.app, with each sharer's notes
 under a top-level directory named for them — and downloading any
 attachments alongside their note.
 
+If you keep your notes in Obsidian (or any editor where the file name *is*
+the document title), clone with `--filename-as-title` instead:
+
+```bash
+icloud-md clone ./my-notes --filename-as-title
+```
+
+Each file is then named for its note's title and contains only the body,
+rather than repeating the title as the first line. See
+[Where the title lives](#where-the-title-lives) for what that changes.
+
 After that:
 
 ```bash
@@ -149,8 +160,8 @@ zipped, or synced elsewhere); a cloned folder's own
 
 | Command | What it does |
 | --- | --- |
-| `clone <directory>` | Full initial export into a fresh directory: every note, attachments included. Signs in via a browser window the first time a directory (or Apple ID) is used. Refuses to run against an already-cloned directory — use `pull` there instead. |
-| `pull [directory]` | Fetch everything that changed remotely since the last sync; auto-merges non-overlapping local edits, writes conflict markers for overlapping ones. Defaults to the current directory. |
+| `clone <directory> [--filename-as-title]` | Full initial export into a fresh directory: every note, attachments included. Signs in via a browser window the first time a directory (or Apple ID) is used. Refuses to run against an already-cloned directory — use `pull` there instead. `--filename-as-title` picks the Obsidian-shaped layout for the vault; it can only be chosen here. |
+| `pull [directory] [--defer-renames]` | Fetch everything that changed remotely since the last sync; auto-merges non-overlapping local edits, writes conflict markers for overlapping ones. Defaults to the current directory. `--defer-renames` is for editor integrations in a filename-as-title vault — see [Where the title lives](#where-the-title-lives). |
 | `push [directory] [--dry-run]` | Reconcile local disk state up to iCloud: creates notes for new `.md` files, uploads edited notes, moves notes whose file was deleted locally to Recently Deleted, and merges in remote changes to anything edited on both sides. Refuses anything ambiguous rather than guessing. |
 | `status [directory]` | Preview exactly what the next `push` would do — creates, edits, deletes, and any refusals — without writing anything. Runs the same live checks `push --dry-run` does, so it needs to sign in. |
 | `restore <file> [directory]` | Discard a tracked note's *local, uncommitted* edits, reverting the file to the last-synced copy. Purely local, no network call. |
@@ -210,10 +221,65 @@ resolution live.
   skipped when deriving the note's title (the title is the first line *after*
   the frontmatter) and preserved across `pull`/`push`, so editing it never
   looks like a note change. See Known limitations for the catch.
+- **Two vault shapes.** A vault carries note titles either in each file's
+  first line (the default) or in its file name (`clone
+  --filename-as-title`, for Obsidian and friends). See
+  [Where the title lives](#where-the-title-lives).
 - **`delete`/`delete --hard`**, and the `object` repair-kit commands, for
   cleaning up notes this tool (or anything else) leaves in a broken state.
 - **`history`/`diff`/`revert`**, and push-time auto-merge via version
   history — the safety net for inspecting or undoing a bad edit.
+
+## Where the title lives
+
+An Apple note has no title field of its own worth the name — its title *is*
+its first line. That leaves two honest ways to put a note in a file, and a
+vault picks one at `clone` time:
+
+| | Default (`in-body`) | `--filename-as-title` |
+| --- | --- | --- |
+| The file contains | the title as its first line, then the body | the body only |
+| The file is named | after the title, as a convenience | after the title, because that *is* the title |
+| Retitling a note | edit the first line | rename the file |
+| Suits | plain Markdown, git, anything that reads a file top to bottom | Obsidian and friends, where the file name is the document title |
+
+Both shapes record each note's identity in local-only
+`apple-note-id` frontmatter, which is what makes a rename resolvable at all:
+in filename-as-title mode a rename *is* a retitle, and `push` sends it as
+one rather than seeing an unrelated new note.
+
+A few consequences worth knowing before you pick:
+
+- **A file name can hold more than you'd think.** Characters a file name
+  can't contain (`/`, `:`, `?`, …) are substituted with visually-near
+  Unicode look-alikes and substituted back on the way up, so a note titled
+  `Pat/Alex: notes` keeps its real title on the round trip. The rare title
+  no name can carry at all (extremely long, leading dot, a reserved name
+  like `CON`) is filed as `Untitled.md` with the real title recorded in
+  `apple-note-title` frontmatter, and `pull` says so on the changelist line.
+- **A note retitled on your phone gets its file renamed on the next
+  `pull`**, since there is nowhere else for the new title to go.
+- **The mode is chosen once.** Switching an existing vault between the two
+  shapes isn't supported yet: it would have to rewrite every file in the
+  vault, which is a different (and more dangerous) operation than the
+  version migrations `pull`/`push` run for you. Clone a fresh vault instead.
+
+### `--defer-renames`
+
+A rename this tool performs happens behind your editor's back, so an
+Obsidian vault's `[[wikilinks]]` to a remotely-retitled note go stale.
+`pull --defer-renames` exists for integrations that can do better: pull
+reports the rename it *would* have performed and leaves the file alone, and
+the integration performs it with link updating turned on.
+
+The rename is reported as a `pendingRename` path on the note's entry in
+`pull --json`'s change list, and again on `status` (`rename: Old.md ->
+New.md`) for as long as it's outstanding — so an integration that restarted
+can still find out what it owes. Nothing else stalls in the meantime: the
+note's content keeps syncing in both directions, because a tracked note's
+title always comes from the live record rather than from its file name. A
+plain `pull` performs any rename left undone, which is the way out if the
+integration never gets to it.
 
 ## Known limitations
 
@@ -242,6 +308,15 @@ resolution live.
   store a YAML frontmatter block, so it's kept purely local — never uploaded,
   and never visible on your other devices. It survives `pull`/`push` because
   this tool reattaches it locally, not because iCloud knows about it.
+- **A vault's title mode can't be changed after `clone`.** Switching
+  between the two shapes would rewrite every file in the vault; clone a
+  fresh one with the mode you want instead.
+- **File arguments resolve by path, not by note.** `restore`, `delete`,
+  `diff`, `history` and `revert` look a `<file>` up by where it was at the
+  last sync, so a file you renamed since then is reported as untracked
+  until you `push` the rename. Use the old name, or push first. (`push`
+  and `status` themselves are fine — they pair a renamed file back to its
+  note by its `apple-note-id`.)
 - **No real-time or continuous sync.** This is a deliberate fetch/push
   tool, not a background daemon.
 - **Concurrent edits from *other* Apple devices aren't merged the way Notes

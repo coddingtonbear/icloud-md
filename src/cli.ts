@@ -282,9 +282,16 @@ program
     "Fetch all Notes into a fresh local directory; signs in via a browser window the first time a directory " +
       "(or a new account) is used",
   )
-  .action(async (directory: string, _opts: unknown, command: Command) => {
+  .option(
+    "--filename-as-title",
+    "carry each note's title in its file name rather than as the file's first line, the way Obsidian and most " +
+      "Markdown editors expect; a whole-vault choice that can only be made here, at clone time",
+  )
+  .action(async (directory: string, opts: { filenameAsTitle?: boolean }, command: Command) => {
     const context = contextFor(command);
-    const summary = await runClone(directory, makeSyncProgress(context), makeStatusSink(context));
+    const summary = await runClone(directory, makeSyncProgress(context), makeStatusSink(context), {
+      filenameAsTitle: opts.filenameAsTitle === true,
+    });
     emitResult(context, summary, (result) => printCloneSummary(directory, result));
   });
 

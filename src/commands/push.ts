@@ -16,7 +16,7 @@ import {
 } from "../cloudkit/databaseClient.js";
 import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { writeCloneState, type CloneState, type CloneStateNoteEntry, type TitleMode } from "../notes/cloneState.js";
-import { openVault } from "../notes/vaultMigrations.js";
+import { migrationReporter, openVault } from "../notes/vaultMigrations.js";
 import { pendingRenameTarget, settlePendingRenames } from "../notes/pendingRename.js";
 import { NOTE_ID_KEY, readNoteId, readNoteTitle, setNoteId } from "../notes/noteIdFrontmatter.js";
 import { resolveNoteIds } from "../notes/noteIdPairing.js";
@@ -186,7 +186,7 @@ export async function buildPushPlan(
   targetDir: string,
   options: { onLoginStatus?: ((message: string) => void) | undefined } = {},
 ): Promise<BuildPushPlanResult> {
-  const state = await openVault(targetDir);
+  const state = await openVault(targetDir, migrationReporter(options.onLoginStatus));
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
   }

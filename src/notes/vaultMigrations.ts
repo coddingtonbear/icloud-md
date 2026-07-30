@@ -145,6 +145,25 @@ export interface OpenVaultOptions {
 }
 
 /**
+ * `openVault` options that report each migration through a command's
+ * ordinary status sink - the one-liner every command with a sink passes, so
+ * a vault being brought forward says so instead of looking like a hang.
+ *
+ * Worth having because the v2 -> v3 migration touches every tracked file in
+ * the vault: on a large one that is real time spent before the command the
+ * user actually asked for has begun. Commands with no sink (`restore`,
+ * `history`) pass nothing and stay silent, which is right - they are fast
+ * enough that a migration is the only slow thing they could be doing, and
+ * they have nowhere to say it.
+ */
+export function migrationReporter(onStatus?: (message: string) => void): OpenVaultOptions {
+  if (onStatus === undefined) {
+    return {};
+  }
+  return { onMigration: (migration) => onStatus(`Updating this vault's layout: ${migration.describe}...`) };
+}
+
+/**
  * Brings a vault up to `plan.targetVersion`, running each step in order and
  * committing after each. Returns false when `targetDir` isn't a clone at all.
  *

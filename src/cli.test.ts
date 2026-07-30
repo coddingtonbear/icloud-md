@@ -27,3 +27,15 @@ test("--json --version prints a JSON object on stdout, regardless of flag order"
     assert.deepEqual(JSON.parse(stdout), { version: readOwnPackageVersion() });
   }
 });
+
+test("the vault-shape flags are reachable from the commands that own them", async () => {
+  // `--filename-as-title` is a whole-vault decision, so it lives on `clone`
+  // and nowhere else; `--defer-renames` is a per-run choice about what pull
+  // does with a rename, so it lives on `pull`.
+  const clone = await runCli(["clone", "--help"]);
+  assert.match(clone.stdout, /--filename-as-title/);
+
+  const pull = await runCli(["pull", "--help"]);
+  assert.match(pull.stdout, /--defer-renames/);
+  assert.doesNotMatch(pull.stdout, /--filename-as-title/);
+});

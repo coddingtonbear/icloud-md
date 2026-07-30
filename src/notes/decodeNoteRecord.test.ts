@@ -272,3 +272,26 @@ test("a single-line note strips to an empty body", () => {
   assert.equal(result.titleStripped, true);
   assert.equal(result.publishable, true, "an empty body is a title-only note, not an unsyncable one");
 });
+
+test("bodyText is the note's raw text in both modes - what history comparisons are built on", () => {
+  // `diff` reads `bodyText` for the current remote copy and decodes the raw
+  // bytes for a snapshot; both sides therefore carry the title. Handing
+  // `classifyNoteRecord` a titleMode there would strip one side only, and
+  // manufacture a title-shaped difference on every note in the vault.
+  const record = makeRecord({
+    TextDataEncrypted: encodeTextField("My Note\n\nBody text", [
+      { length: 8, paragraphStyle: { style: 0 } },
+      { length: 10, paragraphStyle: { style: 3 } },
+    ]),
+  });
+
+  const inBody = classifyNoteRecord(record);
+  const filename = classifyNoteRecord(record, { titleMode: "filename" });
+
+  assert.equal(inBody.status === "ok" ? inBody.bodyText : "", "My Note\n\nBody text");
+  assert.equal(
+    filename.status === "ok" ? filename.bodyText : "",
+    inBody.status === "ok" ? inBody.bodyText : "different",
+    "the title mode is a projection choice; it never changes what the note says",
+  );
+});
