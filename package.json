@@ -35,9 +35,13 @@
     "build": "tsc -p tsconfig.json",
     "prepublishOnly": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:integration": "tsc -p tsconfig.integration.json",
     "toc": "markdown-toc -i README.md",
     "import-har": "tsx src/scripts/importHar.ts",
     "test": "tsx --test $(find src -name '*.test.ts')",
+    "test:integration": "npm run build && tsx --test integration/live.test.ts",
+    "itest:setup": "tsx integration/setupFolder.ts",
+    "itest:sweep": "tsx integration/sweep.ts",
     "proto:generate": "buf generate",
     "proto:check": "tsx src/scripts/checkProtoDrift.ts"
   },

@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "declaration": false,
+    "sourceMap": false,
+    // The oracle runs code inside the browser page (DOMParser, navigator.clipboard),
+    // so this project needs the DOM types that the CLI build deliberately omits.
+    // "DOM.Iterable" comes along because plain "DOM" types `Headers` without
+    // its iterator methods, which would break `src/debugLog.ts`'s `entries()`.
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+  },
+  "include": ["integration/**/*.ts"],
+  "exclude": ["integration/scratch/**"]
+}

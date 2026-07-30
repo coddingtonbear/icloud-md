@@ -45,6 +45,15 @@ npm run build
 
 All four should pass cleanly. If your change touches the `.proto` schemas, also run `npm run proto:generate` and `npm run proto:check` to confirm the generated code isn't out of sync.
 
+There is also a **live integration suite** that exercises the shipped CLI against a real iCloud account and checks the result against Apple's own web client. It performs real writes, so it is off by default and is not part of `npm test`:
+
+```
+npm run typecheck:integration   # typechecks it without running anything
+ICLOUD_MD_ITEST=1 npm run test:integration
+```
+
+It needs a one-time setup (a signed-in account and a dedicated containment folder) — see [integration/README.md](integration/README.md). Changes to sync behaviour are worth verifying there as well as in the unit tests, since it is the only place the CloudKit round trip is actually exercised.
+
 ### Scope & Quality
 
 - Pull requests should remain **narrowly scoped** to the problem they intend to solve.
