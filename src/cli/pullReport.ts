@@ -1,5 +1,5 @@
 import type { ChalkInstance } from "chalk";
-import type { PullChangeKind, PullSummary } from "../commands/pull.js";
+import type { PullChangeKind, PullChangeRemark, PullSummary } from "../commands/pull.js";
 import {
   CHANGED,
   GONE,
@@ -29,6 +29,15 @@ const LABELS: Record<PullChangeKind, [label: string, color: ChalkInstance]> = {
 
 const LABEL_WIDTH = Math.max(...Object.values(LABELS).map(([label]) => label.length));
 
+/** How each remark tone reads: the two that want the reader to do something
+ * keep the "!" they always had; a "note" is dim and unmarked, because
+ * decorating an explanation as an alarm is how a changelist becomes noise. */
+const REMARK_STYLES: Record<PullChangeRemark["tone"], [tone: ChalkInstance, mark: string]> = {
+  conflict: [NEEDS_ATTENTION, "!"],
+  unsyncable: [UNSYNCABLE, "!"],
+  note: [QUIET, " "],
+};
+
 /**
  * Renders a pull's outcome the way `status` renders the push plan: a heading,
  * a blank line, the indented changelist (one coloured label per file, with
@@ -55,10 +64,8 @@ export function renderPullReport(summary: PullSummary, formatPath: (file: string
         : formatPath(change.file);
     lines.push(LISTING_INDENT + labelledLine(label, color, LABEL_WIDTH, subject));
     for (const remark of change.remarks ?? []) {
-      lines.push(
-        LISTING_INDENT +
-          remarkLine(remark.tone === "conflict" ? NEEDS_ATTENTION : UNSYNCABLE, LABEL_WIDTH, `! ${remark.message}`),
-      );
+      const [tone, mark] = REMARK_STYLES[remark.tone];
+      lines.push(LISTING_INDENT + remarkLine(tone, LABEL_WIDTH, `${mark} ${remark.message}`));
     }
   }
 

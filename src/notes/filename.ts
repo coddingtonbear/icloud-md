@@ -20,6 +20,30 @@ export function noteFileNameFor(titleLine: string, titleMode: "in-body" | "filen
 }
 
 /**
+ * The note's real title when a file name can't carry it, for the caller to
+ * record in `apple-note-title` frontmatter - and undefined whenever the name
+ * is enough, which is nearly always.
+ *
+ * The exact complement of `noteFileNameFor`'s "Untitled.md" fallback: these
+ * two answer the same question ("can the name hold this?") and must never
+ * disagree, so they're kept side by side and both defer to
+ * `titleIsRepresentable`.
+ */
+export function titleNeedingFrontmatter(titleLine: string, titleMode: "in-body" | "filename"): string | undefined {
+  if (titleMode !== "filename") {
+    return undefined;
+  }
+  const firstLine = titleLine.split("\n")[0] ?? "";
+  // An empty title is unrepresentable, but there's nothing to record: the
+  // note really is untitled, so "Untitled.md" is the whole truth about it
+  // and a frontmatter key holding "" would only be read back as absent.
+  if (firstLine.trim() === "") {
+    return undefined;
+  }
+  return titleIsRepresentable(firstLine) ? undefined : firstLine;
+}
+
+/**
  * Whether a file name already carries this title, in a vault where the name
  * *is* the title - either the name the title derives, or one of the
  * uniquified spellings `uniqueFileName` produces when two notes want the

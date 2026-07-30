@@ -146,3 +146,43 @@ test("renderPullReport re-expresses paths through formatPath, including both hal
   const lines = renderPullReport(summary, (file) => `../${file}`);
   assert.match(lines[2] ?? "", /moved: {5}\.\.\/Pie\.md -> \.\.\/Recipes\/Pie\.md$/);
 });
+
+test("renderPullReport shows a retitle as old -> new on whatever kind of change the note had", () => {
+  // A remote retitle renames the file and usually rewrites it in the same
+  // breath; one line says both, where a separate "moved:" entry would say
+  // half of each.
+  const summary = summaryWith({
+    updated: 1,
+    changes: [{ kind: "update", file: "Notes/Groceries.md", previousFile: "Notes/Shopping list.md" }],
+  });
+
+  assert.deepEqual(renderPullReport(summary), [
+    "Changes pulled from iCloud:",
+    "",
+    "        modified:  Notes/Shopping list.md -> Notes/Groceries.md",
+    "",
+    "0 added, 1 updated, 0 auto-merged, 0 deleted.",
+  ]);
+});
+
+test("renderPullReport renders a plain note unmarked, so an explanation doesn't read as an alarm", () => {
+  const summary = summaryWith({
+    added: 1,
+    changes: [
+      {
+        kind: "add",
+        file: "Notes/Untitled.md",
+        remarks: [{ tone: "note", message: "title kept in apple-note-title: the title starts with a dot" }],
+      },
+    ],
+  });
+
+  assert.deepEqual(renderPullReport(summary), [
+    "Changes pulled from iCloud:",
+    "",
+    "        new file:  Notes/Untitled.md",
+    "                     title kept in apple-note-title: the title starts with a dot",
+    "",
+    "1 added, 0 updated, 0 auto-merged, 0 deleted.",
+  ]);
+});

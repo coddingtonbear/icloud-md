@@ -48,6 +48,19 @@ import { joinFrontmatter } from "./frontmatter.js";
 /** The frontmatter key carrying a note's CloudKit recordName. */
 export const NOTE_ID_KEY = "apple-note-id";
 
+/**
+ * The frontmatter key carrying a note's real title, for the rare note whose
+ * title a file name genuinely can't hold (`titleIsRepresentable` decides;
+ * homoglyph substitution keeps the list short). Such a note is filed as
+ * `Untitled.md` and this key is the only record of what it's actually
+ * called.
+ *
+ * Deliberately absent for every other note. Duplicating a representable
+ * title into frontmatter would create a second source of truth for it, and
+ * then a disagreement between the two would have no correct resolution.
+ */
+export const NOTE_TITLE_KEY = "apple-note-title";
+
 /** Shape a recordName must have to be trusted as an id: a UUID, in either
  * case (Apple's own clients write uppercase, other writers lowercase). */
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -133,6 +146,58 @@ export function clearNoteId(frontmatter: string): string {
 }
 
 /**
+ * The real title recorded in a frontmatter envelope, or undefined when there
+ * isn't one. Total in the same way `readNoteId` is: broken YAML, a missing
+ * key, a non-string value and an empty string all read as "no recorded
+ * title", so the caller falls back to the file name.
+ */
+export function readNoteTitle(frontmatter: string): string | undefined {
+  const doc = parseFrontmatterDocument(frontmatter);
+  if (!doc) {
+    return undefined;
+  }
+  const value: unknown = doc.get(NOTE_TITLE_KEY);
+  if (typeof value !== "string" || value === "") {
+    return undefined;
+  }
+  return value;
+}
+
+/** Returns `frontmatter` with `apple-note-title` set, creating the envelope
+ * if there was none. Unchanged when it already says exactly this. */
+export function setNoteTitle(frontmatter: string, title: string): string {
+  if (readNoteTitle(frontmatter) === title) {
+    return frontmatter;
+  }
+  if (frontmatter.trim() === "") {
+    return `---\n${NOTE_TITLE_KEY}: ${JSON.stringify(title)}\n---\n\n`;
+  }
+  const doc = parseFrontmatterDocument(frontmatter);
+  if (!doc) {
+    return frontmatter;
+  }
+  doc.set(NOTE_TITLE_KEY, title);
+  return reassemble(frontmatter, doc);
+}
+
+/**
+ * Removes `apple-note-title` - what keeps the key rare. A note retitled
+ * remotely to something a file name *can* hold gets its real name back and
+ * must not keep a stale copy of the old title in frontmatter.
+ */
+export function clearNoteTitle(frontmatter: string): string {
+  const doc = parseFrontmatterDocument(frontmatter);
+  if (!doc || !doc.has(NOTE_TITLE_KEY)) {
+    return frontmatter;
+  }
+  doc.delete(NOTE_TITLE_KEY);
+  if (String(doc).trim() === "{}" || String(doc).trim() === "") {
+    return "";
+  }
+  return reassemble(frontmatter, doc);
+}
+
+/**
  * Assembles the text of a note's working file: the body, under an envelope
  * carrying its id. The single place `clone` and `pull` go through, so the two
  * can't disagree about whether a freshly written file is stamped.
@@ -144,9 +209,24 @@ export function clearNoteId(frontmatter: string): string {
  *
  * `frontmatter` is whatever envelope the file already had (empty for a file
  * being created), so a user's own keys survive every rewrite.
+ *
+ * `unrepresentableTitle` is the note's real title when the file name can't
+ * carry it (see `NOTE_TITLE_KEY`), and undefined whenever the name is
+ * enough - passing undefined actively *removes* a stale key, which is what
+ * keeps the two in step as a note is retitled back and forth across the
+ * representable boundary.
  */
-export function composeNoteFile(frontmatter: string, body: string, recordName: string): string {
-  return joinFrontmatter(setNoteId(frontmatter, recordName), body);
+export function composeNoteFile(
+  frontmatter: string,
+  body: string,
+  recordName: string,
+  unrepresentableTitle?: string | undefined,
+): string {
+  const stamped = setNoteId(frontmatter, recordName);
+  return joinFrontmatter(
+    unrepresentableTitle === undefined ? clearNoteTitle(stamped) : setNoteTitle(stamped, unrepresentableTitle),
+    body,
+  );
 }
 
 const FENCE = "---";

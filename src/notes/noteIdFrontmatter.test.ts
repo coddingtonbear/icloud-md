@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { clearNoteId, isNoteId, readNoteId, setNoteId } from "./noteIdFrontmatter.js";
+import {
+  clearNoteId,
+  clearNoteTitle,
+  composeNoteFile,
+  isNoteId,
+  readNoteId,
+  readNoteTitle,
+  setNoteId,
+  setNoteTitle,
+} from "./noteIdFrontmatter.js";
+import { splitFrontmatter } from "./frontmatter.js";
 
 const ID = "089D915D-C76E-4F44-AB80-2190073281A3";
 const OTHER_ID = "001b9e8a-c474-4311-af32-abe70026b346";
@@ -132,4 +142,65 @@ test("setNoteId refuses to write an id readNoteId wouldn't accept", () => {
     assert.equal(setNoteId("", bad), "", `setNoteId wrote ${bad}`);
     assert.equal(setNoteId("---\ntags: [a]\n---\n\n", bad), "---\ntags: [a]\n---\n\n");
   }
+});
+
+// --- apple-note-title, for the title a file name can't hold ------------------
+
+const LONG_TITLE = "A title far too long to be a file name, ".repeat(3);
+
+test("readNoteTitle finds a recorded title, and treats anything unusable as absent", () => {
+  assert.equal(readNoteTitle(`---\napple-note-title: Some title\n---\n\n`), "Some title");
+  assert.equal(readNoteTitle(`---\napple-note-title: ""\n---\n\n`), undefined);
+  assert.equal(readNoteTitle(`---\napple-note-title: [a, b]\n---\n\n`), undefined);
+  assert.equal(readNoteTitle(`---\napple-note-id: ${ID}\n---\n\n`), undefined);
+  assert.equal(readNoteTitle(""), undefined);
+  assert.equal(readNoteTitle("---\n: : :\n---\n\n"), undefined);
+});
+
+test("a recorded title round-trips through the characters that make it unrepresentable", () => {
+  // The whole point of the key is titles a name can't hold, so the values it
+  // carries are exactly the awkward ones: colons (YAML's own separator),
+  // leading dots, trailing spaces, quotes.
+  for (const title of [".hidden", "CON", "Trailing space ", 'He said "no": really', LONG_TITLE]) {
+    assert.equal(readNoteTitle(setNoteTitle("", title)), title, `lost: ${title}`);
+    assert.equal(readNoteTitle(setNoteTitle(`---\napple-note-id: ${ID}\n---\n\n`, title)), title);
+  }
+});
+
+test("setNoteTitle returns the envelope byte-identical when it already says this", () => {
+  const envelope = setNoteTitle(`---\napple-note-id: ${ID}\n---\n\n`, LONG_TITLE);
+  assert.equal(setNoteTitle(envelope, LONG_TITLE), envelope);
+});
+
+test("clearNoteTitle removes the key but keeps the id and the user's own block", () => {
+  const envelope = `---\ntags: [a]\napple-note-id: ${ID}\napple-note-title: ${LONG_TITLE}\n---\n\n`;
+  const cleared = clearNoteTitle(envelope);
+
+  assert.equal(readNoteTitle(cleared), undefined);
+  assert.equal(readNoteId(cleared), ID);
+  assert.match(cleared, /tags:/);
+});
+
+test("clearNoteTitle is a no-op when there was no recorded title", () => {
+  const envelope = `---\napple-note-id: ${ID}\n---\n\n`;
+  assert.equal(clearNoteTitle(envelope), envelope);
+});
+
+test("composeNoteFile records a title a name can't hold, and removes it once one can", () => {
+  const withTitle = composeNoteFile("", "Body", ID, LONG_TITLE);
+  assert.equal(readNoteTitle(withTitle), LONG_TITLE);
+  assert.equal(readNoteId(withTitle), ID);
+
+  // The note gets retitled to something representable: the file gets its
+  // real name back, and the key must not linger with a stale value.
+  const { frontmatter } = splitFrontmatter(withTitle);
+  const without = composeNoteFile(frontmatter, "Body", ID, undefined);
+  assert.equal(readNoteTitle(without), undefined);
+  assert.equal(readNoteId(without), ID, "the id survives the title being dropped");
+});
+
+test("composeNoteFile leaves a user's own keys alone either way", () => {
+  const mine = "---\ntags: [recipes]\n---\n\n";
+  assert.match(composeNoteFile(mine, "Body", ID, LONG_TITLE), /tags:/);
+  assert.match(composeNoteFile(mine, "Body", ID, undefined), /tags:/);
 });

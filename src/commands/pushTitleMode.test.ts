@@ -8,7 +8,7 @@ import { decodeNoteFormat } from "../notes/noteFormat.js";
 import { compressNoteDocument, decodeNoteString } from "../notes/noteText.js";
 import { parseNoteMarkdown } from "../notes/parseNoteMarkdown.js";
 import { reconcileNoteFormat } from "../notes/formatReconcile.js";
-import { prepareRetitle, restoreStrippedTitle } from "./push.js";
+import { prepareRetitle, restoreStrippedTitle, titleExpressedByFile } from "./push.js";
 
 /**
  * Push's write path for a filename-as-title vault, where the working file
@@ -218,4 +218,20 @@ test("a genuine retitle normalizes the title paragraph to Title style", () => {
 
   assert.ok(prepared.ok);
   assert.equal(decodePayload(prepared.retitle?.payloadBase64 ?? "").firstParagraphKind, "title");
+});
+
+test("a recorded title outranks the file name, so an Untitled.md file isn't retitled to \"Untitled\"", () => {
+  // `apple-note-title` exists exactly because this name couldn't hold the
+  // title. Reading the name at face value would replace a real title with
+  // "Untitled" the first time the user moved or copied the file.
+  const long = "A title far too long for any file name to hold, ".repeat(3);
+  const recorded = new Map([["Notes/Untitled.md", long]]);
+
+  assert.equal(titleExpressedByFile("Notes/Untitled.md", recorded), long);
+  assert.equal(titleExpressedByFile("Notes/Untitled 2.md", recorded), "Untitled 2", "only the file that carries the key");
+  assert.equal(titleExpressedByFile("Notes/Groceries.md", new Map()), "Groceries");
+});
+
+test("a note whose title only a name can hold takes it from the name, homoglyphs decoded", () => {
+  assert.equal(titleExpressedByFile("Notes/Pat⁄Alex.md", new Map()), "Pat/Alex");
 });

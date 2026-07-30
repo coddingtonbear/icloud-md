@@ -5,7 +5,7 @@ import { fetchAllNoteRecords, fetchSharedNoteRecords } from "../cloudkit/databas
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { resolveNoteAttachments, type AttachmentAuth } from "../notes/attachmentSync.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
-import { noteFileNameFor, uniqueFileName } from "../notes/filename.js";
+import { noteFileNameFor, titleNeedingFrontmatter, uniqueFileName } from "../notes/filename.js";
 import { buildVaultLayout, placeNote, type SharedZoneRecords } from "../notes/folderLayout.js";
 import { writeBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState, writeCloneState, type CloneState } from "../notes/cloneState.js";
@@ -180,7 +180,13 @@ export async function runClone(
         const relativeFile = path.posix.join(placement.dir, fileName);
 
         const filePath = path.join(targetDir, relativeFile);
-        await writeFile(filePath, composeNoteFile("", bodyText, record.recordName), "utf-8");
+        await writeFile(
+          filePath,
+          // The rare title a file name can't hold is recorded in
+          // frontmatter instead; `noteFileNameFor` filed it as "Untitled.md".
+          composeNoteFile("", bodyText, record.recordName, titleNeedingFrontmatter(decoded.titleLine, titleMode)),
+          "utf-8",
+        );
         await applyNoteFileTimes(filePath, record);
         await writeBaseCopy(targetDir, record.recordName, bodyText);
         if (source.sharedZoneOwner) {

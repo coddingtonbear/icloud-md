@@ -17,7 +17,7 @@ import {
 import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { writeCloneState, type CloneState, type CloneStateNoteEntry, type TitleMode } from "../notes/cloneState.js";
 import { openVault } from "../notes/vaultMigrations.js";
-import { NOTE_ID_KEY, readNoteId, setNoteId } from "../notes/noteIdFrontmatter.js";
+import { NOTE_ID_KEY, readNoteId, readNoteTitle, setNoteId } from "../notes/noteIdFrontmatter.js";
 import { resolveNoteIds } from "../notes/noteIdPairing.js";
 import { classifyNoteRecord, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
@@ -207,7 +207,14 @@ export async function buildPushPlan(
   let planningMutatedState = false;
   const notices: SyncNotice[] = [];
 
-  const untracked: { file: string; localText: string; noteId?: string | undefined }[] = [];
+  const untracked: {
+    file: string;
+    localText: string;
+    noteId?: string | undefined;
+    /** `apple-note-title`, present only on a note whose title a file name
+     * can't hold - where it outranks the name as the note's real title. */
+    noteTitle?: string | undefined;
+  }[] = [];
   for (const file of await listUntrackedMarkdownFiles(targetDir, state)) {
     // Body only for the note itself: an untracked file's local-only
     // frontmatter never reaches parse/create or move-matching (which
@@ -215,8 +222,13 @@ export async function buildPushPlan(
     // here, because in an id-recording vault it carries the one thing that
     // says which note this file *is*.
     const { frontmatter, body } = splitFrontmatter(await readFile(path.join(targetDir, file), "utf-8"));
-    untracked.push({ file, localText: body, noteId: readNoteId(frontmatter) });
+    untracked.push({ file, localText: body, noteId: readNoteId(frontmatter), noteTitle: readNoteTitle(frontmatter) });
   }
+  // A moved/renamed file is matched by id below, and only the entry above
+  // knows what its envelope said.
+  const recordedTitles = new Map(
+    untracked.filter((entry) => entry.noteTitle !== undefined).map((entry) => [entry.file, entry.noteTitle as string]),
+  );
 
   const updateCandidates: PushCandidate[] = [];
   const missingCandidates: { recordName: string; entry: CloneStateNoteEntry }[] = [];
@@ -500,8 +512,10 @@ export async function buildPushPlan(
     // title re-derived from the note, so that pull's collision uniquifier
     // (which is why a note can sit at "Foo 2.md" while being titled "Foo")
     // never leaks into a title.
+    // The envelope travels with the file, so `apple-note-title` is still
+    // the right answer after a move - see `titleExpressedByFile`.
     const previousTitle = titleFromNoteFileName(pair.entry.file);
-    const newTitle = titleFromNoteFileName(pair.toFile);
+    const newTitle = titleExpressedByFile(pair.toFile, recordedTitles);
     const retitled = titleMode === "filename" && newTitle !== previousTitle;
     readyMovePairs.push({
       ...pair,
@@ -851,7 +865,7 @@ export async function buildPushPlan(
       // reconstructed note rather than the body it was parsed from.
       const desired =
         titleMode === "filename"
-          ? restoreTitleParagraphText(titleParagraphFromFilename(titleFromNoteFileName(file)), parsed.paragraphs)
+          ? restoreTitleParagraphText(titleParagraphFromFilename(titleExpressedByFile(file, recordedTitles)), parsed.paragraphs)
           : parsed;
       const doc = buildInitialNoteDocument(desired.text, replicaIdBytes);
       const reconciled = reconcileNoteFormat(doc, desired.paragraphs, replicaIdBytes);
@@ -1581,6 +1595,22 @@ export function prepareRetitle(
  * user *changes* it, and that arrives as a move pair rather than as an
  * update to the file in place.
  */
+/**
+ * The title a local file expresses, in a vault where the file name is the
+ * title: what its name spells, unless it carries an `apple-note-title`,
+ * which outranks the name.
+ *
+ * The precedence is not a preference - it's the only reading that isn't
+ * lossy. A file is called "Untitled.md" precisely *because* its title
+ * wouldn't fit in a name, so taking the name at face value would retitle the
+ * note to "Untitled". Used for both a rename (which retitles) and a create
+ * (which titles a new note); a copy of an Untitled note therefore keeps the
+ * title it was copied from rather than becoming "Untitled" itself.
+ */
+export function titleExpressedByFile(file: string, recordedTitles: ReadonlyMap<string, string>): string {
+  return recordedTitles.get(file) ?? titleFromNoteFileName(file);
+}
+
 export function restoreStrippedTitle(
   classified: OkNoteRecordResult,
   parsed: { text: string; paragraphs: FormatParagraph[] },

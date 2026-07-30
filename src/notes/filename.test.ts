@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fileNameCarriesTitle, noteFileName, uniqueFileName } from "./filename.js";
+import { fileNameCarriesTitle, noteFileName, noteFileNameFor, titleNeedingFrontmatter, uniqueFileName } from "./filename.js";
 
 test("noteFileName derives a plain name from the title's first line", () => {
   assert.equal(noteFileName("Grocery list\nmilk, eggs"), "Grocery list.md");
@@ -57,4 +57,44 @@ test("fileNameCarriesTitle accepts the Untitled fallback for a title no name can
   const huge = "x".repeat(200);
   assert.equal(fileNameCarriesTitle("Untitled.md", huge), true);
   assert.equal(fileNameCarriesTitle("Untitled 3.md", huge), true);
+});
+
+test("titleNeedingFrontmatter names only the titles a file name genuinely can't hold", () => {
+  // The list is short because homoglyph substitution handles illegal
+  // characters - those stay in the name, readable and reversible.
+  assert.equal(titleNeedingFrontmatter("Groceries", "filename"), undefined);
+  assert.equal(titleNeedingFrontmatter("Pat/Alex: notes", "filename"), undefined);
+
+  assert.equal(titleNeedingFrontmatter("x".repeat(200), "filename"), "x".repeat(200));
+  assert.equal(titleNeedingFrontmatter(".hidden", "filename"), ".hidden");
+  assert.equal(titleNeedingFrontmatter("Trailing space ", "filename"), "Trailing space ");
+  assert.equal(titleNeedingFrontmatter("CON", "filename"), "CON");
+});
+
+test("titleNeedingFrontmatter records nothing for a genuinely untitled note", () => {
+  // "Untitled.md" is the whole truth there, and a key holding "" would be
+  // read back as absent anyway - so it would be rewritten on every pull.
+  assert.equal(titleNeedingFrontmatter("", "filename"), undefined);
+  assert.equal(titleNeedingFrontmatter("   ", "filename"), undefined);
+});
+
+test("titleNeedingFrontmatter is never anything in an in-body vault", () => {
+  // There the name is decoration and the title is in the file, so there is
+  // nothing a name failing to hold it could cost.
+  assert.equal(titleNeedingFrontmatter(".hidden", "in-body"), undefined);
+  assert.equal(titleNeedingFrontmatter("x".repeat(200), "in-body"), undefined);
+});
+
+test("titleNeedingFrontmatter and noteFileNameFor agree on which titles fall back", () => {
+  // Two answers to one question; a disagreement would either lose a title or
+  // duplicate a representable one into frontmatter for nothing.
+  for (const title of ["Groceries", "Pat/Alex", ".hidden", "CON", "x".repeat(200), "Trailing space "]) {
+    const needsFrontmatter = titleNeedingFrontmatter(title, "filename") !== undefined;
+    assert.equal(noteFileNameFor(title, "filename") === "Untitled.md", needsFrontmatter, `disagreed about: ${title}`);
+  }
+
+  // The one deliberate exception: an untitled note is filed as "Untitled.md"
+  // and records nothing, because that name is already the whole truth.
+  assert.equal(noteFileNameFor("", "filename"), "Untitled.md");
+  assert.equal(titleNeedingFrontmatter("", "filename"), undefined);
 });

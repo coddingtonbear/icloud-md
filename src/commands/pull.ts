@@ -18,7 +18,8 @@ import {
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { isEnoent } from "../fsUtil.js";
-import { fileNameCarriesTitle, noteFileNameFor, uniqueFileName } from "../notes/filename.js";
+import { fileNameCarriesTitle, noteFileNameFor, titleNeedingFrontmatter, uniqueFileName } from "../notes/filename.js";
+import { representabilityProblem } from "../notes/titleFilename.js";
 import { joinFrontmatter, splitFrontmatter } from "../notes/frontmatter.js";
 import { buildVaultLayout, noteDirOf, placeNote, previousLayoutDirs, type SharedZoneRecords } from "../notes/folderLayout.js";
 import { reconcileNotePlacements, removeStaleDirs } from "../notes/folderReconcile.js";
@@ -27,7 +28,7 @@ import { readBaseCopy, removeBaseCopy, writeBaseCopy } from "../notes/baseCopy.j
 import { localFileState } from "../notes/localFileState.js";
 import { writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
 import { openVault } from "../notes/vaultMigrations.js";
-import { composeNoteFile } from "../notes/noteIdFrontmatter.js";
+import { composeNoteFile, NOTE_TITLE_KEY } from "../notes/noteIdFrontmatter.js";
 import { recordEpoch } from "../notes/noteEpoch.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { recordVersion } from "../notes/versionHistory.js";
@@ -46,8 +47,9 @@ export type PullChangeKind = "add" | "update" | "merge" | "remove" | "move" | "u
 export interface PullChangeRemark {
   /** "conflict": the reader must act, then re-sync (magenta on screen);
    * "unsyncable": content this tool can't sync as-is (black-on-red) -
-   * mirroring the plan listing's conflict/refused split. */
-  tone: "conflict" | "unsyncable";
+   * mirroring the plan listing's conflict/refused split; "note": nothing to
+   * do, just something that would otherwise be baffling (dim). */
+  tone: "conflict" | "unsyncable" | "note";
   message: string;
 }
 
@@ -237,6 +239,26 @@ export async function runPull(
         }
 
         // decoded.status === "ok"
+        // The rare note whose title a file name genuinely can't hold: it is
+        // filed as "Untitled.md" and its real title recorded in
+        // frontmatter. Undefined for everything else, which is what
+        // *removes* the key from a note that has just been retitled to
+        // something a name can carry after all.
+        const recordedTitle = titleNeedingFrontmatter(decoded.titleLine, titleMode);
+        // The changelist line already shows the "Untitled.md" this landed at,
+        // which is baffling on its own - the note isn't untitled. Say where
+        // its real title went, and why it had to go there.
+        const titleRemarks: PullChangeRemark[] =
+          recordedTitle === undefined
+            ? []
+            : [
+                {
+                  tone: "note",
+                  message:
+                    `title kept in ${NOTE_TITLE_KEY}: ` +
+                    `${representabilityProblem(recordedTitle) ?? "a file name can't carry it"}`,
+                },
+              ];
         // Tracks whether any per-record snapshot below actually wrote
         // something new this run - an epoch is only worth recording when it
         // is (see `recordEpoch` below).
@@ -333,7 +355,7 @@ export async function runPull(
           const filePath = path.join(targetDir, relativeFile);
           await writeFile(
             filePath,
-            composeNoteFile("", bodyText, record.recordName),
+            composeNoteFile("", bodyText, record.recordName, recordedTitle),
             "utf-8",
           );
           await applyNoteFileTimes(filePath, record);
@@ -350,7 +372,7 @@ export async function runPull(
           summary.changes.push({
             kind: "add",
             file: relativeFile,
-            ...(unpublishableReason !== undefined ? { remarks: [READ_ONLY_REMARK] } : {}),
+            ...remarksFor(titleRemarks, unpublishableReason),
           });
           continue;
         }
@@ -380,7 +402,7 @@ export async function runPull(
           // the next time the note changes remotely.
           await writeFile(
             filePath,
-            composeNoteFile(frontmatter, bodyText, record.recordName),
+            composeNoteFile(frontmatter, bodyText, record.recordName, recordedTitle),
             "utf-8",
           );
           await applyNoteFileTimes(filePath, record);
@@ -401,7 +423,7 @@ export async function runPull(
             kind: "update",
             file,
             ...previousFile,
-            ...(unpublishableReason !== undefined ? { remarks: [READ_ONLY_REMARK] } : {}),
+            ...remarksFor(titleRemarks, unpublishableReason),
           });
           continue;
         }
@@ -412,6 +434,7 @@ export async function runPull(
           record.recordName,
           file,
           bodyText,
+          recordedTitle,
         );
         if (merged.status === "unresolvedMarkers") {
           // No *sync* state advanced - not the content, not the base copy,
@@ -452,6 +475,7 @@ export async function runPull(
             ...previousFile,
             remarks: [
               { tone: "conflict", message: "merged with conflict markers - resolve manually" },
+              ...titleRemarks,
               ...(unpublishableReason !== undefined ? [READ_ONLY_REMARK] : []),
             ],
           });
@@ -461,7 +485,7 @@ export async function runPull(
             kind: "merge",
             file,
             ...previousFile,
-            ...(unpublishableReason !== undefined ? { remarks: [READ_ONLY_REMARK] } : {}),
+            ...remarksFor(titleRemarks, unpublishableReason),
           });
         }
       } finally {
@@ -613,6 +637,14 @@ async function fileExists(filePath: string): Promise<boolean> {
     }
     throw cause;
   }
+}
+
+/** The remarks a change carries, or nothing at all - the field stays absent
+ * rather than an empty array, which is what every `--json` consumer written
+ * against the old shape expects. */
+function remarksFor(titleRemarks: PullChangeRemark[], unpublishableReason: string | undefined): { remarks?: PullChangeRemark[] } {
+  const remarks = [...titleRemarks, ...(unpublishableReason !== undefined ? [READ_ONLY_REMARK] : [])];
+  return remarks.length > 0 ? { remarks } : {};
 }
 
 /** The per-directory used-names set, created on first use. */
@@ -781,6 +813,7 @@ export async function mergeRemoteChangeIntoLocalFile(
   recordName: string,
   file: string,
   remoteBodyText: string,
+  unrepresentableTitle?: string | undefined,
 ): Promise<{ status: "merged" | "conflict" | "unresolvedMarkers" }> {
   const base = (await readBaseCopy(targetDir, recordName)) ?? "";
   const { frontmatter, body: localContent } = splitFrontmatter(await readFile(path.join(targetDir, file), "utf-8"));
@@ -796,7 +829,7 @@ export async function mergeRemoteChangeIntoLocalFile(
 
   await writeFile(
     path.join(targetDir, file),
-    composeNoteFile(frontmatter, outcome.text, recordName),
+    composeNoteFile(frontmatter, outcome.text, recordName, unrepresentableTitle),
     "utf-8",
   );
   if (!outcome.hasConflict) {
