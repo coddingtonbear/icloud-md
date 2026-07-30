@@ -8,7 +8,8 @@ import {
   updateNoteRecord,
   type CloudKitRecord,
 } from "../cloudkit/databaseClient.js";
-import { readCloneState, writeCloneState, type CloneState } from "../notes/cloneState.js";
+import { writeCloneState, type CloneState } from "../notes/cloneState.js";
+import { openVault } from "../notes/vaultMigrations.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import {
   NoteDeleteRejectedError,
@@ -397,7 +398,7 @@ async function forceDeleteWithCascade(
 }
 
 async function resolveObjectAuth(targetDir: string, options: ObjectCommandOptions) {
-  const state = await readCloneState(targetDir);
+  const state = await openVault(targetDir);
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
   }

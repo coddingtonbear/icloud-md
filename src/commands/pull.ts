@@ -25,7 +25,8 @@ import { reconcileNotePlacements, removeStaleDirs } from "../notes/folderReconci
 import { hasConflictMarkers, mergeNoteVersions } from "../notes/mergeConflict.js";
 import { readBaseCopy, removeBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { localFileState } from "../notes/localFileState.js";
-import { readCloneState, writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
+import { writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
+import { openVault } from "../notes/vaultMigrations.js";
 import { recordEpoch } from "../notes/noteEpoch.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { recordVersion } from "../notes/versionHistory.js";
@@ -88,7 +89,7 @@ export async function runPull(
   progress?: SyncProgress,
   onLoginStatus?: (message: string) => void,
 ): Promise<PullSummary> {
-  const state = await readCloneState(targetDir);
+  const state = await openVault(targetDir);
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
   }

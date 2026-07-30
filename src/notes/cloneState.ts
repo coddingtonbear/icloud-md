@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { CorruptStateFileError, UnsupportedVaultLayoutError } from "../errors.js";
 import { isEnoent } from "../fsUtil.js";
+import { readOwnPackageVersion } from "../version.js";
 
 export interface CloneStateNoteEntry {
   file: string;
@@ -117,8 +118,19 @@ export interface CloneState {
    * reads - readCloneState fails loudly telling the user to re-clone
    * (backward compatibility deliberately waived, see the folders doc,
    * 2026-07-16T21:10). writeCloneState always stamps the current version.
+   *
+   * Versions from 2 onward are migrated *forward* automatically rather than
+   * refused - see `vaultMigrations.ts`, which is the only thing that should
+   * ever change this number on an existing vault.
    */
   layoutVersion?: number | undefined;
+  /**
+   * Which build last wrote this state file, e.g. "icloud-md 0.4.0". Purely
+   * diagnostic - it identifies the engine behind a vault in bug reports and
+   * nothing branches on it. Vault *shape* is `layoutVersion`'s job alone, so
+   * that there's exactly one source of truth about what's on disk.
+   */
+  generator?: string | undefined;
   /**
    * Which Apple ID this folder was cloned for - resolves to that account's
    * own session under `~/.config/icloud-md/accounts/<dsid>/` (see
@@ -184,10 +196,50 @@ export const STATE_FILE_NAME = "state.json";
 export const CURRENT_LAYOUT_VERSION = 2;
 
 export async function writeCloneState(targetDir: string, state: CloneState): Promise<void> {
+  const stamped: CloneState = {
+    ...state,
+    layoutVersion: CURRENT_LAYOUT_VERSION,
+    generator: `icloud-md ${readOwnPackageVersion()}`,
+  };
+  await writeRawStateFile(targetDir, stamped);
+}
+
+/** A state file as it sits on disk, before any version-specific validation -
+ * what a migration reads and rewrites. */
+export type RawStateFile = Record<string, unknown>;
+
+/**
+ * The state file as raw JSON, with no validation and no version check - the
+ * one way to read a vault whose shape this build doesn't understand yet.
+ * Exists for `vaultMigrations.ts`, which by definition runs before the
+ * validated reader can be trusted; everything else wants `readCloneState`.
+ */
+export async function readRawStateFile(targetDir: string): Promise<RawStateFile | undefined> {
+  const filePath = path.join(targetDir, STATE_DIR_NAME, STATE_FILE_NAME);
+  let raw: string;
+  try {
+    raw = await readFile(filePath, "utf-8");
+  } catch (cause) {
+    if (isEnoent(cause)) {
+      return undefined;
+    }
+    throw cause;
+  }
+
+  const parsed: unknown = JSON.parse(raw);
+  if (!isRecord(parsed)) {
+    throw new CorruptStateFileError(`${filePath} does not look like a valid state file (not a JSON object).`);
+  }
+  return parsed;
+}
+
+/** Writes a state file verbatim, stamping no version of its own - a migration
+ * owns which `layoutVersion` it is committing. `writeCloneState` is the
+ * normal path for everything that isn't a migration. */
+export async function writeRawStateFile(targetDir: string, state: RawStateFile | CloneState): Promise<void> {
   const dir = path.join(targetDir, STATE_DIR_NAME);
   await mkdir(dir, { recursive: true });
-  const stamped: CloneState = { ...state, layoutVersion: CURRENT_LAYOUT_VERSION };
-  await writeFile(path.join(dir, STATE_FILE_NAME), JSON.stringify(stamped, null, 2) + "\n", "utf-8");
+  await writeFile(path.join(dir, STATE_FILE_NAME), JSON.stringify(state, null, 2) + "\n", "utf-8");
 }
 
 export async function readCloneState(targetDir: string): Promise<CloneState | undefined> {
@@ -332,6 +384,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
 
   return {
     layoutVersion: CURRENT_LAYOUT_VERSION,
+    generator: typeof value.generator === "string" ? value.generator : undefined,
     account,
     syncToken,
     sharedZoneSyncTokens,

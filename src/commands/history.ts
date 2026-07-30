@@ -1,5 +1,5 @@
 import { NotClonedDirectoryError } from "../errors.js";
-import { readCloneState } from "../notes/cloneState.js";
+import { openVault } from "../notes/vaultMigrations.js";
 import { listEpochs, type NoteEpoch } from "../notes/noteEpoch.js";
 import { historyRecordNames, resolveTrackedNote } from "../notes/trackedFile.js";
 import { listVersions, type VersionSnapshot } from "../notes/versionHistory.js";
@@ -37,7 +37,7 @@ export type HistoryResult =
  * `options.records`) restores the previous per-record flat listing.
  */
 export async function runHistory(targetDir: string, fileArg: string, options: HistoryOptions = {}): Promise<HistoryResult> {
-  const state = await readCloneState(targetDir);
+  const state = await openVault(targetDir);
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
   }

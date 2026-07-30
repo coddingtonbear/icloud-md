@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { readBaseCopy } from "../notes/baseCopy.js";
-import { readCloneState } from "../notes/cloneState.js";
+import { openVault } from "../notes/vaultMigrations.js";
 import { joinFrontmatter, splitFrontmatter } from "../notes/frontmatter.js";
 import { isEnoent } from "../fsUtil.js";
 import { resolveTrackedNote } from "../notes/trackedFile.js";
@@ -26,7 +26,7 @@ export interface RestoreResult {
  * working-file writes; this was the one write path that didn't.
  */
 export async function runRestore(targetDir: string, fileArg: string): Promise<RestoreResult> {
-  const state = await readCloneState(targetDir);
+  const state = await openVault(targetDir);
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
   }

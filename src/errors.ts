@@ -76,6 +76,24 @@ export class UnsupportedVaultLayoutError extends IcloudNotesSyncError {
   }
 }
 
+/**
+ * The vault was written by a newer icloud-md than this one. Vaults migrate
+ * forward automatically, so running an older build against one it has already
+ * touched is a real possibility - and the only safe answer is to upgrade.
+ * Deliberately distinct from `UnsupportedVaultLayoutError`, whose "re-clone
+ * into a fresh directory" advice would be destructive here.
+ */
+export class VaultFromNewerToolError extends IcloudNotesSyncError {
+  constructor(targetDir: string, vaultVersion: number, supportedVersion: number) {
+    super(
+      `${targetDir} was written by a newer version of icloud-md (vault layout ${vaultVersion}; this build understands ${supportedVersion}).`,
+      {
+        hint: 'Upgrade to the latest release: "npm install -g icloud-md@latest". (This tool made no changes.)',
+      },
+    );
+  }
+}
+
 export class MissingSessionFileError extends IcloudNotesSyncError {
   constructor(sessionPath: string, options: ErrorOptions = {}) {
     super(`No session file found at ${sessionPath}.`, {

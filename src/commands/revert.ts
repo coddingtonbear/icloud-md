@@ -2,7 +2,8 @@ import { resolveFolderAccount } from "../auth/folderAuth.js";
 import { lookupRecords, noteZone, updateRecords, type NoteZone, type RecordUpdate } from "../cloudkit/databaseClient.js";
 import { NotClonedDirectoryError, NotesUnavailableError, UnknownVersionSnapshotError, VersionContentUnavailableError } from "../errors.js";
 import { decodeTableMarkdown } from "../notes/decodeTableRecord.js";
-import { readCloneState, type CloneState } from "../notes/cloneState.js";
+import { type CloneState } from "../notes/cloneState.js";
+import { openVault } from "../notes/vaultMigrations.js";
 import { decompressNoteDocument } from "../notes/noteText.js";
 import { noteDocumentRoundTrips } from "../notes/noteDocument.js";
 import { findEpochById, type NoteEpoch } from "../notes/noteEpoch.js";
@@ -80,7 +81,7 @@ export interface RevertResult {
  * no network call); `revert` is a real remote write.
  */
 export async function runRevert(targetDir: string, fileArg: string, id: string, options: RevertOptions): Promise<RevertResult> {
-  const state = await readCloneState(targetDir);
+  const state = await openVault(targetDir);
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
   }
