@@ -57,3 +57,39 @@ test("restore refuses when there's no cloned state at all", () =>
   withTempDir(async (dir) => {
     await assert.rejects(() => runRestore(dir, "Test Note.md"), /doesn't look like a cloned notes directory/);
   }));
+
+test("restore preserves local-only frontmatter while discarding the body edit", () =>
+  withTempDir(async (dir) => {
+    await writeCloneState(dir, STATE);
+    await writeBaseCopy(dir, "REC1", "Original synced text");
+    const frontmatter = "---\ntags: [recipes, weeknight]\naliases: [Pie]\n---\n\n";
+    await writeFile(path.join(dir, "Test Note.md"), frontmatter + "Some local edit", "utf-8");
+
+    await runRestore(dir, "Test Note.md");
+
+    assert.equal(await readFile(path.join(dir, "Test Note.md"), "utf-8"), frontmatter + "Original synced text");
+  }));
+
+test("restore recreates a missing file from the base copy, with no frontmatter", () =>
+  withTempDir(async (dir) => {
+    await writeCloneState(dir, STATE);
+    await writeBaseCopy(dir, "REC1", "Original synced text");
+
+    await runRestore(dir, "Test Note.md");
+
+    assert.equal(await readFile(path.join(dir, "Test Note.md"), "utf-8"), "Original synced text");
+  }));
+
+test("restore leaves a frontmatter-only file as envelope plus base copy", () =>
+  withTempDir(async (dir) => {
+    await writeCloneState(dir, STATE);
+    await writeBaseCopy(dir, "REC1", "Original synced text");
+    await writeFile(path.join(dir, "Test Note.md"), "---\ntags: [orphan]\n---\n", "utf-8");
+
+    await runRestore(dir, "Test Note.md");
+
+    assert.equal(
+      await readFile(path.join(dir, "Test Note.md"), "utf-8"),
+      "---\ntags: [orphan]\n---\nOriginal synced text",
+    );
+  }));
