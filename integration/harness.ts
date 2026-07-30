@@ -61,8 +61,8 @@ export class RunContext {
     // becomes the run's primary working copy rather than being thrown away.
     context.primaryVault = await context.vault("primary");
     const contents = await assertFolderSafe(context.primaryVault.dir, config.folder);
-    context.baseline = new Set(contents.notes.map((note) => note.recordName));
-    console.error(`  folder "${config.folder}" is clean (${contents.notes.length} fixture note(s) from earlier runs present)\n`);
+    context.baseline = new Set([...contents.notes, ...contents.subfolders].map((record) => record.recordName));
+    console.error(`  folder "${config.folder}" is clean (${contents.notes.length} note(s), ${contents.subfolders.length} subfolder(s) from earlier runs)\n`);
 
     return context;
   }

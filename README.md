@@ -203,6 +203,9 @@ resolution live.
   folder renames/moves by moving the note's file rather than the
   directory, and `push` picks up local moves between folders (a rename or
   `mv` of a tracked file) and sends the matching folder change upstream.
+  A directory the account doesn't have yet becomes a real Notes folder,
+  nesting included — `mkdir Recipes/Desserts`, drop a note in, and `push`
+  creates both folders ahead of the note.
   Notes shared with you live under a top-level directory per sharer, with
   their own shared folders nested underneath. All commands are
   `git`-style about it — run them from anywhere inside the vault and file
@@ -320,6 +323,17 @@ integration never gets to it.
   shared folder you only have read access to is correctly refused, but
   that path is still unverified live (no read-only share has been
   available to test against).
+- **Folders are only ever created, never renamed or deleted remotely.**
+  A new local directory becomes a Notes folder, but renaming a directory
+  reads as a *new* folder plus a batch of note moves — the folder it left
+  behind stays in Notes, empty — and deleting a directory leaves its folder
+  in place. A directory carries no id the way a note does (`apple-note-id`
+  lives in a note's frontmatter, and a folder has nowhere to put one), so a
+  rename can't be told apart from a delete-plus-create. Renaming and
+  deleting folders in Notes itself works fine and syncs down normally.
+- **New folders are only created in your own Notes.** A directory inside
+  someone else's shared area is refused: the folder would have to be created
+  in their zone, under their share.
 - **Frontmatter never leaves your machine.** Apple Notes has nowhere to
   store a YAML frontmatter block, so it's kept purely local — never uploaded,
   and never visible on your other devices. It survives `pull`/`push` because

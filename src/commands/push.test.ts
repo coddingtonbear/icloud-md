@@ -91,17 +91,16 @@ test("buildPushPlan refuses a loose top-level .md locally - every note must be i
     assert.match(entries[0]?.reason ?? "", /outside any folder/);
   }));
 
-test("buildPushPlan refuses a .md in a directory that isn't one of the account's folders", () =>
+test("buildPushPlan treats a .md in an unknown directory as a real change, not a local refusal", () =>
   withTempDir(async (dir) => {
     await writeCloneState(dir, emptyState());
     await writeVaultFile(dir, "Brand New Folder/Note.md", "Hello");
 
-    const { entries } = await buildPushPlan(dir);
-
-    assert.equal(entries.length, 1);
-    assert.equal(entries[0]?.resolution, "refused");
-    assert.match(entries[0]?.reason ?? "", /"Brand New Folder\/"/);
-    assert.match(entries[0]?.reason ?? "", /creating folders isn't supported yet/);
+    // The directory now becomes a Notes folder, so this is something to
+    // push rather than something to refuse - which means it needs the
+    // network, and an unbound vault can no longer answer locally. What the
+    // folder plan itself contains is covered by folderCreate.test.ts.
+    await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
   }));
 
 test("buildPushPlan refuses a new .md loose at the top of a sharer's home locally", () =>
@@ -340,11 +339,11 @@ test("buildPushPlan pairs a missing tracked file with an identical untracked one
     await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
   }));
 
-test("buildPushPlan refuses a local move into an unknown directory, locally, as a move (not a delete + create)", () =>
+test("buildPushPlan refuses a local move into a sharer's area, locally, as a move (not a delete + create)", () =>
   withTempDir(async (dir) => {
     const s = state();
     await writeBaseCopy(dir, "REC1", "Synced text");
-    await writeVaultFile(dir, "Nowhere/Tracked.md", "Synced text");
+    await writeVaultFile(dir, "Pat/Tracked.md", "Synced text");
     await writeCloneState(dir, s);
 
     const { entries } = await buildPushPlan(dir);
@@ -352,9 +351,9 @@ test("buildPushPlan refuses a local move into an unknown directory, locally, as 
     assert.equal(entries.length, 1);
     assert.equal(entries[0]?.kind, "move");
     assert.equal(entries[0]?.previousFile, "Notes/Tracked.md");
-    assert.equal(entries[0]?.file, "Nowhere/Tracked.md");
+    assert.equal(entries[0]?.file, "Pat/Tracked.md");
     assert.equal(entries[0]?.resolution, "refused");
-    assert.match(entries[0]?.reason ?? "", /isn't one of the account's folders/);
+    assert.match(entries[0]?.reason ?? "", /sharer's area/);
   }));
 
 test("buildPushPlan pairs a moved-and-edited note by unique basename", () =>
@@ -363,7 +362,7 @@ test("buildPushPlan pairs a moved-and-edited note by unique basename", () =>
     await writeBaseCopy(dir, "REC1", "Synced text");
     // Same basename, different content (edited after the move), in an
     // unknown directory so the pairing outcome is visible without network.
-    await writeVaultFile(dir, "Nowhere/Tracked.md", "Edited after moving");
+    await writeVaultFile(dir, "Pat/Tracked.md", "Edited after moving");
     await writeCloneState(dir, s);
 
     const { entries } = await buildPushPlan(dir);
@@ -561,8 +560,8 @@ test("runPush returns no entries and a zero pushed count when the plan is empty"
 //
 // The cases these cover are exactly the ones the content-equality and
 // unique-basename heuristics can't reach, so each is written to resolve
-// locally (via the unknown "Nowhere/" directory) and prove which way the
-// plan went without needing the network.
+// locally (via the sharer's "Pat/" area, which push refuses without a
+// login) and prove which way the plan went without needing the network.
 
 const NOTE_ID = "089D915D-C76E-4F44-AB80-2190073281A3";
 const OTHER_NOTE_ID = "001b9e8a-c474-4311-af32-abe70026b346";
@@ -585,7 +584,7 @@ test("an id pairs a note renamed, moved, and edited all at once - which no heuri
     await writeBaseCopy(dir, NOTE_ID, "Synced text");
     // Different directory, different basename, different content: nothing
     // but the id connects this file to Notes/Tracked.md.
-    await writeVaultFile(dir, "Nowhere/Totally Different.md", withId(NOTE_ID, "Edited after renaming"));
+    await writeVaultFile(dir, "Pat/Totally Different.md", withId(NOTE_ID, "Edited after renaming"));
     await writeCloneState(dir, idState());
 
     const { entries } = await buildPushPlan(dir);
@@ -593,7 +592,7 @@ test("an id pairs a note renamed, moved, and edited all at once - which no heuri
     assert.equal(entries.length, 1);
     assert.equal(entries[0]?.kind, "move");
     assert.equal(entries[0]?.previousFile, "Notes/Tracked.md");
-    assert.equal(entries[0]?.file, "Nowhere/Totally Different.md");
+    assert.equal(entries[0]?.file, "Pat/Totally Different.md");
   }));
 
 test("a file with its envelope stripped falls back to delete plus create", () =>
@@ -602,7 +601,7 @@ test("a file with its envelope stripped falls back to delete plus create", () =>
     // No id, different basename, different content: nothing left for either
     // the id path or the heuristics to pair on. This is the degradation the
     // heuristics can't rescue, and it must not silently pick a wrong note.
-    await writeVaultFile(dir, "Nowhere/Totally Different.md", "Edited after renaming");
+    await writeVaultFile(dir, "Pat/Totally Different.md", "Edited after renaming");
     await writeCloneState(dir, idState());
 
     // The unpaired missing file becomes a delete candidate, which needs the
@@ -615,14 +614,14 @@ test("a copy of a note whose original is still in place plans as a create, not a
     await writeBaseCopy(dir, NOTE_ID, "Synced text");
     await writeVaultFile(dir, "Notes/Tracked.md", "Synced text");
     // Duplicated in Obsidian: same id, still carrying the original's.
-    await writeVaultFile(dir, "Nowhere/Tracked copy.md", withId(NOTE_ID, "Synced text"));
+    await writeVaultFile(dir, "Pat/Tracked copy.md", withId(NOTE_ID, "Synced text"));
     await writeCloneState(dir, idState());
 
     const { entries } = await buildPushPlan(dir);
 
     assert.equal(entries.length, 1);
     assert.equal(entries[0]?.kind, "create");
-    assert.equal(entries[0]?.file, "Nowhere/Tracked copy.md");
+    assert.equal(entries[0]?.file, "Pat/Tracked copy.md");
   }));
 
 test("duplicate id claims with no original left in place are refused, not guessed", () =>
@@ -655,7 +654,7 @@ test("an id from another vault plans as a new note, with a notice saying so", ()
   withTempDir(async (dir) => {
     await writeBaseCopy(dir, NOTE_ID, "Synced text");
     await writeVaultFile(dir, "Notes/Tracked.md", "Synced text");
-    await writeVaultFile(dir, "Nowhere/From Elsewhere.md", withId(OTHER_NOTE_ID, "Someone else's note"));
+    await writeVaultFile(dir, "Pat/From Elsewhere.md", withId(OTHER_NOTE_ID, "Someone else's note"));
     await writeCloneState(dir, idState());
 
     const { entries, notices } = await buildPushPlan(dir);
@@ -683,7 +682,7 @@ test("a malformed id is ignored rather than failing the push", () =>
   withTempDir(async (dir) => {
     await writeBaseCopy(dir, NOTE_ID, "Synced text");
     await writeVaultFile(dir, "Notes/Tracked.md", "Synced text");
-    await writeVaultFile(dir, "Nowhere/Broken.md", "---\napple-note-id: not-a-uuid\n---\n\nA new note");
+    await writeVaultFile(dir, "Pat/Broken.md", "---\napple-note-id: not-a-uuid\n---\n\nA new note");
     await writeCloneState(dir, idState());
 
     const { entries, notices } = await buildPushPlan(dir);

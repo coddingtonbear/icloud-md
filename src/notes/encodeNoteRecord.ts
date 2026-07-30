@@ -87,7 +87,7 @@ const NULL_FIELDS = ["FirstAttachmentThumbnail", "FirstAttachmentUTIEncrypted", 
  */
 export const TRASH_FOLDER_RECORD_NAME = "TrashFolder-CloudKit";
 
-function folderReference(folderRecordName: string, zoneOwnerRecordName?: string): unknown {
+export function folderReference(folderRecordName: string, zoneOwnerRecordName?: string): unknown {
   // Private-zone writes send a bare zoneName with no ownerRecordName,
   // matching the captured client (the fuller zone identity only appears on
   // the read side there). Shared-zone writes DO qualify the reference with

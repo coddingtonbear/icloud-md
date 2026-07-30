@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import chalk from "chalk";
-import { countUnchangedNotes, renderPlan, stripFilePrefix, type PlanEntry } from "./pushPlan.js";
+import { countUnchangedNotes, renderPlan, serializePlanEntry, stripFilePrefix, type PlanEntry } from "./pushPlan.js";
 
 // Stable, non-ANSI assertions - colorized rendering itself is exercised by
 // the color-specific test below, forcing chalk back on for that one case.
@@ -191,4 +191,37 @@ test("countUnchangedNotes ignores a pending rename, which can sit alongside a re
     { kind: "update", file: "Edited.md", resolution: "ready" },
   ];
   assert.equal(countUnchangedNotes(entries, 10), 9);
+});
+
+test("renders a folder create with a trailing slash and counts it separately", () => {
+  const lines = renderPlan([
+    { kind: "createFolder", file: "Recipes", folderTitle: "Recipes", resolution: "ready" },
+    { kind: "create", file: "Recipes/cake.md", resolution: "ready" },
+  ]);
+
+  assert.ok(
+    lines.some((line) => line.includes("new dir:") && line.includes("Recipes/")),
+    `expected a folder line, got ${JSON.stringify(lines)}`,
+  );
+  assert.ok(
+    lines.some((line) => line.includes("1 to create, 0 changed, 0 to delete, 1 new folder.")),
+    `expected the folder count in the summary, got ${JSON.stringify(lines)}`,
+  );
+});
+
+test("omits the folder count when no folder is being created", () => {
+  const lines = renderPlan([{ kind: "create", file: "Notes/a.md", resolution: "ready" }]);
+  assert.ok(lines.some((line) => line.includes("1 to create, 0 changed, 0 to delete.")));
+  assert.ok(!lines.some((line) => line.includes("new folder")));
+});
+
+test("serializePlanEntry carries folderTitle only for a folder create", () => {
+  assert.deepEqual(
+    serializePlanEntry({ kind: "createFolder", file: "Recipes", folderTitle: "Recipes", resolution: "ready" }),
+    { kind: "createFolder", file: "Recipes", resolution: "ready", folderTitle: "Recipes" },
+  );
+  assert.equal(
+    "folderTitle" in serializePlanEntry({ kind: "create", file: "Notes/a.md", resolution: "ready" }),
+    false,
+  );
 });

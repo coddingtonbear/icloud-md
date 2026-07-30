@@ -586,25 +586,54 @@ export async function createNoteRecord(
   fields: Record<string, { value: unknown }>,
   extras: CreateNoteExtras = {},
 ): Promise<NoteUpdateResult> {
-  const record: Record<string, unknown> = { recordName, recordType: "Note", fields };
+  return createRecord("createNoteRecord", "Note", session, ckDatabaseHost, dsid, database, zoneID, recordName, fields, extras);
+}
+
+/**
+ * Creates one brand-new Folder record. A folder is a far smaller thing than
+ * a note on the wire: a top-level one carries a single `TitleEncrypted`
+ * field and nothing else (confirmed against a folder created by the web
+ * client, 2026-07-30), and a nested one adds a `ParentFolder` reference plus
+ * the matching CloudKit record-level parent - see `encodeFolderRecord.ts`
+ * for the field construction.
+ */
+export async function createFolderRecord(
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  database: CloudKitDatabase,
+  zoneID: CloudKitZoneID,
+  recordName: string,
+  fields: Record<string, { value: unknown }>,
+  extras: CreateNoteExtras = {},
+): Promise<NoteUpdateResult> {
+  return createRecord("createFolderRecord", "Folder", session, ckDatabaseHost, dsid, database, zoneID, recordName, fields, extras);
+}
+
+/** The shared `records/modify` create both of the above submit. */
+async function createRecord(
+  label: string,
+  recordType: string,
+  session: IcloudSession,
+  ckDatabaseHost: string,
+  dsid: string,
+  database: CloudKitDatabase,
+  zoneID: CloudKitZoneID,
+  recordName: string,
+  fields: Record<string, { value: unknown }>,
+  extras: CreateNoteExtras,
+): Promise<NoteUpdateResult> {
+  const record: Record<string, unknown> = { recordName, recordType, fields };
   if (extras.parentRecordName !== undefined) {
     record.parent = { recordName: extras.parentRecordName };
   }
   if (extras.createShortGUID === true) {
     record.createShortGUID = true;
   }
-  const body = await postDatabase(
-    "createNoteRecord:records/modify",
-    session,
-    ckDatabaseHost,
-    dsid,
-    database,
-    "records/modify",
-    {
-      operations: [{ operationType: "create", record }],
-      zoneID,
-    },
-  );
+  const body = await postDatabase(`${label}:records/modify`, session, ckDatabaseHost, dsid, database, "records/modify", {
+    operations: [{ operationType: "create", record }],
+    zoneID,
+  });
   return parseNoteUpdateResponse(body);
 }
 

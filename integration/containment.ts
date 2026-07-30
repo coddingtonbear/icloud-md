@@ -14,10 +14,12 @@
  * theory that an unexpected note there means the folder is not what we think
  * it is.
  *
- * The test folder itself is never created or deleted here - `push` cannot
- * create folders at all (see `push.ts`), which is a useful accident: the
- * suite is structurally incapable of inventing a folder outside the
- * sanctioned one. Create it once by hand, or with `integration/setupFolder.ts`.
+ * The test folder itself is never created or deleted here. Create it once by
+ * hand, or with `integration/setupFolder.ts`. Push *can* now create folders,
+ * so a run may add subfolders inside it; those are fixtures like any other
+ * and are torn down by the same two-key rule. The test folder is excluded
+ * from that by construction - it is never in a run's own additions, and the
+ * subtree walk below deliberately starts below it.
  */
 
 import { randomBytes } from "node:crypto";
@@ -60,8 +62,14 @@ export class ContainmentError extends Error {
 
 export interface FolderContents {
   folder: ObjectInfo;
-  /** Live notes filed inside it. */
+  /** Live notes filed anywhere in the test folder's subtree. */
   notes: ObjectInfo[];
+  /**
+   * Live folders nested inside the test folder, shallowest first. Never
+   * includes the test folder itself - that one is a fixture of the machine,
+   * created once by a human, and is never a run's to delete.
+   */
+  subfolders: ObjectInfo[];
 }
 
 /** Every record in the account's zone, as the CLI's own plumbing sees it. */
@@ -96,10 +104,31 @@ export async function readTestFolder(vaultDir: string, folderName: string): Prom
   }
 
   const folder = folders[0]!;
+
+  // Now that push can create folders, a fixture can sit in a subfolder of
+  // the test folder. Walk the subtree so containment covers the whole thing
+  // rather than only its top level.
+  const subfolders: ObjectInfo[] = [];
+  const subtree = new Set<string>([folder.recordName]);
+  const liveFolders = objects.filter((o) => o.recordType.includes("Folder") && o.state === "live");
+  for (let added = true; added; ) {
+    added = false;
+    for (const candidate of liveFolders) {
+      if (subtree.has(candidate.recordName)) {
+        continue;
+      }
+      if (candidate.references.some((reference) => subtree.has(reference))) {
+        subtree.add(candidate.recordName);
+        subfolders.push(candidate);
+        added = true;
+      }
+    }
+  }
+
   const notes = objects.filter(
-    (o) => o.recordType.includes("Note") && o.state === "live" && o.references.includes(folder.recordName),
+    (o) => o.recordType.includes("Note") && o.state === "live" && o.references.some((reference) => subtree.has(reference)),
   );
-  return { folder, notes };
+  return { folder, notes, subfolders };
 }
 
 /**
@@ -110,11 +139,33 @@ export async function readTestFolder(vaultDir: string, folderName: string): Prom
 export async function assertFolderSafe(vaultDir: string, folderName: string): Promise<FolderContents> {
   const contents = await readTestFolder(vaultDir, folderName);
 
-  const foreign = contents.notes.filter((note) => !ANY_RUN_PREFIX.test(note.title ?? ""));
+  // A fixture directory tree is only prefixed at its root: a test creating
+  // "(itest-ab12cd) outer/middle/inner" names the intermediate folders
+  // whatever the test called them. Requiring a prefix on every segment would
+  // be a pointless burden on whoever writes the test, so a record counts as
+  // a fixture when it, or any of its ancestors below the test folder,
+  // carries one.
+  const byRecordName = new Map(contents.subfolders.map((folder) => [folder.recordName, folder]));
+  const isFixture = (record: ObjectInfo): boolean => {
+    const seen = new Set<string>();
+    let cursor: ObjectInfo | undefined = record;
+    while (cursor !== undefined && !seen.has(cursor.recordName)) {
+      if (ANY_RUN_PREFIX.test(cursor.title ?? "")) {
+        return true;
+      }
+      seen.add(cursor.recordName);
+      cursor = cursor.references.map((reference) => byRecordName.get(reference)).find((parent) => parent !== undefined);
+    }
+    return false;
+  };
+
+  const foreign = [...contents.notes, ...contents.subfolders].filter((record) => !isFixture(record));
   if (foreign.length > 0) {
-    const listing = foreign.map((n) => `  - ${JSON.stringify(n.title ?? "(untitled)")} (${n.recordName})`).join("\n");
+    const listing = foreign
+      .map((r) => `  - ${r.recordType} ${JSON.stringify(r.title ?? "(untitled)")} (${r.recordName})`)
+      .join("\n");
     throw new ContainmentError(
-      `The folder "${folderName}" contains ${foreign.length} note(s) that this suite did not create:\n${listing}\n` +
+      `The folder "${folderName}" contains ${foreign.length} record(s) that this suite did not create:\n${listing}\n` +
         `The suite will not run against a folder holding real notes. Move them elsewhere, or point ` +
         `ICLOUD_MD_ITEST_FOLDER at a dedicated folder.`,
     );
@@ -149,8 +200,10 @@ export interface TeardownReport {
  * the folder still bounds everything, and the guard has already established
  * that the folder held nothing foreign when the run began.
  *
- * Never passes `--yes`, so a Folder can never be deleted through this path
- * even if one somehow matched.
+ * Notes go before folders, and folders deepest-first, so nothing is deleted
+ * while something still references it. `--yes` (the CLI's guard on deleting
+ * a structural record) is answered only for folders *inside* the test
+ * folder, never for the test folder itself.
  */
 export async function teardownRun(
   vaultDir: string,
@@ -177,26 +230,56 @@ export async function sweepAllRuns(vaultDir: string, folderName: string): Promis
 async function teardownMatching(
   vaultDir: string,
   folderName: string,
-  matches: (note: ObjectInfo) => boolean,
+  matches: (record: ObjectInfo) => boolean,
 ): Promise<TeardownReport> {
   const contents = await readTestFolder(vaultDir, folderName);
   const report: TeardownReport = { deleted: [], failed: [], skippedOtherRuns: [] };
 
-  for (const note of contents.notes) {
-    const title = note.title ?? "";
-    // Key 1 (folder membership) is established by readTestFolder; key 2 is
-    // the caller's predicate.
-    if (!matches(note)) {
-      report.skippedOtherRuns.push({ recordName: note.recordName, title });
-      continue;
+  // Notes first, then folders deepest-first: a folder still holding notes
+  // has referrers, and the test folder itself is never in this list.
+  const ordered: ObjectInfo[] = [...contents.notes, ...[...contents.subfolders].reverse()];
+
+  let pending = ordered.filter((record) => {
+    if (matches(record)) {
+      return true;
+    }
+    report.skippedOtherRuns.push({ recordName: record.recordName, title: record.title ?? "" });
+    return false;
+  });
+
+  /**
+   * Deleting a note is Apple's two-stage purge, and the tombstone does not
+   * always clear before the next request: a folder emptied moments ago can
+   * still be rejected with VALIDATING_REFERENCE_ERROR, "blocked by" a note
+   * that is already gone (observed live, 2026-07-30). Retrying after a pause
+   * clears it, so a transient race doesn't strand a folder in the test
+   * folder where it would block every later run.
+   */
+  for (let attempt = 0; attempt < 3 && pending.length > 0; attempt += 1) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
     }
 
-    try {
-      await runCli(["object", "delete", note.recordName, vaultDir]);
-      report.deleted.push({ recordName: note.recordName, title });
-    } catch (error) {
-      report.failed.push({ recordName: note.recordName, title, error: error instanceof Error ? error.message : String(error) });
+    const stillPending: ObjectInfo[] = [];
+    for (const record of pending) {
+      // Deleting a Folder is gated behind --yes by the CLI, deliberately; the
+      // gate is answered here only for folders inside the test folder.
+      const isFolder = record.recordType.includes("Folder");
+      try {
+        await runCli(["object", "delete", record.recordName, vaultDir, ...(isFolder ? ["--yes"] : [])]);
+        report.deleted.push({ recordName: record.recordName, title: record.title ?? "" });
+      } catch (error) {
+        stillPending.push(record);
+        if (attempt === 2) {
+          report.failed.push({
+            recordName: record.recordName,
+            title: record.title ?? "",
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
     }
+    pending = stillPending;
   }
 
   return report;

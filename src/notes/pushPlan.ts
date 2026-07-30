@@ -18,7 +18,8 @@ import {
  * "rename" is the odd one out: not something push will do, but something the
  * reader still has to - a rename `pull --defer-renames` handed off and
  * nobody has performed. */
-export type PlanEntryKind = "create" | "update" | "delete" | "move" | "rename";
+export type PlanEntryKind =
+  "create" | "createFolder" | "update" | "delete" | "move" | "rename";
 
 /**
  * "noop" covers both a clean tracked file (nothing to do) and a "modified"
@@ -35,6 +36,9 @@ export interface PlanEntry {
   resolution: PlanResolution;
   /** Required for "refused"/"conflict"; ignored otherwise. */
   reason?: string;
+  /** kind "createFolder" only: `file` is a directory path rather than a
+   * note, and this is the Notes folder title it will be given. */
+  folderTitle?: string;
   /** kind "move" only: the vault-root-relative path the note was tracked
    * at before the local move. */
   previousFile?: string;
@@ -49,6 +53,11 @@ export interface PlanEntry {
  * the filename after it stays in the terminal's own foreground. */
 const LABELS: Record<PlanEntryKind, [label: string, color: ChalkInstance]> = {
   create: ["new file:", NEW],
+  // "new dir:" rather than "new folder:" so the label column stays the
+  // width it has always been - a longer label here would re-indent every
+  // listing, including the vast majority that never create a folder. The
+  // subject carries a trailing slash, and the summary says "folder".
+  createFolder: ["new dir:", NEW],
   update: ["modified:", CHANGED],
   delete: ["deleted:", GONE],
   move: ["moved:", MOVED],
@@ -57,8 +66,9 @@ const LABELS: Record<PlanEntryKind, [label: string, color: ChalkInstance]> = {
 
 /** Labels are padded to a common width so the listing reads as a column
  * rather than a ragged list. */
-const LABEL_WIDTH = Math.max(...Object.values(LABELS).map(([label]) => label.length));
-
+const LABEL_WIDTH = Math.max(
+  ...Object.values(LABELS).map(([label]) => label.length),
+);
 
 export interface RenderPlanOptions {
   /** Dresses the listing as the status screen: a "Changes not yet pushed
@@ -118,6 +128,7 @@ export function renderPlan(
     lines.push("");
   }
   let toCreate = 0;
+  let toCreateFolder = 0;
   let toUpdate = 0;
   let toDelete = 0;
   let toMove = 0;
@@ -127,15 +138,28 @@ export function renderPlan(
   for (const entry of visible) {
     const [label, color] = LABELS[entry.kind];
     const subject =
-      entry.kind === "move"
-        ? `${formatPath(entry.previousFile ?? entry.file)} -> ${formatPath(entry.file)}`
-        : entry.kind === "rename" && entry.pendingRename !== undefined
-          ? `${formatPath(entry.file)} -> ${formatPath(entry.pendingRename)}`
-          : formatPath(entry.file);
-    lines.push(LISTING_INDENT + labelledLine(label, color, LABEL_WIDTH, subject));
+      entry.kind === "createFolder"
+        ? `${formatPath(entry.file)}/`
+        : entry.kind === "move"
+          ? `${formatPath(entry.previousFile ?? entry.file)} -> ${formatPath(entry.file)}`
+          : entry.kind === "rename" && entry.pendingRename !== undefined
+            ? `${formatPath(entry.file)} -> ${formatPath(entry.pendingRename)}`
+            : formatPath(entry.file);
+    lines.push(
+      LISTING_INDENT + labelledLine(label, color, LABEL_WIDTH, subject),
+    );
     if (entry.resolution === "refused" || entry.resolution === "conflict") {
-      const reason = (entry.reason ?? "refused").split(entry.file).join(formatPath(entry.file));
-      lines.push(LISTING_INDENT + remarkLine(entry.resolution === "refused" ? UNSYNCABLE : NEEDS_ATTENTION, LABEL_WIDTH, `! ${reason}`));
+      const reason = (entry.reason ?? "refused")
+        .split(entry.file)
+        .join(formatPath(entry.file));
+      lines.push(
+        LISTING_INDENT +
+          remarkLine(
+            entry.resolution === "refused" ? UNSYNCABLE : NEEDS_ATTENTION,
+            LABEL_WIDTH,
+            `! ${reason}`,
+          ),
+      );
       if (entry.resolution === "refused") {
         refused += 1;
       } else {
@@ -145,6 +169,8 @@ export function renderPlan(
     }
     if (entry.kind === "create") {
       toCreate += 1;
+    } else if (entry.kind === "createFolder") {
+      toCreateFolder += 1;
     } else if (entry.kind === "update") {
       toUpdate += 1;
     } else if (entry.kind === "move") {
@@ -154,7 +180,10 @@ export function renderPlan(
     }
   }
 
-  let summary = `${toCreate} to create, ${toUpdate} changed, ${toDelete} to delete${toMove > 0 ? `, ${toMove} to move` : ""}.`;
+  let summary =
+    `${toCreate} to create, ${toUpdate} changed, ${toDelete} to delete` +
+    `${toMove > 0 ? `, ${toMove} to move` : ""}` +
+    `${toCreateFolder > 0 ? `, ${toCreateFolder} new folder${toCreateFolder === 1 ? "" : "s"}` : ""}.`;
   if (conflicts > 0 || refused > 0) {
     const parts: string[] = [];
     if (conflicts > 0) {
@@ -189,9 +218,15 @@ export function renderPlan(
  * real change entry alongside it - counting both would make the tally
  * describe more notes than the vault has.
  */
-export function countUnchangedNotes(entries: readonly Pick<PlanEntry, "kind" | "resolution">[], trackedNotes: number): number {
+export function countUnchangedNotes(
+  entries: readonly Pick<PlanEntry, "kind" | "resolution">[],
+  trackedNotes: number,
+): number {
   const touched = entries.filter(
-    (entry) => entry.kind !== "create" && entry.kind !== "rename" && entry.resolution !== "noop",
+    (entry) =>
+      entry.kind !== "create" &&
+      entry.kind !== "rename" &&
+      entry.resolution !== "noop",
   ).length;
   return Math.max(0, trackedNotes - touched);
 }
@@ -210,13 +245,27 @@ export function stripFilePrefix(message: string, file: string): string {
  * outside this process). */
 export type SerializedPlanEntry = Pick<
   PlanEntry,
-  "kind" | "file" | "resolution" | "reason" | "previousFile" | "pendingRename"
+  | "kind"
+  | "file"
+  | "resolution"
+  | "reason"
+  | "previousFile"
+  | "pendingRename"
+  | "folderTitle"
 >;
 
 /** Projects any `PlanEntry` (including `push`'s `ExecutablePlanEntry`, which
  * extends it with `execute`) down to its serializable fields. */
 export function serializePlanEntry(entry: PlanEntry): SerializedPlanEntry {
-  const { kind, file, resolution, reason, previousFile, pendingRename } = entry;
+  const {
+    kind,
+    file,
+    resolution,
+    reason,
+    previousFile,
+    pendingRename,
+    folderTitle,
+  } = entry;
   return {
     kind,
     file,
@@ -224,5 +273,6 @@ export function serializePlanEntry(entry: PlanEntry): SerializedPlanEntry {
     ...(reason !== undefined ? { reason } : {}),
     ...(previousFile !== undefined ? { previousFile } : {}),
     ...(pendingRename !== undefined ? { pendingRename } : {}),
+    ...(folderTitle !== undefined ? { folderTitle } : {}),
   };
 }

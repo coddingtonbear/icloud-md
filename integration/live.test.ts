@@ -10,6 +10,7 @@
  */
 
 import assert from "node:assert/strict";
+import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { RunContext } from "./harness.js";
 import { stripFrontmatter, type Vault } from "./vault.js";
@@ -130,6 +131,104 @@ describe("live sync against a real iCloud account", { concurrency: 1, skip: enab
     );
 
     assert.equal((await vault.status()).exitCode, 0, "the vault should settle after pushing an edit");
+  });
+
+  it("creates a Notes folder for a new directory, and the note inside it", async () => {
+    const folderName = run.title("new folder");
+    const title = run.title("note in a new folder");
+    const file = vault.inFolder(`${folderName}/note-in-new-folder.md`);
+
+    await vault.writeVaultFile(file, [`# ${title}`, "", "inside a brand new folder", ""].join("\n"));
+
+    // The folder shows in the plan as its own entry, ahead of the note.
+    const preview = await vault.status();
+    const folderEntry = preview.json.entries.find((entry) => entry.kind === "createFolder");
+    assert.ok(folderEntry !== undefined, `expected a folder create in the plan, got ${JSON.stringify(preview.json.entries)}`);
+    assert.equal(folderEntry.folderTitle, folderName);
+
+    const pushed = await vault.push();
+    assert.equal(pushed.exitCode, 0);
+    assert.ok(
+      pushed.json.entries.some((entry) => entry.kind === "createFolder" && entry.outcome?.succeeded === true),
+      `the folder create should have succeeded: ${JSON.stringify(pushed.json.entries)}`,
+    );
+
+    // Apple's own client must show the note, in the new folder.
+    const noteId = await vault.noteIdOf(file);
+    const web = await (await run.oracle()).readNote(noteId);
+    assert.equal(web.title, title);
+
+    // And a fresh clone must reproduce the *directory*, which only happens
+    // if a real Folder record now exists remotely. The file is located by
+    // note id: a fresh clone names it after the note's title, not after
+    // whatever this test called it locally.
+    const second = await run.vault("folder-check");
+    const rebuilt = await second.findFileByNoteId(noteId);
+    assert.ok(rebuilt !== undefined, `a fresh clone should contain the note (${noteId})`);
+    assert.equal(
+      path.posix.dirname(rebuilt),
+      vault.inFolder(folderName),
+      `a fresh clone should place the note in "${folderName}/"`,
+    );
+    assert.equal((await vault.status()).exitCode, 0, "the vault should settle after creating a folder");
+  });
+
+  it("creates a nested folder tree in one push, parents before children", async () => {
+    const parent = run.title("outer");
+    const file = vault.inFolder(`${parent}/middle/inner/deep-note.md`);
+    const title = run.title("deeply nested note");
+
+    await vault.writeVaultFile(file, [`# ${title}`, "", "three levels down", ""].join("\n"));
+
+    const pushed = await vault.push();
+    assert.equal(pushed.exitCode, 0);
+
+    const folderEntries = pushed.json.entries.filter((entry) => entry.kind === "createFolder");
+    assert.deepEqual(
+      folderEntries.map((entry) => entry.file),
+      [vault.inFolder(parent), vault.inFolder(`${parent}/middle`), vault.inFolder(`${parent}/middle/inner`)],
+      "folders should be created outermost first",
+    );
+    for (const entry of folderEntries) {
+      assert.equal(entry.outcome?.succeeded, true, `${entry.file} failed: ${entry.outcome?.message}`);
+    }
+
+    // The nesting is only real if a fresh clone rebuilds the same tree.
+    const noteId = await vault.noteIdOf(file);
+    const second = await run.vault("nested-check");
+    const rebuilt = await second.findFileByNoteId(noteId);
+    assert.ok(rebuilt !== undefined, `a fresh clone should contain the nested note (${noteId})`);
+    assert.equal(
+      path.posix.dirname(rebuilt),
+      vault.inFolder(`${parent}/middle/inner`),
+      "a fresh clone should rebuild the whole nested tree",
+    );
+  });
+
+  it("refuses to create a folder inside another user's shared area", async () => {
+    // A sharer's home directory is not ours to add folders to. Uses whatever
+    // shared area the account has; skipped when it has none.
+    const shared = await vault.firstSharerHomeDir();
+    if (shared === undefined) {
+      return;
+    }
+
+    const file = `${shared}/${run.title("not allowed")}/note.md`;
+    await vault.writeVaultFile(file, ["# nope", "", "body", ""].join("\n"));
+    try {
+      const preview = await vault.status();
+      const entry = preview.json.entries.find((candidate) => candidate.file === file);
+      assert.ok(entry !== undefined, `expected an entry for ${file}`);
+      assert.equal(entry.resolution, "refused");
+      assert.match(entry.reason ?? "", /shared/i);
+      assert.equal(
+        preview.json.entries.some((candidate) => candidate.kind === "createFolder"),
+        false,
+        "no folder should be planned inside someone else's share",
+      );
+    } finally {
+      await vault.removeVaultFile(file);
+    }
   });
 
   it("removes a note from the account when its file is deleted locally", async () => {

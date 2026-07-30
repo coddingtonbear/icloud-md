@@ -26,12 +26,13 @@ console.log(`Sweeping folder "${config.folder}" (dsid ${config.dsid})...`);
 const vault = await Vault.clone(config, path.join(workDir, "vault"));
 
 const before = await readTestFolder(vault.dir, config.folder);
-if (before.notes.length === 0) {
+const records = [...before.notes, ...before.subfolders];
+if (records.length === 0) {
   console.log("Nothing to sweep - the folder is already empty.");
 } else {
-  console.log(`Found ${before.notes.length} note(s):`);
-  for (const note of before.notes) {
-    console.log(`  - ${JSON.stringify(note.title ?? "(untitled)")} (${note.recordName})`);
+  console.log(`Found ${before.notes.length} note(s) and ${before.subfolders.length} subfolder(s):`);
+  for (const record of records) {
+    console.log(`  - ${record.recordType} ${JSON.stringify(record.title ?? "(untitled)")} (${record.recordName})`);
   }
 
   const report = await sweepAllRuns(vault.dir, config.folder);

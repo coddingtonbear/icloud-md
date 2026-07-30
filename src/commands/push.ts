@@ -2,9 +2,12 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveFolderAccount } from "../auth/folderAuth.js";
+import { planFolderCreates } from "../notes/folderCreate.js";
+import { buildFolderCreateFields } from "../notes/encodeFolderRecord.js";
 import type { IcloudSession } from "../session.js";
 import type { SyncNotice } from "../progress.js";
 import {
+  createFolderRecord,
   createNoteRecord,
   lookupRecords,
   noteZone,
@@ -23,7 +26,7 @@ import { resolveNoteIds } from "../notes/noteIdPairing.js";
 import { classifyNoteRecord, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { buildNoteCreateFields, buildNoteMoveFields, buildNoteTrashFields, buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
-import { noteDirOf, stateDirIndex } from "../notes/folderLayout.js";
+import { noteDirOf, stateDirIndex, type StateDirInfo } from "../notes/folderLayout.js";
 import { planEmbedRepresentations } from "../notes/embedPushEdit.js";
 import { isEnoent } from "../fsUtil.js";
 import { hasConflictMarkers, mergeNoteVersions } from "../notes/mergeConflict.js";
@@ -474,6 +477,27 @@ export async function buildPushPlan(
     deleteCandidates.push(candidate);
   }
 
+  // --- Folders the account doesn't have yet. A directory only becomes a
+  // Notes folder because a note is going *into* it, so this is planned from
+  // the notes wanting to move or be created, not from a walk of the disk.
+  // Record names are generated client-side (as note creates already are),
+  // which is what lets the note writes below reference a folder that doesn't
+  // exist yet - the folder's own write is simply ordered ahead of them.
+  const folderPlan = planFolderCreates({
+    wantedDirs: [...movePairs.map((pair) => noteDirOf(pair.toFile)), ...untracked.map((file) => noteDirOf(file.file))],
+    dirIndex,
+  });
+  const folderRefusals = new Map(folderPlan.refusals.map((refusal) => [refusal.dirPath, refusal.reason]));
+  /** A directory's folder, whether the account already had it or this push is about to create it. */
+  const resolveDir = (dir: string): StateDirInfo | undefined => {
+    const existing = dirIndex.get(dir);
+    if (existing) {
+      return existing;
+    }
+    const planned = folderPlan.dirToRecordName.get(dir);
+    return planned === undefined ? undefined : { kind: "folder", folderRecordName: planned };
+  };
+
   // Classify each pair's target locally; only moves into a real own folder
   // ever need the network. Everything else resolves to a refusal right
   // here, so `status` can show it without a login.
@@ -495,7 +519,7 @@ export async function buildPushPlan(
   for (const pair of movePairs) {
     const toDir = noteDirOf(pair.toFile);
     const relocated = toDir !== noteDirOf(pair.entry.file);
-    const info = dirIndex.get(toDir);
+    const info = resolveDir(toDir);
     const base: ExecutablePlanEntry = { kind: "move", file: pair.toFile, previousFile: pair.entry.file, resolution: "refused" };
 
     if (pair.entry.sharedZoneOwner !== undefined) {
@@ -518,8 +542,8 @@ export async function buildPushPlan(
       entries.push({
         ...base,
         reason:
-          `moved into "${toDir}/", which isn't one of the account's folders - creating folders isn't supported yet; ` +
-          "create the folder in Notes, pull, then move the file into it",
+          folderRefusals.get(toDir) ??
+          `moved into "${toDir}/", which can't become one of the account's folders`,
       });
       continue;
     }
@@ -574,7 +598,7 @@ export async function buildPushPlan(
       continue;
     }
     const dir = noteDirOf(file);
-    const info = dirIndex.get(dir);
+    const info = resolveDir(dir);
     if (dir === "") {
       entries.push({
         kind: "create",
@@ -591,9 +615,7 @@ export async function buildPushPlan(
         kind: "create",
         file,
         resolution: "refused",
-        reason:
-          `sits in "${dir}/", which isn't one of the account's folders - creating folders isn't supported yet; ` +
-          "create the folder in Notes, pull, then move the file into it",
+        reason: folderRefusals.get(dir) ?? `sits in "${dir}/", which can't become one of the account's folders`,
       });
       continue;
     }
@@ -686,6 +708,62 @@ export async function buildPushPlan(
   const { session, dsid } = auth;
   const ckdatabasewsUrl = auth.ckdatabasewsUrl;
 
+  // --- Folder creates, ordered ahead of every note write that depends on
+  // them. Only folders something *ready* actually needs are created: a
+  // directory whose only note was refused (conflict markers, say) would
+  // otherwise leave an empty folder behind in Notes.
+  const neededDirs = new Set<string>([
+    ...createCandidates.map((candidate) => noteDirOf(candidate.file)),
+    ...readyMovePairs.map((pair) => noteDirOf(pair.toFile)),
+  ]);
+  const foldersToCreate = folderPlan.folders.filter((folder) =>
+    [...neededDirs].some((dir) => dir === folder.dirPath || dir.startsWith(`${folder.dirPath}/`)),
+  );
+
+  // A folder whose create fails must not be followed by note writes that
+  // reference it - the server would reject them with a bare reference error.
+  const failedFolders = new Set<string>();
+  const folderEntries: ExecutablePlanEntry[] = foldersToCreate.map((folder) => ({
+    kind: "createFolder",
+    file: folder.dirPath,
+    folderTitle: folder.title,
+    resolution: "ready",
+    execute: async () => {
+      if (folder.parentRecordName !== undefined && failedFolders.has(folder.parentRecordName)) {
+        failedFolders.add(folder.recordName);
+        return { succeeded: false, message: `${folder.dirPath}/: skipped - its parent folder could not be created` };
+      }
+
+      const { fields, parentRecordName } = buildFolderCreateFields(folder.title, folder.parentRecordName);
+      const zone = noteZone(undefined);
+      const result = await createFolderRecord(
+        session,
+        ckdatabasewsUrl,
+        dsid,
+        zone.database,
+        zone.zoneID,
+        folder.recordName,
+        fields,
+        parentRecordName !== undefined ? { parentRecordName } : {},
+      );
+      if (!result.ok) {
+        failedFolders.add(folder.recordName);
+        return { succeeded: false, message: `${folder.dirPath}/: ${result.reason ?? result.serverErrorCode}` };
+      }
+
+      state.folders = {
+        ...(state.folders ?? {}),
+        [folder.recordName]: {
+          name: folder.title,
+          dirName: path.posix.basename(folder.dirPath),
+          ...(folder.parentRecordName !== undefined ? { parentRecordName: folder.parentRecordName } : {}),
+        },
+      };
+      return { succeeded: true, message: `Created folder ${folder.dirPath}/` };
+    },
+  }));
+  entries.unshift(...folderEntries);
+
   // Fresh lookup of every candidate: both the staleness check and the
   // document we build the edit on top of come from the server's current
   // state, not from anything cached locally. One lookup per zone: own notes
@@ -758,6 +836,9 @@ export async function buildPushPlan(
       ...base,
       resolution: "ready",
       execute: async () => {
+        if (failedFolders.has(folderRecordName)) {
+          return { succeeded: false, message: `${pair.toFile}: skipped - the folder it moved into could not be created` };
+        }
         const modify = async (
           fields: Record<string, { value: unknown }>,
           recordChangeTag: string,
@@ -942,6 +1023,9 @@ export async function buildPushPlan(
       file,
       resolution: "ready",
       execute: async () => {
+        if (failedFolders.has(folderRecordName)) {
+          return { succeeded: false, message: `${file}: skipped - the folder it belongs in could not be created` };
+        }
         // Client-generated lowercase-UUID recordName, matching the captured
         // create (the live vault also has uppercase ones, so casing likely
         // doesn't matter - but lowercase is what the capture shows).

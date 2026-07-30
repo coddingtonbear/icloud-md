@@ -87,6 +87,94 @@ export class Vault {
   }
 
   /**
+   * A path inside the containment folder, vault-root-relative. Every fixture
+   * that creates directories must build its path through here: a directory
+   * at the vault root would become a *top-level* Notes folder, outside the
+   * folder containment is scoped to.
+   */
+  inFolder(relativePath: string): string {
+    return `${this.folderName}/${relativePath}`;
+  }
+
+  /** Writes a file at a vault-root-relative path, creating directories as needed. */
+  async writeVaultFile(relativePath: string, contents: string): Promise<void> {
+    const full = path.join(this.dir, relativePath);
+    await mkdir(path.dirname(full), { recursive: true });
+    await writeFile(full, contents, "utf8");
+  }
+
+  async readVaultFile(relativePath: string): Promise<string> {
+    return readFile(path.join(this.dir, relativePath), "utf8");
+  }
+
+  async vaultFileExists(relativePath: string): Promise<boolean> {
+    try {
+      await readFile(path.join(this.dir, relativePath), "utf8");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async removeVaultFile(relativePath: string): Promise<void> {
+    await rm(path.join(this.dir, relativePath), { force: true });
+  }
+
+  /** The `apple-note-id` of a file at a vault-root-relative path. */
+  async noteIdOf(relativePath: string): Promise<string> {
+    const id = readFrontmatterField(await this.readVaultFile(relativePath), "apple-note-id");
+    if (id === undefined) {
+      throw new Error(`${relativePath} has no apple-note-id in its frontmatter`);
+    }
+    return id;
+  }
+
+  /**
+   * The directory of the first shared area this account has, if any - the
+   * only place a "can't create folders in someone else's share" test can
+   * point at. Undefined when nothing is shared with the account.
+   */
+  async firstSharerHomeDir(): Promise<string | undefined> {
+    const raw: unknown = JSON.parse(await readFile(path.join(this.dir, ".icloud-md", "state.json"), "utf8"));
+    const homes = (raw as { sharerHomes?: Record<string, { dirName?: unknown }> }).sharerHomes ?? {};
+    for (const home of Object.values(homes)) {
+      if (typeof home.dirName === "string") {
+        return home.dirName;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Finds the note anywhere in the vault by its `apple-note-id`, returning a
+   * vault-root-relative path. The whole-vault version of `findByNoteId`,
+   * needed once a note can live in a subdirectory the test created.
+   */
+  async findFileByNoteId(noteId: string): Promise<string | undefined> {
+    const walk = async (relativeDir: string): Promise<string | undefined> => {
+      const entries = await readdir(path.join(this.dir, relativeDir === "" ? "." : relativeDir), { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name.startsWith(".")) {
+          continue;
+        }
+        const relative = relativeDir === "" ? entry.name : `${relativeDir}/${entry.name}`;
+        if (entry.isDirectory()) {
+          const found = await walk(relative);
+          if (found !== undefined) {
+            return found;
+          }
+        } else if (entry.name.endsWith(".md")) {
+          if (readFrontmatterField(await this.readVaultFile(relative), "apple-note-id") === noteId) {
+            return relative;
+          }
+        }
+      }
+      return undefined;
+    };
+    return walk("");
+  }
+
+  /**
    * Finds the file holding a given note, by its `apple-note-id`. Necessary
    * because a file name is not stable across clones: in the default mode a
    * fresh clone names each file after the note's *title*, and in
