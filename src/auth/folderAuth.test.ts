@@ -4,7 +4,8 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { accountProfileDir, accountSessionPath, readAccountMeta, writeAccountMeta } from "./accountStore.js";
-import { bindNewFolderAccount, reauthenticateFolder, resolveFolderAccount } from "./folderAuth.js";
+import { bindKnownAccount, bindNewFolderAccount, reauthenticateFolder, resolveFolderAccount } from "./folderAuth.js";
+import { RequestedAccountMismatchError, SignInIncompleteError, UnknownAccountError } from "../errors.js";
 import type { AuthCheckResult } from "../cloudkit/setupClient.js";
 import { writeCloneState, type CloneState } from "../notes/cloneState.js";
 import { writeSessionFile, type IcloudSession } from "../session.js";
@@ -239,3 +240,112 @@ async function readSessionCookie(sessionPath: string): Promise<string> {
   const raw = JSON.parse(await readFile(sessionPath, "utf8")) as { cookie: string };
   return raw.cookie;
 }
+
+test("bindKnownAccount reuses the named account's own trusted profile, headlessly", () =>
+  withTempRoot(async (root) => {
+    const accountsRoot = path.join(root, "accounts");
+    const session = makeSession("KNOWN=1");
+    await writeAccountMeta({ appleId: "someone@example.com", dsid: "555" }, accountsRoot);
+
+    const profileDirsUsed: (string | undefined)[] = [];
+    const auth = await bindKnownAccount("someone@example.com", {
+      accountsRoot,
+      performBrowserLogin: async (options) => {
+        profileDirsUsed.push(options?.profileDir);
+        // The whole point: no window, and a bounded wait.
+        assert.equal(options?.headless, true);
+        assert.ok((options?.timeoutMs ?? 0) > 0);
+        return session;
+      },
+      checkAuthentication: async () => ok("555", "someone@example.com", session),
+    });
+
+    assert.equal(auth.dsid, "555");
+    assert.deepEqual(profileDirsUsed, [accountProfileDir("555", accountsRoot)]);
+    assert.deepEqual(JSON.parse(await readFile(accountSessionPath("555", accountsRoot), "utf8")), session);
+  }));
+
+test("bindKnownAccount matches on dsid as well as Apple ID, case-insensitively", () =>
+  withTempRoot(async (root) => {
+    const accountsRoot = path.join(root, "accounts");
+    const session = makeSession("KNOWN=2");
+    await writeAccountMeta({ appleId: "Mixed.Case@Example.com", dsid: "777" }, accountsRoot);
+
+    for (const reference of ["777", "mixed.case@example.com", "MIXED.CASE@EXAMPLE.COM"]) {
+      const auth = await bindKnownAccount(reference, {
+        accountsRoot,
+        performBrowserLogin: async () => session,
+        checkAuthentication: async () => ok("777", "Mixed.Case@Example.com", session),
+      });
+      assert.equal(auth.dsid, "777", `reference ${reference} should resolve`);
+    }
+  }));
+
+test("bindKnownAccount falls back to a visible window when the silent attempt fails", () =>
+  withTempRoot(async (root) => {
+    const accountsRoot = path.join(root, "accounts");
+    const session = makeSession("RECOVERED=1");
+    await writeAccountMeta({ appleId: "someone@example.com", dsid: "555" }, accountsRoot);
+
+    const attempts: (boolean | undefined)[] = [];
+    const auth = await bindKnownAccount("someone@example.com", {
+      accountsRoot,
+      performBrowserLogin: async (options) => {
+        attempts.push(options?.headless);
+        if (options?.headless === true) {
+          throw new SignInIncompleteError("no silent recovery available");
+        }
+        return session;
+      },
+      checkAuthentication: async () => ok("555", "someone@example.com", session),
+    });
+
+    assert.equal(auth.dsid, "555");
+    assert.deepEqual(attempts, [true, undefined], "silent attempt first, then a headed one");
+  }));
+
+test("bindKnownAccount rejects an unknown account, listing the ones that exist", () =>
+  withTempRoot(async (root) => {
+    const accountsRoot = path.join(root, "accounts");
+    await writeAccountMeta({ appleId: "real@example.com", dsid: "555" }, accountsRoot);
+
+    await assert.rejects(
+      () =>
+        bindKnownAccount("typo@example.com", {
+          accountsRoot,
+          performBrowserLogin: async () => {
+            throw new Error("should never attempt a login for an unknown account");
+          },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof UnknownAccountError);
+        assert.match(error.message, /typo@example\.com/);
+        assert.match(error.hint ?? "", /real@example\.com/);
+        return true;
+      },
+    );
+  }));
+
+test("bindKnownAccount refuses a sign-in that completed as a different Apple ID", () =>
+  withTempRoot(async (root) => {
+    const accountsRoot = path.join(root, "accounts");
+    const session = makeSession("WRONG=1");
+    await writeAccountMeta({ appleId: "wanted@example.com", dsid: "555" }, accountsRoot);
+
+    await assert.rejects(
+      () =>
+        bindKnownAccount("wanted@example.com", {
+          accountsRoot,
+          performBrowserLogin: async () => session,
+          checkAuthentication: async () => ok("999", "someoneelse@example.com", session),
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof RequestedAccountMismatchError);
+        assert.match(error.message, /someoneelse@example\.com/);
+        return true;
+      },
+    );
+
+    // The wrong identity must not have been written anywhere.
+    assert.equal(await readAccountMeta("999", accountsRoot), undefined);
+  }));

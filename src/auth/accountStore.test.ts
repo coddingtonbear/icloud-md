@@ -8,6 +8,8 @@ import {
   accountProfileDir,
   accountSessionPath,
   discardEphemeralProfile,
+  findAccount,
+  listAccounts,
   newEphemeralProfileDir,
   promoteEphemeralProfile,
   readAccountMeta,
@@ -104,6 +106,34 @@ test("promoteEphemeralProfile replaces a previously-promoted profile for the sam
     await promoteEphemeralProfile(second, "1234", accountsRoot);
 
     assert.equal(await readFile(path.join(accountProfileDir("1234", accountsRoot), "marker"), "utf8"), "second");
+  }));
+
+test("listAccounts returns every account with a readable meta.json, and nothing else", () =>
+  withTempRoot(async (root) => {
+    const accountsRoot = path.join(root, "accounts");
+    assert.deepEqual(await listAccounts(accountsRoot), [], "a missing accounts root is simply empty");
+
+    await writeAccountMeta({ appleId: "one@example.com", dsid: "111" }, accountsRoot);
+    await writeAccountMeta({ appleId: "two@example.com", dsid: "222" }, accountsRoot);
+    // A half-written account directory - no meta.json - must not be reported.
+    await mkdir(path.join(accountsRoot, "333"), { recursive: true });
+
+    const accounts = await listAccounts(accountsRoot);
+    assert.deepEqual(
+      accounts.map((account) => account.dsid).sort(),
+      ["111", "222"],
+    );
+  }));
+
+test("findAccount resolves an Apple ID or a dsid, and returns undefined for neither", () =>
+  withTempRoot(async (root) => {
+    const accountsRoot = path.join(root, "accounts");
+    await writeAccountMeta({ appleId: "Person@Example.com", dsid: "111" }, accountsRoot);
+
+    assert.equal((await findAccount("111", accountsRoot))?.appleId, "Person@Example.com");
+    assert.equal((await findAccount("person@example.com", accountsRoot))?.dsid, "111");
+    assert.equal((await findAccount("  PERSON@EXAMPLE.COM  ", accountsRoot))?.dsid, "111");
+    assert.equal(await findAccount("nobody@example.com", accountsRoot), undefined);
   }));
 
 async function writeFileMarker(dir: string, relativePath: string, contents: string): Promise<void> {

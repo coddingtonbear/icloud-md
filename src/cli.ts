@@ -287,10 +287,16 @@ program
     "carry each note's title in its file name rather than as the file's first line, the way Obsidian and most " +
       "Markdown editors expect; a whole-vault choice that can only be made here, at clone time",
   )
-  .action(async (directory: string, opts: { filenameAsTitle?: boolean }, command: Command) => {
+  .option(
+    "--account <appleId>",
+    "clone as an account already signed in on this machine (an Apple ID, or its dsid), reusing its saved " +
+      "sign-in instead of opening a browser window to ask which account to use",
+  )
+  .action(async (directory: string, opts: { filenameAsTitle?: boolean; account?: string }, command: Command) => {
     const context = contextFor(command);
     const summary = await runClone(directory, makeSyncProgress(context), makeStatusSink(context), {
       filenameAsTitle: opts.filenameAsTitle === true,
+      ...(opts.account !== undefined ? { account: opts.account } : {}),
     });
     emitResult(context, summary, (result) => printCloneSummary(directory, result));
   });

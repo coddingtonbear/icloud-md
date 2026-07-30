@@ -21,16 +21,18 @@ icloud-md push
 - [Quick start](#quick-start)
 - [Commands](#commands)
 - [What works today](#what-works-today)
+- [Where the title lives](#where-the-title-lives)
+  * [`--defer-renames`](#--defer-renames)
 - [Known limitations](#known-limitations)
 - [How it works](#how-it-works)
 - [Non-goals](#non-goals)
 - [Comparison with other projects](#comparison-with-other-projects)
-  - [Platform \& direction](#platform--direction)
-  - [Fidelity \& content types (read / write)](#fidelity--content-types-read--write)
+  * [Platform & direction](#platform--direction)
+  * [Fidelity & content types (read / write)](#fidelity--content-types-read--write)
 - [Reporting bugs](#reporting-bugs)
-  - [Getting a Bug Report Export](#getting-a-bug-report-export)
-  - [Reproduction Steps](#reproduction-steps)
-  - [File Identities](#file-identities)
+  * [Getting a Bug Report Export](#getting-a-bug-report-export)
+  * [Reproduction Steps](#reproduction-steps)
+  * [File Identities](#file-identities)
 - [Contributing / development](#contributing--development)
 - [License](#license)
 
@@ -148,6 +150,20 @@ icloud-md pull          # fetch remote changes, merging with local edits
 icloud-md push          # send local changes back to iCloud
 ```
 
+If you keep several vaults for the same Apple ID, name the account to skip
+the sign-in window entirely — `clone` then reuses that account's saved
+sign-in, and normally completes with no interaction at all:
+
+```bash
+icloud-md clone ./another-vault --account you@example.com
+```
+
+Without it, `clone` always asks: a new directory has no account yet, and
+reusing a saved sign-in *silently* would let iCloud's own cookies decide
+which account you got. Naming it removes the ambiguity — and if the completed
+sign-in turns out to be a different Apple ID, the clone fails rather than
+binding to the wrong one.
+
 Later sign-ins for the same Apple ID typically skip 2FA — each account gets
 its own persistent browser profile under
 `~/.config/icloud-md/accounts/<dsid>/`, which Apple treats as a
@@ -160,7 +176,7 @@ zipped, or synced elsewhere); a cloned folder's own
 
 | Command | What it does |
 | --- | --- |
-| `clone <directory> [--filename-as-title]` | Full initial export into a fresh directory: every note, attachments included. Signs in via a browser window the first time a directory (or Apple ID) is used. Refuses to run against an already-cloned directory — use `pull` there instead. `--filename-as-title` picks the Obsidian-shaped layout for the vault; it can only be chosen here. |
+| `clone <directory> [--filename-as-title] [--account <appleId>]` | Full initial export into a fresh directory: every note, attachments included. Signs in via a browser window the first time a directory (or Apple ID) is used. Refuses to run against an already-cloned directory — use `pull` there instead. `--filename-as-title` picks the Obsidian-shaped layout for the vault; it can only be chosen here. `--account` clones as an Apple ID already signed in on this machine, reusing its saved sign-in instead of asking. |
 | `pull [directory] [--defer-renames]` | Fetch everything that changed remotely since the last sync; auto-merges non-overlapping local edits, writes conflict markers for overlapping ones. Defaults to the current directory. `--defer-renames` is for editor integrations in a filename-as-title vault — see [Where the title lives](#where-the-title-lives). |
 | `push [directory] [--dry-run]` | Reconcile local disk state up to iCloud: creates notes for new `.md` files, uploads edited notes, moves notes whose file was deleted locally to Recently Deleted, and merges in remote changes to anything edited on both sides. Refuses anything ambiguous rather than guessing. |
 | `status [directory]` | Preview exactly what the next `push` would do — creates, edits, deletes, and any refusals — without writing anything. Runs the same live checks `push --dry-run` does, so it needs to sign in. |

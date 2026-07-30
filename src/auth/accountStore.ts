@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { CONFIG_DIR } from "../configDir.js";
 import { isEnoent } from "../fsUtil.js";
@@ -66,6 +67,48 @@ export async function readAccountMeta(dsid: string, accountsRoot: string = ACCOU
     return undefined;
   }
   return { appleId: parsed.appleId, dsid: parsed.dsid };
+}
+
+/**
+ * Every account this machine has signed into, newest-irrelevant order (the
+ * directory's own). A subdirectory without a readable `meta.json` is skipped
+ * rather than reported: it's a half-written account dir, not an account.
+ */
+export async function listAccounts(accountsRoot: string = ACCOUNTS_ROOT): Promise<AccountMeta[]> {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(accountsRoot, { withFileTypes: true });
+  } catch (cause) {
+    if (isEnoent(cause)) {
+      return [];
+    }
+    throw cause;
+  }
+
+  const accounts: AccountMeta[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const meta = await readAccountMeta(entry.name, accountsRoot);
+    if (meta) {
+      accounts.push(meta);
+    }
+  }
+  return accounts;
+}
+
+/**
+ * Resolves what a user typed for `--account` - an Apple ID or a raw dsid - to
+ * a known account. Apple IDs match case-insensitively, since that's how Apple
+ * itself treats them and not how a user remembers typing them. Returns
+ * `undefined` when nothing matches, leaving the caller to raise an error that
+ * can list the accounts that *are* available.
+ */
+export async function findAccount(reference: string, accountsRoot: string = ACCOUNTS_ROOT): Promise<AccountMeta | undefined> {
+  const wanted = reference.trim().toLowerCase();
+  const accounts = await listAccounts(accountsRoot);
+  return accounts.find((account) => account.dsid.toLowerCase() === wanted || account.appleId.toLowerCase() === wanted);
 }
 
 /** A fresh, never-before-used profile directory for the one-time login that discovers a new/unbound folder's account. */

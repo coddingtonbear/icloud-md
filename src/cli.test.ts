@@ -34,6 +34,9 @@ test("the vault-shape flags are reachable from the commands that own them", asyn
   // does with a rename, so it lives on `pull`.
   const clone = await runCli(["clone", "--help"]);
   assert.match(clone.stdout, /--filename-as-title/);
+  // `--account` skips the "which account?" sign-in, so it belongs to clone,
+  // the only command that binds a folder to an account in the first place.
+  assert.match(clone.stdout, /--account/);
 
   const pull = await runCli(["pull", "--help"]);
   assert.match(pull.stdout, /--defer-renames/);

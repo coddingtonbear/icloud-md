@@ -1,11 +1,20 @@
 import { checkAuthentication } from "../cloudkit/setupClient.js";
-import { AccountMismatchError, NotClonedDirectoryError, SignInIncompleteError, UnboundAccountError } from "../errors.js";
+import {
+  AccountMismatchError,
+  NotClonedDirectoryError,
+  SignInIncompleteError,
+  RequestedAccountMismatchError,
+  UnboundAccountError,
+  UnknownAccountError,
+} from "../errors.js";
 import { readCloneState, type CloneStateAccount } from "../notes/cloneState.js";
 import { loadSession, writeSessionFile } from "../session.js";
 import {
   accountProfileDir,
   accountSessionPath,
   discardEphemeralProfile,
+  findAccount,
+  listAccounts,
   newEphemeralProfileDir,
   promoteEphemeralProfile,
   readAccountMeta,
@@ -86,6 +95,61 @@ export async function bindNewFolderAccount(deps: BindNewFolderAccountDeps = {}):
       await discardEphemeralProfile(ephemeralProfileDir).catch(() => {});
     }
   }
+}
+
+/** How long a silent, headless reuse of a trusted profile is given before falling back to a visible window. */
+const SILENT_BIND_TIMEOUT_MS = 60_000;
+
+/**
+ * Used by `clone --account <appleId|dsid>`: binds a brand-new folder to an
+ * account this machine has *already* signed into, reusing that account's own
+ * persisted (Apple-trusted) profile.
+ *
+ * `bindNewFolderAccount` deliberately refuses to reuse a persisted profile,
+ * but its objection is to reusing one *silently* - a shared profile would let
+ * iCloud's cookies decide the account, so the user could not tell which one
+ * they got. Naming the account removes exactly that ambiguity: the caller has
+ * said which identity they want, and the completed sign-in is checked against
+ * it, so an unexpected account is an error rather than a silent substitution.
+ *
+ * Tries headless first, which is the whole point (a trusted profile usually
+ * re-validates with no interaction at all). If that can't complete - expired
+ * device trust, a fresh 2FA prompt, a CAPTCHA - it falls back to a visible
+ * window rather than failing, since a human can finish what the profile
+ * couldn't.
+ */
+export async function bindKnownAccount(reference: string, deps: CommonDeps = {}): Promise<FolderAuth> {
+  const onStatus = deps.onStatus ?? (() => {});
+  const login = deps.performBrowserLogin ?? performBrowserLogin;
+  const checkAuth = deps.checkAuthentication ?? checkAuthentication;
+  const accountsRoot = deps.accountsRoot ?? ACCOUNTS_ROOT;
+
+  const account = await findAccount(reference, accountsRoot);
+  if (!account) {
+    const known = (await listAccounts(accountsRoot)).map((candidate) => candidate.appleId);
+    throw new UnknownAccountError(reference, known);
+  }
+
+  const profileDir = accountProfileDir(account.dsid, accountsRoot);
+  let captured;
+  try {
+    captured = await login({ profileDir, headless: true, timeoutMs: SILENT_BIND_TIMEOUT_MS, onStatus });
+  } catch {
+    onStatus(`Could not reuse ${account.appleId}'s saved sign-in silently - opening a browser window to finish it.`);
+    captured = await login({ profileDir, onStatus });
+  }
+
+  const auth = await checkAuth(captured);
+  if (!auth.ok) {
+    throw new SignInIncompleteError(`Captured a session, but it failed verification (HTTP ${auth.status}): ${auth.error}`);
+  }
+  if (auth.dsid !== account.dsid) {
+    throw new RequestedAccountMismatchError(account.appleId, auth.appleId);
+  }
+
+  await writeSessionFile(auth.session, accountSessionPath(auth.dsid, accountsRoot));
+  await writeAccountMeta({ appleId: auth.appleId, dsid: auth.dsid }, accountsRoot);
+  return auth;
 }
 
 export interface ResolveFolderAccountDeps extends CommonDeps {

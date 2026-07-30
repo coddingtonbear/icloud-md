@@ -174,6 +174,37 @@ export class UnboundAccountError extends IcloudNotesSyncError {
  * rather than silently rebinding the folder to a new account - that would
  * risk `pull`/`push` quietly mixing one person's notes into another's vault.
  */
+/**
+ * `clone --account <ref>` named an account this machine has never signed
+ * into. The hint lists the accounts that *are* available, because the usual
+ * cause is a typo or a half-remembered Apple ID, and the fix is visible from
+ * that list.
+ */
+export class UnknownAccountError extends IcloudNotesSyncError {
+  constructor(reference: string, known: readonly string[]) {
+    super(`No account matching "${reference}" has been signed in on this machine.`, {
+      hint:
+        known.length > 0
+          ? `Known accounts: ${known.join(", ")}. Omit --account to sign in as someone else.`
+          : 'No accounts are signed in yet - run "icloud-md clone <directory>" without --account to sign in for the first time.',
+    });
+  }
+}
+
+/**
+ * `clone --account <ref>` completed a sign-in for a different Apple ID than
+ * the one requested - the trusted profile resumed as somebody else. Distinct
+ * from `AccountMismatchError`, which is about an *existing* clone's binding;
+ * here nothing has been cloned yet, so the wording is about the request.
+ */
+export class RequestedAccountMismatchError extends IcloudNotesSyncError {
+  constructor(requested: string, actualAppleId: string) {
+    super(`--account asked for ${requested}, but the completed sign-in is for ${actualAppleId}.`, {
+      hint: `Sign out of ${actualAppleId} in the saved browser profile, or omit --account to choose interactively.`,
+    });
+  }
+}
+
 export class AccountMismatchError extends IcloudNotesSyncError {
   constructor(targetDir: string, expectedAppleId: string, actualAppleId: string) {
     super(`${targetDir} was cloned for ${expectedAppleId}, but the session just authenticated is for ${actualAppleId}.`, {

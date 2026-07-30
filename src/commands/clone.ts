@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { bindNewFolderAccount } from "../auth/folderAuth.js";
+import { bindKnownAccount, bindNewFolderAccount } from "../auth/folderAuth.js";
 import { fetchAllNoteRecords, fetchSharedNoteRecords } from "../cloudkit/databaseClient.js";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { resolveNoteAttachments, type AttachmentAuth } from "../notes/attachmentSync.js";
@@ -24,6 +24,14 @@ export interface CloneOptions {
    * rename resolvable at all - and a rename *is* a retitle in this mode.
    */
   filenameAsTitle?: boolean;
+  /**
+   * Bind to an account already signed in on this machine (Apple ID or dsid)
+   * instead of opening an interactive sign-in to discover which one to use.
+   * Reuses that account's own trusted profile, so it normally completes with
+   * no interaction at all - the difference from the default path is that the
+   * caller has *named* the identity, so there is nothing ambiguous to resolve.
+   */
+  account?: string | undefined;
 }
 
 export interface CloneSummary {
@@ -55,7 +63,10 @@ export async function runClone(
   }
   const titleMode = options.filenameAsTitle === true ? "filename" : "in-body";
 
-  const auth = await bindNewFolderAccount({ onStatus: onLoginStatus });
+  const auth =
+    options.account !== undefined && options.account !== ""
+      ? await bindKnownAccount(options.account, { onStatus: onLoginStatus })
+      : await bindNewFolderAccount({ onStatus: onLoginStatus });
   if (!auth.ckdatabasewsUrl) {
     throw new NotesUnavailableError();
   }
