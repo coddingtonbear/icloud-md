@@ -20,6 +20,41 @@ export function noteFileNameFor(titleLine: string, titleMode: "in-body" | "filen
 }
 
 /**
+ * Whether a file name already carries this title, in a vault where the name
+ * *is* the title - either the name the title derives, or one of the
+ * uniquified spellings `uniqueFileName` produces when two notes want the
+ * same one.
+ *
+ * The uniquifier is why this can't just be a string comparison. A second
+ * note titled "Foo" lands at `Foo 2.md`, whose stem decodes to "Foo 2" - so
+ * comparing the decoded name against the title would call every uniquified
+ * file a retitle and rename it on every pull, walking it up through "Foo 3",
+ * "Foo 4"... The title a name was derived from is not always recoverable
+ * from the name; whether the name is *acceptable* for the title always is,
+ * and that's the question a rename decision actually asks.
+ */
+export function fileNameCarriesTitle(fileName: string, titleLine: string): boolean {
+  const wanted = noteFileNameFor(titleLine, "filename");
+  if (fileName === wanted) {
+    return true;
+  }
+  const extension = path.extname(wanted);
+  const stem = wanted.slice(0, wanted.length - extension.length);
+  if (!fileName.endsWith(extension)) {
+    return false;
+  }
+  const actual = fileName.slice(0, fileName.length - extension.length);
+  if (!actual.startsWith(`${stem} `)) {
+    return false;
+  }
+  // Only the uniquifier's own suffixes count: " 2" onwards, digits alone.
+  // A note genuinely titled "Foo 2" matches the exact comparison above
+  // instead, so nothing here has to distinguish the two.
+  const suffix = actual.slice(stem.length + 1);
+  return /^[0-9]+$/.test(suffix) && Number(suffix) >= 2;
+}
+
+/**
  * Derives a human-readable file name for a note from its title alone. The
  * CloudKit recordName that used to be suffixed onto every file for
  * uniqueness now lives only in .icloud-md/state.json (keyed by

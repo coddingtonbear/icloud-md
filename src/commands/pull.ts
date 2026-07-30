@@ -1,4 +1,4 @@
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveFolderAccount } from "../auth/folderAuth.js";
 import {
@@ -18,7 +18,7 @@ import {
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { isEnoent } from "../fsUtil.js";
-import { noteFileNameFor, uniqueFileName } from "../notes/filename.js";
+import { fileNameCarriesTitle, noteFileNameFor, uniqueFileName } from "../notes/filename.js";
 import { joinFrontmatter, splitFrontmatter } from "../notes/frontmatter.js";
 import { buildVaultLayout, noteDirOf, placeNote, previousLayoutDirs, type SharedZoneRecords } from "../notes/folderLayout.js";
 import { reconcileNotePlacements, removeStaleDirs } from "../notes/folderReconcile.js";
@@ -56,7 +56,10 @@ export interface PullChangeRemark {
 export interface PullChange {
   kind: PullChangeKind;
   file: string;
-  /** kind "move" only: where the note lived before the remote folder change. */
+  /** Where the note lived before this pull moved it: a remote folder change
+   * (kind "move"), or - in a filename-as-title vault - a remote *retitle*,
+   * which renames the file and can land on any kind, since the note's
+   * content usually changed in the same breath. */
   previousFile?: string;
   remarks?: PullChangeRemark[];
 }
@@ -353,8 +356,21 @@ export async function runPull(
         }
 
         const local = await localFileState(targetDir, existing, record.recordName);
+
+        // A remote retitle has to rename the file, because in this vault the
+        // file name is the only place the title lives. Leaving it stale
+        // isn't cosmetic: push reads a *renamed* file's name as the user's
+        // new title, so a name that silently disagrees with the note is a
+        // retitle waiting to be reverted by whoever next touches the file.
+        // Deliberately after `localFileState`, which reads the old path.
+        const file = await renameForRemoteTitle(targetDir, existing.file, decoded.titleLine, titleMode, {
+          usedFileNames,
+          onDisk: local !== "missing",
+        });
+        const previousFile = file === existing.file ? undefined : { previousFile: existing.file };
+
         if (local === "clean" || local === "missing") {
-          const filePath = path.join(targetDir, existing.file);
+          const filePath = path.join(targetDir, file);
           // Preserve any local-only frontmatter on a clean file (a missing
           // file has none to keep); the base copy stays body-only.
           const frontmatter =
@@ -370,10 +386,11 @@ export async function runPull(
           await applyNoteFileTimes(filePath, record);
           await writeBaseCopy(targetDir, record.recordName, bodyText);
           if (local === "missing") {
-            summary.notices.push({ level: "info", message: `Recreated ${existing.file} (was missing locally)` });
+            summary.notices.push({ level: "info", message: `Recreated ${file} (was missing locally)` });
           }
           notes[record.recordName] = {
             ...existing,
+            file,
             recordChangeTag: record.recordChangeTag ?? existing.recordChangeTag,
             modificationDate: modificationDateOf(record),
             unpublishableReason,
@@ -382,7 +399,8 @@ export async function runPull(
           summary.updated += 1;
           summary.changes.push({
             kind: "update",
-            file: existing.file,
+            file,
+            ...previousFile,
             ...(unpublishableReason !== undefined ? { remarks: [READ_ONLY_REMARK] } : {}),
           });
           continue;
@@ -392,19 +410,25 @@ export async function runPull(
         const merged = await mergeRemoteChangeIntoLocalFile(
           targetDir,
           record.recordName,
-          existing.file,
+          file,
           bodyText,
         );
         if (merged.status === "unresolvedMarkers") {
-          // Nothing advanced - not the file, not the base copy, not the tag:
-          // the remote change stays pending for `push` (which fetches live
-          // records) to reconcile once the markers are resolved.
+          // No *sync* state advanced - not the content, not the base copy,
+          // not the tag: the remote change stays pending for `push` (which
+          // fetches live records) to reconcile once the markers are
+          // resolved. The tracked path is not sync state, though, and a
+          // retitle has already moved the file: leaving the old path
+          // recorded would read as "missing" on the next pull and recreate
+          // the note beside itself.
+          notes[record.recordName] = { ...existing, file };
           summary.conflicts.push(
-            `${existing.file}: still contains diff3 conflict markers - resolve them, then run "push" to reconcile`,
+            `${file}: still contains diff3 conflict markers - resolve them, then run "push" to reconcile`,
           );
           summary.changes.push({
             kind: "update",
-            file: existing.file,
+            file,
+            ...previousFile,
             remarks: [
               { tone: "conflict", message: 'still contains diff3 conflict markers - resolve them, then run "push" to reconcile' },
             ],
@@ -413,6 +437,7 @@ export async function runPull(
         }
         notes[record.recordName] = {
           ...existing,
+          file,
           recordChangeTag: record.recordChangeTag ?? existing.recordChangeTag,
           modificationDate: modificationDateOf(record),
           unpublishableReason,
@@ -420,10 +445,11 @@ export async function runPull(
         };
 
         if (merged.status === "conflict") {
-          summary.conflicts.push(`${existing.file}: merged with conflict markers - resolve manually`);
+          summary.conflicts.push(`${file}: merged with conflict markers - resolve manually`);
           summary.changes.push({
             kind: "merge",
-            file: existing.file,
+            file,
+            ...previousFile,
             remarks: [
               { tone: "conflict", message: "merged with conflict markers - resolve manually" },
               ...(unpublishableReason !== undefined ? [READ_ONLY_REMARK] : []),
@@ -433,7 +459,8 @@ export async function runPull(
           summary.merged += 1;
           summary.changes.push({
             kind: "merge",
-            file: existing.file,
+            file,
+            ...previousFile,
             ...(unpublishableReason !== undefined ? { remarks: [READ_ONLY_REMARK] } : {}),
           });
         }
@@ -524,6 +551,67 @@ async function backfillSharePermissions(
         ? await lookupRecords(session, ckdatabasewsUrl, dsid, "shared", zone.zoneID, shareRecordNames)
         : [];
     zone.records.push(...folderRecords, ...shareRecords);
+  }
+}
+
+/**
+ * Renames a tracked note's file when the note's title changed remotely and
+ * this vault carries titles in file names, returning the path it now lives
+ * at (unchanged in every other case).
+ *
+ * The known cost, accepted when the mode was designed: a rename performed
+ * outside Obsidian doesn't trigger its link updating, so wikilinks pointing
+ * at a remotely-retitled note go stale. `--defer-renames` exists to hand the
+ * rename to a consumer that can do better.
+ *
+ * The new name is resolved against both the names this run has claimed and
+ * what is actually on disk. Tracked names alone aren't enough here the way
+ * they are for a brand-new note: this writes over an existing directory, and
+ * an untracked file the user put there themselves must not be destroyed by
+ * a rename landing on top of it.
+ */
+export async function renameForRemoteTitle(
+  targetDir: string,
+  currentFile: string,
+  titleLine: string,
+  titleMode: "in-body" | "filename",
+  context: { usedFileNames: Map<string, Set<string>>; onDisk: boolean },
+): Promise<string> {
+  const currentName = path.posix.basename(currentFile);
+  if (titleMode !== "filename" || fileNameCarriesTitle(currentName, titleLine)) {
+    return currentFile;
+  }
+
+  const dir = noteDirOf(currentFile);
+  const usedInDir = usedNamesFor(context.usedFileNames, dir);
+  // The note's own name is in the set (it was seeded from tracked state);
+  // leaving it there would make every candidate collide with the file being
+  // renamed away from.
+  usedInDir.delete(currentName);
+
+  let wanted = uniqueFileName(noteFileNameFor(titleLine, titleMode), usedInDir);
+  while (await fileExists(path.join(targetDir, dir, wanted))) {
+    usedInDir.add(wanted);
+    wanted = uniqueFileName(noteFileNameFor(titleLine, titleMode), usedInDir);
+  }
+  usedInDir.add(wanted);
+
+  const newFile = path.posix.join(dir, wanted);
+  if (context.onDisk) {
+    await rename(path.join(targetDir, currentFile), path.join(targetDir, newFile));
+  }
+  return newFile;
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await stat(filePath);
+    return true;
+  } catch (cause) {
+    if (isEnoent(cause)) {
+      return false;
+    }
+    throw cause;
   }
 }
 

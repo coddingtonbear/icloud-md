@@ -45,9 +45,13 @@ export function renderPullReport(summary: PullSummary, formatPath: (file: string
   const lines: string[] = ["Changes pulled from iCloud:", ""];
   for (const change of summary.changes) {
     const [label, color] = LABELS[change.kind];
+    // Any change can carry a previous path, not just a folder move: a
+    // remote retitle renames the file *and* usually rewrites it, and one
+    // "modified: Old.md -> New.md" line says that better than a separate
+    // move entry saying half of it.
     const subject =
-      change.kind === "move"
-        ? `${formatPath(change.previousFile ?? change.file)} -> ${formatPath(change.file)}`
+      change.previousFile !== undefined && change.previousFile !== change.file
+        ? `${formatPath(change.previousFile)} -> ${formatPath(change.file)}`
         : formatPath(change.file);
     lines.push(LISTING_INDENT + labelledLine(label, color, LABEL_WIDTH, subject));
     for (const remark of change.remarks ?? []) {
