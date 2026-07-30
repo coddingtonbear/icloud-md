@@ -1,4 +1,5 @@
 import { countUnchangedNotes, serializePlanEntry, type SerializedPlanEntry } from "../notes/pushPlan.js";
+import type { SyncNotice } from "../progress.js";
 import { buildPushPlan } from "./push.js";
 
 export interface StatusOptions {
@@ -10,6 +11,10 @@ export interface StatusResult {
   /** Tracked notes the plan left untouched - the "N other notes match the
    * last pull." figure on the human status screen. */
   unchanged: number;
+  /** Plan-level warnings that aren't about one entry - see
+   * `BuildPushPlanResult.notices`. Shown here too, so `status` keeps telling
+   * the whole truth about what a `push` would do. */
+  notices: SyncNotice[];
 }
 
 /**
@@ -25,9 +30,10 @@ export interface StatusResult {
  * also staying offline.
  */
 export async function runStatus(targetDir: string, options: StatusOptions = {}): Promise<StatusResult> {
-  const { state, entries } = await buildPushPlan(targetDir, { onLoginStatus: options.onLoginStatus });
+  const { state, entries, notices } = await buildPushPlan(targetDir, { onLoginStatus: options.onLoginStatus });
   return {
     entries: entries.map(serializePlanEntry),
     unchanged: countUnchangedNotes(entries, Object.keys(state.notes).length),
+    notices,
   };
 }

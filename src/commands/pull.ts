@@ -27,6 +27,7 @@ import { readBaseCopy, removeBaseCopy, writeBaseCopy } from "../notes/baseCopy.j
 import { localFileState } from "../notes/localFileState.js";
 import { writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
 import { openVault } from "../notes/vaultMigrations.js";
+import { composeNoteFile } from "../notes/noteIdFrontmatter.js";
 import { recordEpoch } from "../notes/noteEpoch.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { recordVersion } from "../notes/versionHistory.js";
@@ -93,6 +94,7 @@ export async function runPull(
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
   }
+  const idInFrontmatter = state.idInFrontmatter === true;
 
   const auth = await resolveFolderAccount(targetDir, state.account, { onStatus: onLoginStatus });
   if (!auth.ckdatabasewsUrl) {
@@ -326,7 +328,11 @@ export async function runPull(
           const relativeFile = path.posix.join(noteDir, fileName);
 
           const filePath = path.join(targetDir, relativeFile);
-          await writeFile(filePath, bodyText, "utf-8");
+          await writeFile(
+            filePath,
+            composeNoteFile("", bodyText, { recordName: record.recordName, idInFrontmatter }),
+            "utf-8",
+          );
           await applyNoteFileTimes(filePath, record);
           await writeBaseCopy(targetDir, record.recordName, bodyText);
           notes[record.recordName] = {
@@ -353,7 +359,14 @@ export async function runPull(
           // file has none to keep); the base copy stays body-only.
           const frontmatter =
             local === "clean" ? splitFrontmatter(await readFile(filePath, "utf-8")).frontmatter : "";
-          await writeFile(filePath, joinFrontmatter(frontmatter, bodyText), "utf-8");
+          // Also the self-healing path for an id: a file whose envelope was
+          // stripped (by hand, or by an older build's `restore`) gets it back
+          // the next time the note changes remotely.
+          await writeFile(
+            filePath,
+            composeNoteFile(frontmatter, bodyText, { recordName: record.recordName, idInFrontmatter }),
+            "utf-8",
+          );
           await applyNoteFileTimes(filePath, record);
           await writeBaseCopy(targetDir, record.recordName, bodyText);
           if (local === "missing") {
@@ -376,7 +389,13 @@ export async function runPull(
         }
 
         // local === "modified": real 3-way merge against the base copy.
-        const merged = await mergeRemoteChangeIntoLocalFile(targetDir, record.recordName, existing.file, bodyText);
+        const merged = await mergeRemoteChangeIntoLocalFile(
+          targetDir,
+          record.recordName,
+          existing.file,
+          bodyText,
+          idInFrontmatter,
+        );
         if (merged.status === "unresolvedMarkers") {
           // Nothing advanced - not the file, not the base copy, not the tag:
           // the remote change stays pending for `push` (which fetches live
@@ -674,6 +693,7 @@ export async function mergeRemoteChangeIntoLocalFile(
   recordName: string,
   file: string,
   remoteBodyText: string,
+  idInFrontmatter = false,
 ): Promise<{ status: "merged" | "conflict" | "unresolvedMarkers" }> {
   const base = (await readBaseCopy(targetDir, recordName)) ?? "";
   const { frontmatter, body: localContent } = splitFrontmatter(await readFile(path.join(targetDir, file), "utf-8"));
@@ -687,7 +707,11 @@ export async function mergeRemoteChangeIntoLocalFile(
   }
   const outcome = mergeNoteVersions(base, localContent, remoteBodyText);
 
-  await writeFile(path.join(targetDir, file), joinFrontmatter(frontmatter, outcome.text), "utf-8");
+  await writeFile(
+    path.join(targetDir, file),
+    composeNoteFile(frontmatter, outcome.text, { recordName, idInFrontmatter }),
+    "utf-8",
+  );
   if (!outcome.hasConflict) {
     await writeBaseCopy(targetDir, recordName, remoteBodyText);
   }

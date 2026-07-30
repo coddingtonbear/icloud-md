@@ -132,6 +132,14 @@ export interface CloneState {
    */
   generator?: string | undefined;
   /**
+   * Whether this vault records each note's CloudKit recordName in its file's
+   * local-only frontmatter (`apple-note-id`), making renames and moves
+   * resolve exactly instead of by heuristic. Chosen at `clone` time and
+   * fixed for the vault afterwards; absent means false, which is the shape
+   * of every vault cloned before the option existed.
+   */
+  idInFrontmatter?: boolean | undefined;
+  /**
    * Which Apple ID this folder was cloned for - resolves to that account's
    * own session under `~/.config/icloud-md/accounts/<dsid>/` (see
    * `accountStore.ts`), never anything secret stored here. Absent only for
@@ -385,6 +393,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
   return {
     layoutVersion: CURRENT_LAYOUT_VERSION,
     generator: typeof value.generator === "string" ? value.generator : undefined,
+    idInFrontmatter: value.idInFrontmatter === true,
     account,
     syncToken,
     sharedZoneSyncTokens,

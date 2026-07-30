@@ -3,6 +3,7 @@ import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveFolderAccount } from "../auth/folderAuth.js";
 import type { IcloudSession } from "../session.js";
+import type { SyncNotice } from "../progress.js";
 import {
   createNoteRecord,
   lookupRecords,
@@ -16,6 +17,8 @@ import {
 import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
 import { openVault } from "../notes/vaultMigrations.js";
+import { NOTE_ID_KEY, readNoteId, setNoteId } from "../notes/noteIdFrontmatter.js";
+import { resolveNoteIds } from "../notes/noteIdPairing.js";
 import { classifyNoteRecord, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { buildNoteCreateFields, buildNoteMoveFields, buildNoteTrashFields, buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
@@ -98,6 +101,9 @@ export interface PushResult {
   /** Tracked notes the plan left untouched - the "N other notes match the
    * last pull." figure on the dry-run preview screen. */
   unchanged: number;
+  /** Plan-level warnings that aren't about one entry - see
+   * `BuildPushPlanResult.notices`. */
+  notices: SyncNotice[];
 }
 
 interface PushCandidate {
@@ -151,6 +157,10 @@ export interface ExecutablePlanEntry extends PlanEntry {
 export interface BuildPushPlanResult {
   state: CloneState;
   entries: ExecutablePlanEntry[];
+  /** Things worth telling the user that aren't about one plan entry - e.g. a
+   * file carrying an id from some other vault, which pushes fine as a new
+   * note but shouldn't do so silently. */
+  notices: SyncNotice[];
 }
 
 /**
@@ -182,14 +192,19 @@ export async function buildPushPlan(
   // leaving the tag stale while the base copy and file had already been
   // rewritten is what silently stranded local edits (dev log 2026-07-29).
   let planningMutatedState = false;
+  const notices: SyncNotice[] = [];
 
-  const untracked: { file: string; localText: string }[] = [];
+  const idInFrontmatter = state.idInFrontmatter === true;
+
+  const untracked: { file: string; localText: string; noteId?: string | undefined }[] = [];
   for (const file of await listUntrackedMarkdownFiles(targetDir, state)) {
-    // Body only: an untracked file's local-only frontmatter never reaches
-    // parse/create or move-matching (which compares against body-only base
-    // copies), and push never rewrites the untracked file itself.
-    const { body } = splitFrontmatter(await readFile(path.join(targetDir, file), "utf-8"));
-    untracked.push({ file, localText: body });
+    // Body only for the note itself: an untracked file's local-only
+    // frontmatter never reaches parse/create or move-matching (which
+    // compares against body-only base copies). The envelope is still read
+    // here, because in an id-recording vault it carries the one thing that
+    // says which note this file *is*.
+    const { frontmatter, body } = splitFrontmatter(await readFile(path.join(targetDir, file), "utf-8"));
+    untracked.push({ file, localText: body, noteId: idInFrontmatter ? readNoteId(frontmatter) : undefined });
   }
 
   const updateCandidates: PushCandidate[] = [];
@@ -270,24 +285,84 @@ export async function buildPushPlan(
   }
 
   // --- Local-move pairing: a missing tracked file plus an untracked one
-  // may be the same note, moved by hand. Exact base-copy content equality
-  // is the strong signal (a moved-but-unedited note); a unique basename
-  // match catches a moved-and-edited one, but only when it's unambiguous
-  // on both sides. Everything paired here becomes a Folder-reference move
-  // instead of the delete + create the two halves would otherwise read as.
+  // may be the same note, moved by hand. Everything paired here becomes a
+  // Folder-reference move instead of the delete + create the two halves
+  // would otherwise read as.
   // Shared notes pair too, but only so their move can be *refused* whole -
   // left unpaired, a renamed shared-note file would decay into a refused
   // delete plus a create that duplicates the note into the shared folder.
   const movePairs: Array<{ recordName: string; entry: CloneStateNoteEntry; toFile: string }> = [];
   const claimedByMove = new Set<string>();
+  // Files whose id resolution says "not this vault's problem to pair" -
+  // refused duplicates, which must plan as neither a move nor a create.
+  const refusedByIdClaim = new Set<string>();
+  // Notes whose id is claimed by several files at once. Their own tracked
+  // file is missing (that's what makes the claim ambiguous), so without this
+  // they would fall through to the delete half of the plan - refusing the
+  // copies while sending the original to Recently Deleted, which is the
+  // worst available outcome. Held back entirely until the user says which
+  // copy is which.
+  const ambiguousRecordNames = new Set<string>();
+
+  // In an id-recording vault the pairing is exact, and the heuristics below
+  // only ever see files that carry no usable id (pre-flag notes, hand-made
+  // files, envelopes someone stripped). See `noteIdPairing.ts`.
+  if (idInFrontmatter) {
+    const missingByRecordName = new Map(missingCandidates.map((candidate) => [candidate.recordName, candidate]));
+    const resolution = resolveNoteIds({
+      untracked,
+      trackedRecordNames: Object.keys(state.notes),
+      isTrackedFilePresent: (recordName) => !missingByRecordName.has(recordName),
+    });
+
+    for (const move of resolution.moves) {
+      const candidate = missingByRecordName.get(move.recordName);
+      if (candidate) {
+        movePairs.push({ recordName: move.recordName, entry: candidate.entry, toFile: move.file });
+        claimedByMove.add(move.file);
+      }
+    }
+
+    for (const claim of resolution.ambiguous) {
+      const trackedFile = state.notes[claim.recordName]?.file;
+      ambiguousRecordNames.add(claim.recordName);
+      for (const file of claim.files) {
+        refusedByIdClaim.add(file);
+        entries.push({
+          kind: "create",
+          file,
+          resolution: "refused",
+          reason:
+            `shares its "${NOTE_ID_KEY}" with ${claim.files.length - 1} other file(s) (${claim.files
+              .filter((other) => other !== file)
+              .join(", ")}), and the note's own file (${trackedFile ?? "unknown"}) is gone, so which one is the ` +
+            `original can't be told apart - remove the "${NOTE_ID_KEY}" line from every copy but one, then push again. ` +
+            "The note itself is left untouched in the meantime.",
+        });
+      }
+    }
+
+    for (const file of resolution.staleIds) {
+      notices.push({
+        level: "warn",
+        message: `${file} carries an ${NOTE_ID_KEY} for a note this clone doesn't track - pushing it as a new note`,
+      });
+    }
+  }
+
   {
-    const pairable = missingCandidates;
+    // The id-less fallback: exact base-copy content equality is the strong
+    // signal (a moved-but-unedited note); a unique basename match catches a
+    // moved-and-edited one, but only when it's unambiguous on both sides.
+    const pairable = missingCandidates.filter((candidate) => !movePairs.some((pair) => pair.recordName === candidate.recordName));
     for (const candidate of pairable) {
       const base = await readBaseCopy(targetDir, candidate.recordName);
       if (base === undefined) {
         continue;
       }
-      const match = untracked.find((file) => !claimedByMove.has(file.file) && file.localText === base);
+      const match = untracked.find(
+        (file) => !claimedByMove.has(file.file) && !refusedByIdClaim.has(file.file) && file.localText === base,
+      );
       if (match) {
         movePairs.push({ recordName: candidate.recordName, entry: candidate.entry, toFile: match.file });
         claimedByMove.add(match.file);
@@ -296,7 +371,10 @@ export async function buildPushPlan(
     const unpaired = pairable.filter((candidate) => !movePairs.some((pair) => pair.recordName === candidate.recordName));
     for (const candidate of unpaired) {
       const baseName = path.posix.basename(candidate.entry.file);
-      const files = untracked.filter((file) => !claimedByMove.has(file.file) && path.posix.basename(file.file) === baseName);
+      const files = untracked.filter(
+        (file) =>
+          !claimedByMove.has(file.file) && !refusedByIdClaim.has(file.file) && path.posix.basename(file.file) === baseName,
+      );
       const rivals = unpaired.filter((other) => path.posix.basename(other.entry.file) === baseName);
       const file = files[0];
       if (files.length === 1 && rivals.length === 1 && file) {
@@ -311,7 +389,9 @@ export async function buildPushPlan(
   // have looked the note up in the *private* db, found nothing, and
   // silently untracked it as "already deleted remotely".
   const unpairedMissing = missingCandidates.filter(
-    (candidate) => !movePairs.some((pair) => pair.recordName === candidate.recordName),
+    (candidate) =>
+      !movePairs.some((pair) => pair.recordName === candidate.recordName) &&
+      !ambiguousRecordNames.has(candidate.recordName),
   );
   const deleteCandidates: typeof unpairedMissing = [];
   for (const candidate of unpairedMissing) {
@@ -389,7 +469,7 @@ export async function buildPushPlan(
   // is just as unsendable as an edited one containing them.
   const createCandidates: { file: string; localText: string; folderRecordName: string; sharedZoneOwner?: string | undefined }[] = [];
   for (const { file, localText } of untracked) {
-    if (claimedByMove.has(file)) {
+    if (claimedByMove.has(file) || refusedByIdClaim.has(file)) {
       continue;
     }
     const dir = noteDirOf(file);
@@ -492,7 +572,7 @@ export async function buildPushPlan(
     createCandidates.length === 0 &&
     readyMovePairs.length === 0
   ) {
-    return { state, entries };
+    return { state, entries, notices };
   }
 
   const auth = await resolveFolderAccount(targetDir, state.account, { onStatus: options.onLoginStatus });
@@ -732,6 +812,15 @@ export async function buildPushPlan(
           sharedZoneOwner,
         };
         await writeBaseCopy(targetDir, recordName, localText);
+        // Stamp the note's new identity into the file it came from, so the
+        // next rename resolves exactly instead of by heuristic. This is also
+        // what re-homes a *copied* file: it arrived carrying the original's
+        // id, and leaves carrying its own.
+        if (idInFrontmatter) {
+          const filePath = path.join(targetDir, file);
+          const { frontmatter, body } = splitFrontmatter(await readFile(filePath, "utf-8"));
+          await writeFile(filePath, joinFrontmatter(setNoteId(frontmatter, recordName), body), "utf-8");
+        }
         await applyNoteFileTimes(path.join(targetDir, file), result.record);
         const textValue = result.record.fields.TextDataEncrypted?.value;
         if (typeof textValue === "string") {
@@ -907,7 +996,7 @@ export async function buildPushPlan(
     await writeCloneState(targetDir, state);
   }
 
-  return { state, entries };
+  return { state, entries, notices };
 }
 
 /**
@@ -992,15 +1081,15 @@ export async function planRemoteChangedMerge(
  */
 export async function runPush(targetDir: string, options: PushOptions = {}): Promise<PushResult> {
   const dryRun = options.dryRun === true;
-  const { state, entries } = await buildPushPlan(targetDir, { onLoginStatus: options.onLoginStatus });
+  const { state, entries, notices } = await buildPushPlan(targetDir, { onLoginStatus: options.onLoginStatus });
   const unchanged = countUnchangedNotes(entries, Object.keys(state.notes).length);
 
   if (entries.length === 0) {
-    return { dryRun, entries: [], unchanged, ...(dryRun ? {} : { pushed: 0 }) };
+    return { dryRun, entries: [], unchanged, notices, ...(dryRun ? {} : { pushed: 0 }) };
   }
 
   if (dryRun) {
-    return { dryRun, entries: entries.map(serializePlanEntry), unchanged };
+    return { dryRun, entries: entries.map(serializePlanEntry), unchanged, notices };
   }
 
   let pushed = 0;
@@ -1018,7 +1107,7 @@ export async function runPush(targetDir: string, options: PushOptions = {}): Pro
   }
   await writeCloneState(targetDir, state);
 
-  return { dryRun, pushed, entries: results, unchanged };
+  return { dryRun, pushed, entries: results, unchanged, notices };
 }
 
 /** Untracked `.md` files anywhere in the vault, as vault-root-relative

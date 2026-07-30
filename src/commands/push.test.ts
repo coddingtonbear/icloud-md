@@ -554,5 +554,140 @@ test("runPush returns no entries and a zero pushed count when the plan is empty"
 
     const result = await runPush(dir);
 
-    assert.deepEqual(result, { dryRun: false, pushed: 0, entries: [], unchanged: 1 });
+    assert.deepEqual(result, { dryRun: false, pushed: 0, entries: [], unchanged: 1, notices: [] });
+  }));
+
+// --- id-in-frontmatter pairing -------------------------------------------
+//
+// The cases these cover are exactly the ones the content-equality and
+// unique-basename heuristics can't reach, so each is written to resolve
+// locally (via the unknown "Nowhere/" directory) and prove which way the
+// plan went without needing the network.
+
+const NOTE_ID = "089D915D-C76E-4F44-AB80-2190073281A3";
+const OTHER_NOTE_ID = "001b9e8a-c474-4311-af32-abe70026b346";
+
+/** state() with id recording on, and REC1's id set to NOTE_ID. */
+function idState(): CloneState {
+  const base = state();
+  return {
+    ...base,
+    idInFrontmatter: true,
+    notes: { [NOTE_ID]: base.notes.REC1! },
+  };
+}
+
+function withId(id: string, body: string): string {
+  return `---\napple-note-id: ${id}\n---\n\n${body}`;
+}
+
+test("an id pairs a note renamed, moved, and edited all at once - which no heuristic can", () =>
+  withTempDir(async (dir) => {
+    await writeBaseCopy(dir, NOTE_ID, "Synced text");
+    // Different directory, different basename, different content: nothing
+    // but the id connects this file to Notes/Tracked.md.
+    await writeVaultFile(dir, "Nowhere/Totally Different.md", withId(NOTE_ID, "Edited after renaming"));
+    await writeCloneState(dir, idState());
+
+    const { entries } = await buildPushPlan(dir);
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.kind, "move");
+    assert.equal(entries[0]?.previousFile, "Notes/Tracked.md");
+    assert.equal(entries[0]?.file, "Nowhere/Totally Different.md");
+  }));
+
+test("without id recording, the same rename+move+edit falls back to delete plus create", () =>
+  withTempDir(async (dir) => {
+    const s = { ...idState(), idInFrontmatter: false };
+    await writeBaseCopy(dir, NOTE_ID, "Synced text");
+    await writeVaultFile(dir, "Nowhere/Totally Different.md", withId(NOTE_ID, "Edited after renaming"));
+    await writeCloneState(dir, s);
+
+    // The unpaired missing file becomes a delete candidate, which needs the
+    // live record - reaching the network at all proves the id was ignored.
+    await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
+  }));
+
+test("a copy of a note whose original is still in place plans as a create, not a move", () =>
+  withTempDir(async (dir) => {
+    await writeBaseCopy(dir, NOTE_ID, "Synced text");
+    await writeVaultFile(dir, "Notes/Tracked.md", "Synced text");
+    // Duplicated in Obsidian: same id, still carrying the original's.
+    await writeVaultFile(dir, "Nowhere/Tracked copy.md", withId(NOTE_ID, "Synced text"));
+    await writeCloneState(dir, idState());
+
+    const { entries } = await buildPushPlan(dir);
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.kind, "create");
+    assert.equal(entries[0]?.file, "Nowhere/Tracked copy.md");
+  }));
+
+test("duplicate id claims with no original left in place are refused, not guessed", () =>
+  withTempDir(async (dir) => {
+    await writeBaseCopy(dir, NOTE_ID, "Synced text");
+    // The tracked file is gone and two files claim its id - neither can be
+    // shown to be the original.
+    await writeVaultFile(dir, "Recipes/Pie.md", withId(NOTE_ID, "Synced text"));
+    await writeVaultFile(dir, "Recipes/Pie copy.md", withId(NOTE_ID, "Synced text"));
+    await writeCloneState(dir, idState());
+
+    const { entries } = await buildPushPlan(dir);
+
+    assert.equal(entries.length, 2);
+    for (const entry of entries) {
+      assert.equal(entry.resolution, "refused");
+      assert.match(entry.reason ?? "", /apple-note-id/);
+      assert.match(entry.reason ?? "", /remove the .* line from every copy but one/);
+    }
+    assert.ok(!entries.some((entry) => entry.kind === "move"), "a refused claim must not also plan as a move");
+    // The note's own file is missing, so without holding it back the plan
+    // would refuse both copies *and* send the original to Recently Deleted.
+    assert.ok(
+      !entries.some((entry) => entry.kind === "delete"),
+      "an ambiguous claim must not let the note itself plan as a delete",
+    );
+  }));
+
+test("an id from another vault plans as a new note, with a notice saying so", () =>
+  withTempDir(async (dir) => {
+    await writeBaseCopy(dir, NOTE_ID, "Synced text");
+    await writeVaultFile(dir, "Notes/Tracked.md", "Synced text");
+    await writeVaultFile(dir, "Nowhere/From Elsewhere.md", withId(OTHER_NOTE_ID, "Someone else's note"));
+    await writeCloneState(dir, idState());
+
+    const { entries, notices } = await buildPushPlan(dir);
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.kind, "create");
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]?.message ?? "", /doesn't track - pushing it as a new note/);
+  }));
+
+test("a tracked file whose frontmatter was stripped is still that note, by path", () =>
+  withTempDir(async (dir) => {
+    await writeBaseCopy(dir, NOTE_ID, "Synced text");
+    // No envelope at all, but it sits where the note is tracked: it must
+    // resolve by path rather than becoming a duplicate.
+    await writeVaultFile(dir, "Notes/Tracked.md", "Edited, and the id is gone");
+    await writeCloneState(dir, idState());
+
+    // An update candidate needs the live record; reaching for it proves the
+    // file was treated as the tracked note, not as an untracked create.
+    await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
+  }));
+
+test("a malformed id is ignored rather than failing the push", () =>
+  withTempDir(async (dir) => {
+    await writeBaseCopy(dir, NOTE_ID, "Synced text");
+    await writeVaultFile(dir, "Notes/Tracked.md", "Synced text");
+    await writeVaultFile(dir, "Nowhere/Broken.md", "---\napple-note-id: not-a-uuid\n---\n\nA new note");
+    await writeCloneState(dir, idState());
+
+    const { entries, notices } = await buildPushPlan(dir);
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.kind, "create");
+    assert.deepEqual(notices, [], "a malformed id is not a stale id - there's nothing to report");
   }));

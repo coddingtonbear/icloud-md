@@ -30,7 +30,7 @@ import { readCloneState } from "./notes/cloneState.js";
 import { renderPlan } from "./notes/pushPlan.js";
 import { displayPath, findVaultRoot } from "./vaultRoot.js";
 import { readOwnPackageVersion } from "./version.js";
-import type { SyncProgress } from "./progress.js";
+import type { SyncNotice, SyncProgress } from "./progress.js";
 
 /**
  * `--json` mode's progress renderer: one stable, greppable line per event on
@@ -132,6 +132,15 @@ function printCloneSummary(targetDir: string, summary: CloneSummary): void {
   }
   console.log(`Skipped: ${summary.skippedDeleted} deleted, ${summary.skippedUndecodable} undecodable`);
   for (const notice of summary.notices) {
+    (notice.level === "warn" ? console.warn : console.log)(notice.message);
+  }
+}
+
+/** Plan- or run-level asides, printed above whatever listing follows them.
+ * Shared by `status` and `push` so the two report the same things the same
+ * way, matching how they already share the plan itself. */
+function printNotices(notices: readonly SyncNotice[]): void {
+  for (const notice of notices) {
     (notice.level === "warn" ? console.warn : console.log)(notice.message);
   }
 }
@@ -273,9 +282,16 @@ program
     "Fetch all Notes into a fresh local directory; signs in via a browser window the first time a directory " +
       "(or a new account) is used",
   )
-  .action(async (directory: string, _opts: unknown, command: Command) => {
+  .option(
+    "--id-in-frontmatter",
+    "record each note's Apple note id in its file's frontmatter, so renames and moves are tracked exactly rather " +
+      "than guessed at (chosen once, for the life of the clone)",
+  )
+  .action(async (directory: string, opts: { idInFrontmatter?: boolean }, command: Command) => {
     const context = contextFor(command);
-    const summary = await runClone(directory, makeSyncProgress(context), makeStatusSink(context));
+    const summary = await runClone(directory, makeSyncProgress(context), makeStatusSink(context), {
+      idInFrontmatter: opts.idInFrontmatter === true,
+    });
     emitResult(context, summary, (result) => printCloneSummary(directory, result));
   });
 
@@ -302,6 +318,7 @@ program
     const targetDir = await resolveTargetDir(directory);
     const result = await runPush(targetDir, { dryRun: opts.dryRun === true, onLoginStatus: makeStatusSink(context) });
     emitResult(context, result, (r) => {
+      printNotices(r.notices);
       for (const entry of r.entries) {
         if (entry.outcome) {
           console.log(entry.outcome.succeeded ? entry.outcome.message : chalk.red(entry.outcome.message));
@@ -334,6 +351,7 @@ program
     const targetDir = await resolveTargetDir(directory);
     const result = await runStatus(targetDir, { onLoginStatus: makeStatusSink(context) });
     emitResult(context, result, (r) => {
+      printNotices(r.notices);
       for (const line of renderPlan(r.entries, (file) => displayPath(targetDir, file), {
         preview: true,
         unchanged: r.unchanged,

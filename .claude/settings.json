@@ -12,7 +12,14 @@
       "Bash(npx tsx *)",
       "Bash(git -C /home/acoddington/Documents/Projects/icloud-md status --short)",
       "Bash(git -C /home/acoddington/Documents/Projects/icloud-md diff --stat)",
-      "mcp__obsidian__vault_list"
+      "mcp__obsidian__vault_list",
+      "Bash(node ../dist/cli.js status)",
+      "Bash(node ../dist/cli.js push)",
+      "Bash(node harness/dump-doc.mjs notes cac720fc-9850-4900-a344-8525f1885596)",
+      "Bash(node harness/dump-doc.mjs notes cac720fc-9850-4900-a344-8525f1885596 -1)",
+      "Bash(node harness/dump-doc.mjs notes cac720fc-9850-4900-a344-8525f1885596 9 10)",
+      "Read(//home/acoddington/.local/bin/**)",
+      "Bash(pipx list *)"
     ]
   }
 }

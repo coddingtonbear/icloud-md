@@ -9,11 +9,22 @@ import { noteFileName, uniqueFileName } from "../notes/filename.js";
 import { buildVaultLayout, placeNote, type SharedZoneRecords } from "../notes/folderLayout.js";
 import { writeBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState, writeCloneState, type CloneState } from "../notes/cloneState.js";
+import { composeNoteFile } from "../notes/noteIdFrontmatter.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { AlreadyClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import type { SyncNotice, SyncProgress } from "../progress.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
+
+export interface CloneOptions {
+  /**
+   * Record each note's CloudKit recordName in its file's local-only
+   * frontmatter, so renames and moves resolve exactly rather than by
+   * heuristic. Chosen here because it's a property of the whole vault: it
+   * lands in `state.json` and every later command reads it from there.
+   */
+  idInFrontmatter?: boolean;
+}
 
 export interface CloneSummary {
   written: number;
@@ -37,10 +48,12 @@ export async function runClone(
   targetDir: string,
   progress?: SyncProgress,
   onLoginStatus?: (message: string) => void,
+  options: CloneOptions = {},
 ): Promise<CloneSummary> {
   if (await readCloneState(targetDir)) {
     throw new AlreadyClonedDirectoryError(targetDir);
   }
+  const idInFrontmatter = options.idInFrontmatter === true;
 
   const auth = await bindNewFolderAccount({ onStatus: onLoginStatus });
   if (!auth.ckdatabasewsUrl) {
@@ -167,7 +180,7 @@ export async function runClone(
         const relativeFile = path.posix.join(placement.dir, fileName);
 
         const filePath = path.join(targetDir, relativeFile);
-        await writeFile(filePath, bodyText, "utf-8");
+        await writeFile(filePath, composeNoteFile("", bodyText, { recordName: record.recordName, idInFrontmatter }), "utf-8");
         await applyNoteFileTimes(filePath, record);
         await writeBaseCopy(targetDir, record.recordName, bodyText);
         if (source.sharedZoneOwner) {
@@ -199,6 +212,7 @@ export async function runClone(
 
   await writeCloneState(targetDir, {
     account: { appleId: auth.appleId, dsid: auth.dsid },
+    idInFrontmatter,
     syncToken,
     sharedZoneSyncTokens,
     notes,

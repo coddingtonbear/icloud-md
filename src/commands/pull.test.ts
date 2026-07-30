@@ -108,3 +108,50 @@ test("mergeRemoteChangeIntoLocalFile refuses to merge a file that still carries 
     assert.equal(await readFile(path.join(dir, "Notes/Note.md"), "utf-8"), conflicted);
     assert.equal(await readBaseCopy(dir, "REC1"), "shared line\n");
   }));
+
+// --- id recording on the merge path ---------------------------------------
+
+const MERGE_NOTE_ID = "089D915D-C76E-4F44-AB80-2190073281A3";
+
+test("a merge stamps the note id into a file that had lost its envelope", () =>
+  withTempDir(async (dir) => {
+    await writeBaseCopy(dir, MERGE_NOTE_ID, "line one\n\nline two\n");
+    await writeVaultFile(dir, "Notes/Note.md", "line one edited locally\n\nline two\n");
+
+    const merged = await mergeRemoteChangeIntoLocalFile(
+      dir,
+      MERGE_NOTE_ID,
+      "Notes/Note.md",
+      "line one\n\nline two edited remotely\n",
+      true,
+    );
+
+    assert.equal(merged.status, "merged");
+    const written = await readFile(path.join(dir, "Notes/Note.md"), "utf-8");
+    assert.match(written, new RegExp(`apple-note-id: ${MERGE_NOTE_ID}`));
+    assert.ok(written.includes("line one edited locally"));
+    // The base copy stays body-only: the envelope is never part of it.
+    assert.equal(await readBaseCopy(dir, MERGE_NOTE_ID), "line one\n\nline two edited remotely\n");
+  }));
+
+test("a merge in a vault that doesn't record ids adds no frontmatter", () =>
+  withTempDir(async (dir) => {
+    await writeBaseCopy(dir, MERGE_NOTE_ID, "line one\n");
+    await writeVaultFile(dir, "Notes/Note.md", "line one edited locally\n");
+
+    await mergeRemoteChangeIntoLocalFile(dir, MERGE_NOTE_ID, "Notes/Note.md", "line one\nline two\n");
+
+    assert.ok(!(await readFile(path.join(dir, "Notes/Note.md"), "utf-8")).includes("apple-note-id"));
+  }));
+
+test("a merge preserves a user's own frontmatter keys alongside the id", () =>
+  withTempDir(async (dir) => {
+    await writeBaseCopy(dir, MERGE_NOTE_ID, "line one\n");
+    await writeVaultFile(dir, "Notes/Note.md", "---\ntags: [recipes]\n---\n\nline one edited locally\n");
+
+    await mergeRemoteChangeIntoLocalFile(dir, MERGE_NOTE_ID, "Notes/Note.md", "line one\nline two\n", true);
+
+    const written = await readFile(path.join(dir, "Notes/Note.md"), "utf-8");
+    assert.match(written, /tags:/);
+    assert.match(written, new RegExp(`apple-note-id: ${MERGE_NOTE_ID}`));
+  }));
