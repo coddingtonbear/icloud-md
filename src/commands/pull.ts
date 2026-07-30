@@ -26,7 +26,7 @@ import { reconcileNotePlacements, removeStaleDirs } from "../notes/folderReconci
 import { hasConflictMarkers, mergeNoteVersions } from "../notes/mergeConflict.js";
 import { readBaseCopy, removeBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { localFileState } from "../notes/localFileState.js";
-import { writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
+import { writeCloneState, type CloneState, type CloneStateNoteEntry, type TitleMode } from "../notes/cloneState.js";
 import { migrationReporter, openVault } from "../notes/vaultMigrations.js";
 import { pendingRenameTarget, settlePendingRenames } from "../notes/pendingRename.js";
 import { composeNoteFile, NOTE_TITLE_KEY } from "../notes/noteIdFrontmatter.js";
@@ -151,7 +151,7 @@ export async function runPull(
   // consumer has since carried out, and - unless this run is deferring too -
   // finish the ones nobody got to. A plain `pull` is how a vault left holding
   // a rename forever gets unstuck.
-  const settled = await settlePendingRenames(targetDir, notes, { perform: !deferRenames });
+  const settled = await settlePendingRenames(targetDir, notes, { perform: !deferRenames, titleMode });
   // File names are unique per directory; both maps are keyed by the note's
   // vault-root-relative directory ("" for the root). A name a deferred rename
   // is holding counts as taken: the file isn't there yet, but it is spoken
@@ -260,7 +260,7 @@ export async function runPull(
           if (!existing) {
             continue;
           }
-          await handleRemoteDeletion(targetDir, record, existing, notes, attachments, tableAttachments, summary);
+          await handleRemoteDeletion(targetDir, record, existing, notes, attachments, tableAttachments, summary, titleMode);
           continue;
         }
 
@@ -269,7 +269,7 @@ export async function runPull(
             summary.skippedNewUnsyncable += 1;
             continue;
           }
-          await dropUnsyncableNote(targetDir, record, existing, notes, attachments, tableAttachments, summary, decoded.reason);
+          await dropUnsyncableNote(targetDir, record, existing, notes, attachments, tableAttachments, summary, decoded.reason, titleMode);
           continue;
         }
 
@@ -412,7 +412,7 @@ export async function runPull(
           continue;
         }
 
-        const local = await localFileState(targetDir, existing, record.recordName);
+        const local = await localFileState(targetDir, existing, record.recordName, titleMode);
 
         // A remote retitle has to rename the file, because in this vault the
         // file name is the only place the title lives. Leaving it stale
@@ -444,7 +444,9 @@ export async function runPull(
           // Preserve any local-only frontmatter on a clean file (a missing
           // file has none to keep); the base copy stays body-only.
           const frontmatter =
-            local === "clean" ? splitFrontmatter(await readFile(filePath, "utf-8")).frontmatter : "";
+            local === "clean"
+              ? splitFrontmatter(await readFile(filePath, "utf-8"), { filenameAsTitle: titleMode === "filename" }).frontmatter
+              : "";
           // Also the self-healing path for an id: a file whose envelope was
           // stripped (by hand, or by an older build's `restore`) gets it back
           // the next time the note changes remotely.
@@ -485,6 +487,7 @@ export async function runPull(
           file,
           bodyText,
           recordedTitle,
+          titleMode,
         );
         if (merged.status === "unresolvedMarkers") {
           // No *sync* state advanced - not the content, not the base copy,
@@ -771,8 +774,9 @@ async function handleRemoteDeletion(
   attachments: NonNullable<CloneState["attachments"]>,
   tableAttachments: NonNullable<CloneState["tableAttachments"]>,
   summary: PullSummary,
+  titleMode: TitleMode,
 ): Promise<void> {
-  const local = await localFileState(targetDir, existing, record.recordName);
+  const local = await localFileState(targetDir, existing, record.recordName, titleMode);
 
   if (local !== "modified") {
     // "clean" or "missing": nothing local worth protecting.
@@ -796,9 +800,9 @@ async function handleRemoteDeletion(
   // against an empty remote so the markers show exactly what local kept. The
   // local-only frontmatter is split off first and kept above the markers.
   const base = (await readBaseCopy(targetDir, record.recordName)) ?? "";
-  const { frontmatter, body: localContent } = splitFrontmatter(
-    await readFile(path.join(targetDir, existing.file), "utf-8"),
-  );
+  const { frontmatter, body: localContent } = splitFrontmatter(await readFile(path.join(targetDir, existing.file), "utf-8"), {
+    filenameAsTitle: titleMode === "filename",
+  });
   const outcome = mergeNoteVersions(base, localContent, "");
 
   await writeFile(path.join(targetDir, existing.file), joinFrontmatter(frontmatter, outcome.text), "utf-8");
@@ -831,8 +835,9 @@ async function dropUnsyncableNote(
   tableAttachments: NonNullable<CloneState["tableAttachments"]>,
   summary: PullSummary,
   reason: string,
+  titleMode: TitleMode,
 ): Promise<void> {
-  const local = await localFileState(targetDir, existing, record.recordName);
+  const local = await localFileState(targetDir, existing, record.recordName, titleMode);
   if (local === "modified") {
     summary.conflicts.push(
       `${existing.file}: became unsyncable remotely (${reason}), and has local edits - left in place, untracked`,
@@ -881,9 +886,12 @@ export async function mergeRemoteChangeIntoLocalFile(
   file: string,
   remoteBodyText: string,
   unrepresentableTitle?: string | undefined,
+  titleMode: TitleMode = "in-body",
 ): Promise<{ status: "merged" | "conflict" | "unresolvedMarkers" }> {
   const base = (await readBaseCopy(targetDir, recordName)) ?? "";
-  const { frontmatter, body: localContent } = splitFrontmatter(await readFile(path.join(targetDir, file), "utf-8"));
+  const { frontmatter, body: localContent } = splitFrontmatter(await readFile(path.join(targetDir, file), "utf-8"), {
+    filenameAsTitle: titleMode === "filename",
+  });
   if (hasConflictMarkers(localContent)) {
     // Diff3 over text that already carries conflict markers nests markers
     // into soup (reproduced live, dev log 2026-07-29). Leave the file, the

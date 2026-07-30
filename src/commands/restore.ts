@@ -52,7 +52,10 @@ export async function runRestore(targetDir: string, fileArg: string): Promise<Re
     }
   }
 
-  const { frontmatter } = splitFrontmatter(existing);
+  // Split with the vault's shape in mind: under filename-as-title the body
+  // can begin with a blank line, and folding it into the envelope here would
+  // put it back *above* the restored body on every restore.
+  const { frontmatter } = splitFrontmatter(existing, { filenameAsTitle: state.titleMode === "filename" });
   await writeFile(filePath, joinFrontmatter(frontmatter, base), "utf-8");
   return { file: entry.file };
 }

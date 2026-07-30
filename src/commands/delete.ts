@@ -231,7 +231,7 @@ export async function applyLocalNoteDeletion(
   const attachments = state.attachments ?? {};
   const tableAttachments = state.tableAttachments ?? {};
 
-  const local = await localFileState(targetDir, entry, recordName);
+  const local = await localFileState(targetDir, entry, recordName, state.titleMode);
   if (local === "clean") {
     await safeUnlink(path.join(targetDir, entry.file));
   }

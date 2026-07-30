@@ -1,7 +1,7 @@
 import { readFile, rename, stat } from "node:fs/promises";
 import path from "node:path";
 import { isEnoent } from "../fsUtil.js";
-import type { CloneState, CloneStateNoteEntry } from "./cloneState.js";
+import type { CloneState, CloneStateNoteEntry, TitleMode } from "./cloneState.js";
 import { noteDirOf } from "./folderLayout.js";
 import { splitFrontmatter } from "./frontmatter.js";
 import { readNoteId } from "./noteIdFrontmatter.js";
@@ -73,7 +73,7 @@ export interface PendingRenameSettlement {
 export async function settlePendingRenames(
   targetDir: string,
   notes: CloneState["notes"],
-  options: { perform: boolean },
+  options: { perform: boolean; titleMode?: TitleMode | undefined },
 ): Promise<PendingRenameSettlement> {
   const settlement: PendingRenameSettlement = { changed: false, performed: [], blocked: [] };
 
@@ -112,7 +112,7 @@ export async function settlePendingRenames(
     // lives now. Otherwise the file was renamed elsewhere or deleted, and
     // the pending rename is moot either way - clear it and let the ordinary
     // missing-file machinery (id-based move pairing, or a delete) decide.
-    const adopted = (await noteIdAt(targetDir, target)) === recordName;
+    const adopted = (await noteIdAt(targetDir, target, options.titleMode)) === recordName;
     notes[recordName] = { ...entry, ...(adopted ? { file: target } : {}), pendingRename: undefined };
     settlement.changed = true;
   }
@@ -126,7 +126,7 @@ export async function settlePendingRenames(
  * merely *has* the right name - another note that drifted into it, or
  * something the user created - is never mistaken for this note.
  */
-async function noteIdAt(targetDir: string, file: string): Promise<string | undefined> {
+async function noteIdAt(targetDir: string, file: string, titleMode: TitleMode = "in-body"): Promise<string | undefined> {
   let raw: string;
   try {
     raw = await readFile(path.join(targetDir, file), "utf-8");
@@ -136,7 +136,7 @@ async function noteIdAt(targetDir: string, file: string): Promise<string | undef
     }
     throw cause;
   }
-  return readNoteId(splitFrontmatter(raw).frontmatter);
+  return readNoteId(splitFrontmatter(raw, { filenameAsTitle: titleMode === "filename" }).frontmatter);
 }
 
 async function fileExists(filePath: string): Promise<boolean> {

@@ -205,7 +205,7 @@ export async function buildPushPlan(
   // advancing recordChangeTags below. Leaving a tag stale while the base
   // copy and file had already been rewritten is what silently stranded local
   // edits (dev log 2026-07-29).
-  let planningMutatedState = (await settlePendingRenames(targetDir, state.notes, { perform: false })).changed;
+  let planningMutatedState = (await settlePendingRenames(targetDir, state.notes, { perform: false, titleMode: state.titleMode })).changed;
 
   const entries: ExecutablePlanEntry[] = [];
   const dirIndex = stateDirIndex(state);
@@ -216,6 +216,10 @@ export async function buildPushPlan(
   // the create path's own reconstruction, and `prepareRetitle` for the
   // rename that changes a title rather than restoring one.
   const titleMode = state.titleMode === "filename" ? "filename" : "in-body";
+  // Every working file in this vault holds the note's body alone, so its
+  // frontmatter envelope has to be split with that in mind - a body there can
+  // legitimately begin with a blank line or a `---` thematic break.
+  const filenameAsTitle = titleMode === "filename";
   const notices: SyncNotice[] = [];
 
   // Renames still outstanding, listed before everything else because they're
@@ -253,7 +257,7 @@ export async function buildPushPlan(
     // compares against body-only base copies). The envelope is still read
     // here, because in an id-recording vault it carries the one thing that
     // says which note this file *is*.
-    const { frontmatter, body } = splitFrontmatter(await readFile(path.join(targetDir, file), "utf-8"));
+    const { frontmatter, body } = splitFrontmatter(await readFile(path.join(targetDir, file), "utf-8"), { filenameAsTitle });
     untracked.push({ file, localText: body, noteId: readNoteId(frontmatter), noteTitle: readNoteTitle(frontmatter) });
   }
   // A moved/renamed file is matched by id below, and only the entry above
@@ -266,7 +270,7 @@ export async function buildPushPlan(
   const missingCandidates: { recordName: string; entry: CloneStateNoteEntry }[] = [];
 
   for (const [recordName, entry] of Object.entries(state.notes)) {
-    const fileState = await localFileState(targetDir, entry, recordName);
+    const fileState = await localFileState(targetDir, entry, recordName, titleMode);
     if (fileState === "clean") {
       continue;
     }
@@ -279,7 +283,9 @@ export async function buildPushPlan(
     // touches the note: every check, parse, merge, and base-copy comparison
     // operates on the body, and `frontmatter` is re-attached only if a
     // remote-merge rewrites the working file.
-    const { frontmatter, body: localText } = splitFrontmatter(await readFile(path.join(targetDir, entry.file), "utf-8"));
+    const { frontmatter, body: localText } = splitFrontmatter(await readFile(path.join(targetDir, entry.file), "utf-8"), {
+      filenameAsTitle,
+    });
 
     const sharedRefusal = sharedNoteWriteRefusal(state, entry);
     if (sharedRefusal !== undefined) {
@@ -975,7 +981,7 @@ export async function buildPushPlan(
         // what re-homes a *copied* file: it arrived carrying the original's
         // id, and leaves carrying its own.
         const filePath = path.join(targetDir, file);
-        const { frontmatter, body } = splitFrontmatter(await readFile(filePath, "utf-8"));
+        const { frontmatter, body } = splitFrontmatter(await readFile(filePath, "utf-8"), { filenameAsTitle });
         await writeFile(filePath, joinFrontmatter(setNoteId(frontmatter, recordName), body), "utf-8");
         await applyNoteFileTimes(path.join(targetDir, file), result.record);
         const textValue = result.record.fields.TextDataEncrypted?.value;

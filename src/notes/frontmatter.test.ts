@@ -91,7 +91,7 @@ test("join with no frontmatter is just the body", () => {
 test("a body opening with a thematic break is not mistaken for frontmatter", () => {
   const text = "---\n\nSome prose\n\n---\n\nMore prose";
 
-  const split = splitFrontmatter(text, { bodyMayStartWithFence: true });
+  const split = splitFrontmatter(text, { filenameAsTitle: true });
 
   assert.equal(split.frontmatter, "");
   assert.equal(split.body, text);
@@ -100,7 +100,7 @@ test("a body opening with a thematic break is not mistaken for frontmatter", () 
 test("two adjacent thematic breaks stay in the body", () => {
   const text = "---\n---\nprose";
 
-  const split = splitFrontmatter(text, { bodyMayStartWithFence: true });
+  const split = splitFrontmatter(text, { filenameAsTitle: true });
 
   assert.equal(split.frontmatter, "");
   assert.equal(split.body, text);
@@ -109,7 +109,7 @@ test("two adjacent thematic breaks stay in the body", () => {
 test("a real envelope is still recognized in a filename-as-title vault", () => {
   const text = "---\napple-note-id: 089D915D-C76E-4F44-AB80-2190073281A3\n---\n\nBody";
 
-  const split = splitFrontmatter(text, { bodyMayStartWithFence: true });
+  const split = splitFrontmatter(text, { filenameAsTitle: true });
 
   assert.match(split.frontmatter, /apple-note-id/);
   assert.equal(split.body, "Body");
@@ -121,4 +121,39 @@ test("without the option, the original behaviour is unchanged", () => {
   const text = "---\n\nSome prose\n\n---\n\nMore prose";
 
   assert.notEqual(splitFrontmatter(text).frontmatter, "");
+});
+
+test("a filename-as-title body keeps the blank line it legitimately starts with", () => {
+  // The bug this guards: Apple's editors leave an empty paragraph under a
+  // note's title, so once the title moves into the file *name* the body's own
+  // first line is blank. Folding greedily ate it, and every such note compared
+  // unequal to its base copy - the whole vault read as modified from the
+  // moment it was cloned.
+  const text = "---\napple-note-id: 089D915D-C76E-4F44-AB80-2190073281A3\n---\n\n\n**Yield:** 8 servings";
+
+  const split = splitFrontmatter(text, { filenameAsTitle: true });
+
+  assert.equal(split.body, "\n**Yield:** 8 servings");
+  assert.equal(split.frontmatter + split.body, text, "the two halves still reproduce the file exactly");
+});
+
+test("splitFrontmatter is the exact inverse of joinFrontmatter for a body starting blank", () => {
+  const envelope = "---\napple-note-id: 089D915D-C76E-4F44-AB80-2190073281A3\n---\n\n";
+  for (const body of ["\n\nTwo blank lines above", "\nOne blank line above", "No blank line above"]) {
+    const split = splitFrontmatter(joinFrontmatter(envelope, body), { filenameAsTitle: true });
+    assert.equal(split.body, body, `round trip lost content for: ${JSON.stringify(body)}`);
+    assert.equal(split.frontmatter, envelope);
+  }
+});
+
+test("an in-body vault still folds every blank line under the envelope", () => {
+  // Kept deliberately: there the body starts with the note's title line, so
+  // there is nothing a greedy fold can eat - and blank lines a user left under
+  // their frontmatter stay cosmetic instead of becoming empty paragraphs
+  // pushed to the top of the note.
+  const text = "---\ntags: [a]\n---\n\n\n\nMy Note\nBody";
+
+  const split = splitFrontmatter(text);
+
+  assert.equal(split.body, "My Note\nBody");
 });

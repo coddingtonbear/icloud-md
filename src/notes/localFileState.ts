@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { isEnoent } from "../fsUtil.js";
 import { readBaseCopy } from "./baseCopy.js";
-import type { CloneStateNoteEntry } from "./cloneState.js";
+import type { CloneStateNoteEntry, TitleMode } from "./cloneState.js";
 import { splitFrontmatter } from "./frontmatter.js";
 
 /**
@@ -19,6 +19,7 @@ export async function localFileState(
   targetDir: string,
   entry: CloneStateNoteEntry,
   recordName: string,
+  titleMode: TitleMode = "in-body",
 ): Promise<LocalFileState> {
   let content: string;
   try {
@@ -39,5 +40,9 @@ export async function localFileState(
   // Compare body-only: the base copy never carries frontmatter, so a local-
   // only frontmatter edit leaves the body equal to base and stays "clean" -
   // it must not read as a note change (which would trigger a spurious push).
-  return splitFrontmatter(content).body === base ? "clean" : "modified";
+  // `titleMode` matters here for a reason that isn't obvious: under
+  // filename-as-title a body can begin with a blank line, and splitting
+  // without it folds that line into the envelope, so a freshly cloned note
+  // never matches its base copy at all.
+  return splitFrontmatter(content, { filenameAsTitle: titleMode === "filename" }).body === base ? "clean" : "modified";
 }

@@ -44,11 +44,14 @@ export interface SplitMarkdown {
 
 export interface SplitFrontmatterOptions {
   /**
-   * Set in a filename-as-title vault, where the file starts at the note's
-   * *second* paragraph and so may legitimately open with a `---` thematic
-   * break. See the guard in `splitFrontmatter`.
+   * Set in a filename-as-title vault, where the file holds the note's *body*
+   * alone. Two of this module's assumptions stop holding there, because both
+   * were really assumptions about the body beginning with the note's title
+   * line: the body may legitimately open with a `---` thematic break, and it
+   * may legitimately open with blank lines. See both guards in
+   * `splitFrontmatter`.
    */
-  bodyMayStartWithFence?: boolean;
+  filenameAsTitle?: boolean;
 }
 
 /**
@@ -56,10 +59,10 @@ export interface SplitFrontmatterOptions {
  * note body. Frontmatter is recognized only when the file's very first line
  * is exactly `---` and a later line is exactly `---`; anything else (a
  * thematic break, a `---` mid-document, an unterminated block) is left
- * wholly as body. Blank lines immediately after the closing fence are folded
- * into the envelope, so the common `---\n...\n---\n\n# Title` layout yields a
- * body of `# Title` - byte-identical to what the renderer produced and the
- * base copy stores.
+ * wholly as body. The blank line separating the closing fence from the body
+ * is folded into the envelope, so the common `---\n...\n---\n\n# Title`
+ * layout yields a body of `# Title` - byte-identical to what the renderer
+ * produced and the base copy stores.
  */
 export function splitFrontmatter(text: string, options: SplitFrontmatterOptions = {}): SplitMarkdown {
   const lines = text.split("\n");
@@ -73,7 +76,7 @@ export function splitFrontmatter(text: string, options: SplitFrontmatterOptions 
   // real content eaten as an envelope. A real envelope's opening fence is
   // always followed by YAML, never by another fence or a blank line, which is
   // enough to tell the two apart.
-  if (options.bodyMayStartWithFence === true && (lines[1] === FENCE || lines[1] === "" || lines[1] === undefined)) {
+  if (options.filenameAsTitle === true && (lines[1] === FENCE || lines[1] === "" || lines[1] === undefined)) {
     return { frontmatter: "", body: text };
   }
 
@@ -91,10 +94,31 @@ export function splitFrontmatter(text: string, options: SplitFrontmatterOptions 
     return { frontmatter: "", body: text };
   }
 
-  // Fold trailing blank lines (the cosmetic separator) into the envelope.
+  // Fold the cosmetic separator into the envelope.
+  //
+  // Exactly one blank line in a filename-as-title vault, because there a body
+  // legitimately begins with blank lines: Apple's editors leave an empty
+  // paragraph under a note's title, and once the title is in the file *name*
+  // that empty paragraph is the body's own first line. Folding greedily ate
+  // it, so every such note's file compared unequal to its base copy and read
+  // as modified from the moment it was cloned - and each pull re-joined the
+  // over-long envelope with the body, growing the file by a blank line a run.
+  // One is also exactly what `joinFrontmatter` writes, which is what makes
+  // the two functions genuine inverses.
+  //
+  // Everywhere else the body starts with the note's title line, so there is
+  // nothing a greedy fold can consume - and greedy is kept there so that
+  // blank lines a user left under their frontmatter stay cosmetic rather than
+  // becoming empty paragraphs pushed to the top of the note.
   let envelopeEnd = closingFence;
-  while (envelopeEnd + 1 < lines.length && lines[envelopeEnd + 1] === "") {
-    envelopeEnd += 1;
+  if (options.filenameAsTitle === true) {
+    if (lines[envelopeEnd + 1] === "") {
+      envelopeEnd += 1;
+    }
+  } else {
+    while (envelopeEnd + 1 < lines.length && lines[envelopeEnd + 1] === "") {
+      envelopeEnd += 1;
+    }
   }
 
   const bodyLines = lines.slice(envelopeEnd + 1);
