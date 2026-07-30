@@ -5,7 +5,7 @@ import { fetchAllNoteRecords, fetchSharedNoteRecords } from "../cloudkit/databas
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { resolveNoteAttachments, type AttachmentAuth } from "../notes/attachmentSync.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
-import { noteFileName, uniqueFileName } from "../notes/filename.js";
+import { noteFileNameFor, uniqueFileName } from "../notes/filename.js";
 import { buildVaultLayout, placeNote, type SharedZoneRecords } from "../notes/folderLayout.js";
 import { writeBaseCopy } from "../notes/baseCopy.js";
 import { readCloneState, writeCloneState, type CloneState } from "../notes/cloneState.js";
@@ -24,6 +24,13 @@ export interface CloneOptions {
    * lands in `state.json` and every later command reads it from there.
    */
   idInFrontmatter?: boolean;
+  /**
+   * Carry note titles in file names rather than as each note's first line -
+   * the Obsidian-shaped layout, where the file name is the document title.
+   * Implies `idInFrontmatter`: a rename *is* a retitle in this mode, so
+   * mistaking one for a delete plus a create would lose the note's history.
+   */
+  filenameAsTitle?: boolean;
 }
 
 export interface CloneSummary {
@@ -53,7 +60,10 @@ export async function runClone(
   if (await readCloneState(targetDir)) {
     throw new AlreadyClonedDirectoryError(targetDir);
   }
-  const idInFrontmatter = options.idInFrontmatter === true;
+  const titleMode = options.filenameAsTitle === true ? "filename" : "in-body";
+  // The mode is unsafe without exact rename detection, so it turns ids on
+  // whether or not they were asked for.
+  const idInFrontmatter = options.idInFrontmatter === true || titleMode === "filename";
 
   const auth = await bindNewFolderAccount({ onStatus: onLoginStatus });
   if (!auth.ckdatabasewsUrl) {
@@ -137,7 +147,7 @@ export async function runClone(
           continue;
         }
 
-        const decoded = classifyNoteRecord(record);
+        const decoded = classifyNoteRecord(record, { titleMode });
         if (decoded.status === "deleted") {
           summary.skippedDeleted += 1;
           continue;
@@ -175,7 +185,7 @@ export async function runClone(
         }
 
         const usedInDir = usedNamesFor(usedFileNames, placement.dir);
-        const fileName = uniqueFileName(noteFileName(decoded.title), usedInDir);
+        const fileName = uniqueFileName(noteFileNameFor(decoded.titleLine, titleMode), usedInDir);
         usedInDir.add(fileName);
         const relativeFile = path.posix.join(placement.dir, fileName);
 
@@ -213,6 +223,7 @@ export async function runClone(
   await writeCloneState(targetDir, {
     account: { appleId: auth.appleId, dsid: auth.dsid },
     idInFrontmatter,
+    titleMode,
     syncToken,
     sharedZoneSyncTokens,
     notes,

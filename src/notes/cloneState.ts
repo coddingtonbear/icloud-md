@@ -140,6 +140,20 @@ export interface CloneState {
    */
   idInFrontmatter?: boolean | undefined;
   /**
+   * Where this vault carries note titles. "filename" is the Obsidian-shaped
+   * mode: the file name is the title and the file holds only the body, so a
+   * note doesn't show its title twice. "in-body" (the default, and the shape
+   * of every vault written before the mode existed) keeps the title as the
+   * note's first line.
+   *
+   * A property of the whole vault, never of one command: pulling a
+   * filename-as-title vault in in-body mode would read as "every note
+   * changed" and either duplicate or delete every title in a single run.
+   * `idInFrontmatter` is implied by "filename" - the mode isn't safe without
+   * exact rename detection, since a rename *is* a retitle here.
+   */
+  titleMode?: "in-body" | "filename" | undefined;
+  /**
    * Which Apple ID this folder was cloned for - resolves to that account's
    * own session under `~/.config/icloud-md/accounts/<dsid>/` (see
    * `accountStore.ts`), never anything secret stored here. Absent only for
@@ -199,9 +213,17 @@ export interface CloneState {
 export const STATE_DIR_NAME = ".icloud-md";
 export const STATE_FILE_NAME = "state.json";
 
-/** The on-disk layout generation this build reads and writes - see
- * CloneState.layoutVersion. */
-export const CURRENT_LAYOUT_VERSION = 2;
+/**
+ * The on-disk layout generation this build reads and writes - see
+ * CloneState.layoutVersion.
+ *
+ * Version 3 adds the title-mode fields (`titleMode`, `idInFrontmatter`) and
+ * makes them explicit rather than inferred, so no code has to reason about
+ * their absence. Bumping is a one-way door - an older icloud-md meeting a
+ * migrated vault refuses it - so it is spent only when the on-disk shape
+ * genuinely changes, never on additive metadata.
+ */
+export const CURRENT_LAYOUT_VERSION = 3;
 
 export async function writeCloneState(targetDir: string, state: CloneState): Promise<void> {
   const stamped: CloneState = {
@@ -394,6 +416,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
     layoutVersion: CURRENT_LAYOUT_VERSION,
     generator: typeof value.generator === "string" ? value.generator : undefined,
     idInFrontmatter: value.idInFrontmatter === true,
+    titleMode: value.titleMode === "filename" ? "filename" : "in-body",
     account,
     syncToken,
     sharedZoneSyncTokens,

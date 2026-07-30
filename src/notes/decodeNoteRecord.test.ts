@@ -129,6 +129,7 @@ test("an attachmentInfo run not sitting on a lone placeholder banner-marks the n
   assert.deepEqual(classifyNoteRecord(record), {
     status: "ok",
     title: "",
+    titleLine: "Hi",
     bodyText: `${UNKNOWN_CONTENT_BANNER}Hi\n\uFFFC`,
     markdownText: `${UNKNOWN_CONTENT_BANNER}Hi\n\uFFFC`,
     format: undefined,
@@ -167,4 +168,107 @@ test("a note with trailing spaces stays publishable; the rendering trims them", 
   assert.equal(result.publishable, true, result.status === "ok" ? result.unpublishableReason : undefined);
   assert.equal(result.bodyText, "Title \nFried Egg \nplain");
   assert.equal(result.markdownText, "Title\nFried Egg\nplain");
+});
+
+// --- filename-as-title stripping -------------------------------------------
+
+test("filename mode leaves the title paragraph out of the markdown", () => {
+  const record = makeRecord({
+    TextDataEncrypted: encodeTextField("My Note\n\nBody text", [
+      { length: 8, paragraphStyle: { style: 0 } },
+      { length: 10, paragraphStyle: { style: 3 } },
+    ]),
+  });
+
+  const inBody = classifyNoteRecord(record);
+  const filename = classifyNoteRecord(record, { titleMode: "filename" });
+
+  assert.equal(inBody.status === "ok" ? inBody.markdownText : "", "# My Note\n\nBody text");
+  assert.equal(filename.status === "ok" ? filename.markdownText : "", "\nBody text");
+  assert.equal(filename.status === "ok" ? filename.titleStripped : undefined, true);
+  assert.equal(inBody.status === "ok" ? inBody.titleStripped : undefined, false);
+});
+
+test("the whole formatting model survives stripping, so push can put the title back", () => {
+  const record = makeRecord({
+    TextDataEncrypted: encodeTextField("My Note\nBody text", [
+      { length: 8, paragraphStyle: { style: 0 } },
+      { length: 9, paragraphStyle: { style: 3 } },
+    ]),
+  });
+
+  const result = classifyNoteRecord(record, { titleMode: "filename" });
+
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.equal(result.format?.length, 2, "format keeps the title paragraph even though markdownText drops it");
+  assert.equal(result.format?.[0]?.kind, "title");
+  assert.equal(result.format?.[0]?.text, "My Note");
+});
+
+test("titleLine is the note's real first line, not Apple's truncated title metadata", () => {
+  const longFirstLine = "A first line that runs well past the seventy-six characters Apple truncates its title metadata at";
+  const record = makeRecord({
+    TextDataEncrypted: encodeTextField(`${longFirstLine}\nBody`, [
+      { length: longFirstLine.length + 1, paragraphStyle: { style: 0 } },
+      { length: 4, paragraphStyle: { style: 3 } },
+    ]),
+    TitleEncrypted: { value: Buffer.from(longFirstLine.slice(0, 76), "utf-8").toString("base64"), type: "ENCRYPTED_BYTES" },
+  });
+
+  const result = classifyNoteRecord(record, { titleMode: "filename" });
+
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.equal(result.titleLine, longFirstLine);
+  assert.notEqual(result.title, result.titleLine, "the cosmetic title really is the truncated one");
+});
+
+// The trap: dropping the first *line* of a note whose first paragraph is
+// monospaced would leave an unbalanced code fence.
+test("a monospaced first paragraph strips without corrupting the fence", () => {
+  const record = makeRecord({
+    TextDataEncrypted: encodeTextField("code one\ncode two", [
+      { length: 9, paragraphStyle: { style: 4 } },
+      { length: 8, paragraphStyle: { style: 4 } },
+    ]),
+  });
+
+  const result = classifyNoteRecord(record, { titleMode: "filename" });
+
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.equal((result.markdownText.match(/```/g) ?? []).length % 2, 0, result.markdownText);
+});
+
+test("a title paragraph holding an embed placeholder is never stripped", () => {
+  // Stripping it would orphan the attachment reference - there'd be no file
+  // left to carry it.
+  const record = makeRecord({
+    TextDataEncrypted: encodeTextField("￼\nBody text", [
+      { length: 1, attachmentInfo: { attachmentIdentifier: "A-1", typeUTI: "public.jpeg" } },
+      { length: 10, paragraphStyle: { style: 3 } },
+    ]),
+  });
+
+  const result = classifyNoteRecord(record, { titleMode: "filename" });
+
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.equal(result.titleStripped, false, "the note keeps its title in the body rather than losing the embed");
+  assert.ok(result.markdownText.includes("￼"));
+});
+
+test("a single-line note strips to an empty body", () => {
+  const record = makeRecord({
+    TextDataEncrypted: encodeTextField("Just a title", [{ length: 12, paragraphStyle: { style: 0 } }]),
+  });
+
+  const result = classifyNoteRecord(record, { titleMode: "filename" });
+
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.equal(result.markdownText, "");
+  assert.equal(result.titleStripped, true);
+  assert.equal(result.publishable, true, "an empty body is a title-only note, not an unsyncable one");
 });

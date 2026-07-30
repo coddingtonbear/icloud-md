@@ -65,11 +65,28 @@ export interface VaultMigration {
 }
 
 /**
- * The migration chain, ordered by `from`. Empty until a change to the on-disk
- * shape actually needs one - the machinery lands ahead of its first user so
- * that change is a single registration rather than a refactor.
+ * Records where a version-2 vault keeps its note titles. Such a vault
+ * predates the mode entirely, so it is in-body by definition and no file
+ * needs rewriting - the migration only makes the implicit explicit, which is
+ * what lets every later read treat `titleMode` as always present.
+ *
+ * Adopting `filename` in an existing vault is a *mode change*, not a version
+ * migration: two vaults at version 3 legitimately differ on it. That's a
+ * separate operation, since it has to rewrite every file.
  */
-export const VAULT_MIGRATIONS: readonly VaultMigration[] = [];
+const recordTitleMode: VaultMigration = {
+  from: 2,
+  to: 3,
+  describe: "recording where this vault keeps note titles",
+  run: async ({ state }) => ({
+    ...state,
+    titleMode: state.titleMode === "filename" ? "filename" : "in-body",
+    idInFrontmatter: state.idInFrontmatter === true,
+  }),
+};
+
+/** The migration chain, ordered by `from`. */
+export const VAULT_MIGRATIONS: readonly VaultMigration[] = [recordTitleMode];
 
 /** A chain and the version it climbs to. Separated from the module-level
  * constants purely so the runner can be exercised against synthetic chains -

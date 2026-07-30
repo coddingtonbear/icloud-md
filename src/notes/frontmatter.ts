@@ -42,6 +42,15 @@ export interface SplitMarkdown {
   body: string;
 }
 
+export interface SplitFrontmatterOptions {
+  /**
+   * Set in a filename-as-title vault, where the file starts at the note's
+   * *second* paragraph and so may legitimately open with a `---` thematic
+   * break. See the guard in `splitFrontmatter`.
+   */
+  bodyMayStartWithFence?: boolean;
+}
+
 /**
  * Splits a working file into its (local-only) frontmatter envelope and the
  * note body. Frontmatter is recognized only when the file's very first line
@@ -52,9 +61,19 @@ export interface SplitMarkdown {
  * body of `# Title` - byte-identical to what the renderer produced and the
  * base copy stores.
  */
-export function splitFrontmatter(text: string): SplitMarkdown {
+export function splitFrontmatter(text: string, options: SplitFrontmatterOptions = {}): SplitMarkdown {
   const lines = text.split("\n");
   if (lines[0] !== FENCE) {
+    return { frontmatter: "", body: text };
+  }
+  // In a filename-as-title vault the note's title paragraph is gone, so the
+  // body's own first line is whatever followed it - and that can legitimately
+  // be a `---` thematic break. The guard below ("a note body can't start this
+  // way") stops being true there, and a note with two such lines would have
+  // real content eaten as an envelope. A real envelope's opening fence is
+  // always followed by YAML, never by another fence or a blank line, which is
+  // enough to tell the two apart.
+  if (options.bodyMayStartWithFence === true && (lines[1] === FENCE || lines[1] === "" || lines[1] === undefined)) {
     return { frontmatter: "", body: text };
   }
 

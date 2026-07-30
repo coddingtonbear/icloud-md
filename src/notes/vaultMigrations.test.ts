@@ -76,9 +76,9 @@ test("writeCloneState stamps the generator so a vault records its engine", () =>
 
 // --- the migration chain itself ------------------------------------------
 //
-// VAULT_MIGRATIONS is empty until a real on-disk change needs one, so the
-// runner is exercised through `runVaultMigrations` against synthetic chains
-// that stand in for the shape a real migration will have.
+// The runner is exercised through `runVaultMigrations` against synthetic
+// chains, so these cover multi-step behaviour the real (currently one-step)
+// chain can't reach on its own. The real chain is covered further down.
 
 function openWithMigrations(
   dir: string,
@@ -185,4 +185,58 @@ test("a gap in the migration chain fails loudly instead of half-migrating", () =
 
     await assert.rejects(() => openWithMigrations(dir, migrations, 4), /bug in icloud-md/);
     assert.equal((await readStateFile(dir)).layoutVersion, 2);
+  }));
+
+// --- the real chain -------------------------------------------------------
+
+test("a version-2 vault migrates forward on first contact, in place", () =>
+  withTempDir(async (dir) => {
+    await writeStateAtVersion(dir, {
+      layoutVersion: 2,
+      syncToken: "token",
+      notes: { "REC-1": { file: "Notes/A.md", recordChangeTag: "t", modificationDate: 1 } },
+    });
+    const described: string[] = [];
+
+    const state = await openVault(dir, { onMigration: (migration) => described.push(migration.describe) });
+
+    assert.equal(state?.layoutVersion, CURRENT_LAYOUT_VERSION);
+    // A pre-mode vault is in-body by definition, and nothing about its files
+    // needs rewriting to say so.
+    assert.equal(state?.titleMode, "in-body");
+    assert.equal(state?.idInFrontmatter, false);
+    assert.equal(state?.notes["REC-1"]?.file, "Notes/A.md", "the vault's contents come through untouched");
+    assert.deepEqual(described, ["recording where this vault keeps note titles"]);
+
+    // Committed to disk, not just to the returned object.
+    assert.equal((await readStateFile(dir)).layoutVersion, CURRENT_LAYOUT_VERSION);
+  }));
+
+test("migrating twice is a no-op the second time", () =>
+  withTempDir(async (dir) => {
+    await writeStateAtVersion(dir, { layoutVersion: 2, syncToken: "token", notes: {} });
+
+    await openVault(dir);
+    const described: string[] = [];
+    await openVault(dir, { onMigration: (migration) => described.push(migration.describe) });
+
+    assert.deepEqual(described, [], "an already-current vault runs no migrations");
+  }));
+
+test("a filename-as-title vault keeps its mode through migration", () =>
+  withTempDir(async (dir) => {
+    // Shouldn't arise in practice (the mode postdates version 3), but the
+    // migration must never clobber a mode it finds already set.
+    await writeStateAtVersion(dir, {
+      layoutVersion: 2,
+      syncToken: "token",
+      notes: {},
+      titleMode: "filename",
+      idInFrontmatter: true,
+    });
+
+    const state = await openVault(dir);
+
+    assert.equal(state?.titleMode, "filename");
+    assert.equal(state?.idInFrontmatter, true);
   }));

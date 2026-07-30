@@ -1,15 +1,20 @@
 import type { CloudKitFieldValue, CloudKitRecord } from "../cloudkit/databaseClient.js";
 import { TRASH_FOLDER_RECORD_NAME } from "./encodeNoteRecord.js";
-import { decodeNoteEmbedSlots, type AttachmentReference, type EmbedSlot } from "./noteAttachments.js";
+import { decodeNoteEmbedSlots, OBJECT_REPLACEMENT_CHARACTER, type AttachmentReference, type EmbedSlot } from "./noteAttachments.js";
 import { decodeNoteFormat, formatsRoundTripEqual, trimTrailingWhitespace, type FormatParagraph } from "./noteFormat.js";
 import { decodeNoteString } from "./noteText.js";
 import { parseNoteMarkdown } from "./parseNoteMarkdown.js";
 import { renderNoteMarkdown } from "./renderNoteMarkdown.js";
+import { splitTitleParagraph } from "./noteTitleParagraph.js";
 import { UNKNOWN_CONTENT_BANNER } from "./unknownContent.js";
 
 export type OkNoteDecodeResult = {
   status: "ok";
   title: string;
+  /** The note's actual first line - what a filename-as-title vault names the
+   * file after. Distinct from `title`, which is Apple's truncated, cosmetic
+   * display metadata. */
+  titleLine: string;
   /** The note's plain visible text - what the CRDT document stores, and
    * what push's text splice operates on. */
   bodyText: string;
@@ -19,8 +24,18 @@ export type OkNoteDecodeResult = {
    * false - an unrenderable note keeps today's plain-text file shape. */
   markdownText: string;
   /** The decoded formatting model behind `markdownText`; undefined exactly
-   * when the fallback above applies. */
+   * when the fallback above applies. Always the *whole* note, including its
+   * title paragraph, even when `titleStripped` says `markdownText` omits it -
+   * push needs the original paragraph to put back. */
   format: FormatParagraph[] | undefined;
+  /**
+   * Whether `markdownText` omits the note's title paragraph, because this
+   * vault carries titles in file names. False in an in-body vault, and also
+   * false for the individual notes a filename-as-title vault can't strip
+   * (a title paragraph containing an embed placeholder) - so callers must
+   * read this rather than assuming from the vault's mode.
+   */
+  titleStripped?: boolean;
   /** One entry per U+FFFC placeholder in `bodyText`, in document order -
    * see `decodeNoteEmbedSlots`. Empty when the embed structure couldn't be
    * mapped (there are no trustworthy slots). */
@@ -43,8 +58,20 @@ export type OkNoteDecodeResult = {
 
 export type NoteDecodeResult = { status: "deleted" } | { status: "unsyncable"; reason: "undecodable" } | OkNoteDecodeResult;
 
+export interface ClassifyNoteOptions {
+  /**
+   * "filename": the vault carries note titles in file names, so
+   * `markdownText` must exclude the note's title paragraph. The round-trip
+   * gate then runs against that *stripped* projection rather than the whole
+   * note - what reaches the file is what has to survive re-parsing, and
+   * removing the first paragraph can change how what follows parses (a body
+   * beginning `5.` being the classic case).
+   */
+  titleMode?: "in-body" | "filename";
+}
+
 /** Shared skip/decode rules used by `clone`, `pull`, and `push` so they can't drift apart. */
-export function classifyNoteRecord(record: CloudKitRecord): NoteDecodeResult {
+export function classifyNoteRecord(record: CloudKitRecord, options: ClassifyNoteOptions = {}): NoteDecodeResult {
   if (isDeleted(record)) {
     return { status: "deleted" };
   }
@@ -66,6 +93,11 @@ export function classifyNoteRecord(record: CloudKitRecord): NoteDecodeResult {
   }
 
   const title = decodeTitleField(record.fields.TitleEncrypted);
+  // The note's real first line, as distinct from `title`: TitleEncrypted is
+  // cosmetic display metadata that devices re-derive and that Apple truncates
+  // at ~76 characters, so it's the wrong thing to name a file after when the
+  // file name has to carry the title faithfully.
+  const titleLine = bodyText.split("\n")[0] ?? "";
   const embedSlots = decodeNoteEmbedSlots(compressed);
   if (embedSlots === undefined) {
     // The embed structure defies the model verified against real captures
@@ -76,6 +108,7 @@ export function classifyNoteRecord(record: CloudKitRecord): NoteDecodeResult {
     return {
       status: "ok",
       title,
+      titleLine,
       bodyText: UNKNOWN_CONTENT_BANNER + bodyText,
       markdownText: UNKNOWN_CONTENT_BANNER + bodyText,
       format: undefined,
@@ -87,7 +120,7 @@ export function classifyNoteRecord(record: CloudKitRecord): NoteDecodeResult {
   }
 
   const attachments = embedSlots.filter((slot): slot is EmbedSlot & { kind: "attachment" } => slot.kind === "attachment").map((slot) => slot.ref);
-  const base = { status: "ok" as const, title, bodyText, embedSlots, attachments };
+  const base = { status: "ok" as const, title, titleLine, bodyText, embedSlots, attachments };
 
   // Step 2's round-trip gate: the note renders to markdown only if parsing
   // that markdown back reproduces both the exact text and the formatting
@@ -103,14 +136,36 @@ export function classifyNoteRecord(record: CloudKitRecord): NoteDecodeResult {
       unpublishableReason: format.reason,
     };
   }
-  const rendered = renderNoteMarkdown(format.paragraphs);
+  // What actually reaches the file: the whole note, or - in a
+  // filename-as-title vault - the note without its title paragraph. The gate
+  // below runs on whichever it is, because that projection is what has to
+  // survive being re-parsed on the way back up.
+  const titleParagraph = format.paragraphs[0];
+  const stripTitle =
+    options.titleMode === "filename" &&
+    titleParagraph !== undefined &&
+    // A title paragraph holding an embed placeholder can't be stripped: the
+    // attachment reference would be orphaned, with no file to carry it. Such
+    // a note keeps its title in the body, which is lossless if inconsistent.
+    !titleParagraph.text.includes(OBJECT_REPLACEMENT_CHARACTER);
+  const projected = stripTitle ? splitTitleParagraph(format.paragraphs).body : format.paragraphs;
+
+  // A title-only note projects to nothing at all, and an empty projection
+  // can't be round-tripped: parsing "" yields one empty paragraph rather than
+  // zero, so the gate would fail a note that is perfectly fine. The empty
+  // file *is* the faithful projection here - the title lives in its name.
+  if (stripTitle && projected.length === 0) {
+    return { ...base, markdownText: "", format: format.paragraphs, titleStripped: true, publishable: true };
+  }
+
+  const rendered = renderNoteMarkdown(projected);
   const reparsed = parseNoteMarkdown(rendered);
   // The reparse must reproduce the *projected* text: trailing whitespace is
   // outside the projection (`trimTrailingWhitespace`), so the raw bodyText
   // may carry trailing spaces the rendered file deliberately drops - a push
   // then deletes them remotely rather than the note going read-only here.
-  const projectedText = format.paragraphs.map((paragraph) => trimTrailingWhitespace(paragraph).text).join("\n");
-  if (reparsed.status !== "ok" || reparsed.text !== projectedText || !formatsRoundTripEqual(format.paragraphs, reparsed.paragraphs)) {
+  const projectedText = projected.map((paragraph) => trimTrailingWhitespace(paragraph).text).join("\n");
+  if (reparsed.status !== "ok" || reparsed.text !== projectedText || !formatsRoundTripEqual(projected, reparsed.paragraphs)) {
     return {
       ...base,
       markdownText: bodyText,
@@ -120,7 +175,7 @@ export function classifyNoteRecord(record: CloudKitRecord): NoteDecodeResult {
     };
   }
 
-  return { ...base, markdownText: rendered, format: format.paragraphs, publishable: true };
+  return { ...base, markdownText: rendered, format: format.paragraphs, titleStripped: stripTitle, publishable: true };
 }
 
 function isDeleted(record: CloudKitRecord): boolean {

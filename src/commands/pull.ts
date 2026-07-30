@@ -18,7 +18,7 @@ import {
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { isEnoent } from "../fsUtil.js";
-import { noteFileName, uniqueFileName } from "../notes/filename.js";
+import { noteFileNameFor, uniqueFileName } from "../notes/filename.js";
 import { joinFrontmatter, splitFrontmatter } from "../notes/frontmatter.js";
 import { buildVaultLayout, noteDirOf, placeNote, previousLayoutDirs, type SharedZoneRecords } from "../notes/folderLayout.js";
 import { reconcileNotePlacements, removeStaleDirs } from "../notes/folderReconcile.js";
@@ -95,6 +95,7 @@ export async function runPull(
     throw new NotClonedDirectoryError(targetDir);
   }
   const idInFrontmatter = state.idInFrontmatter === true;
+  const titleMode = state.titleMode === "filename" ? "filename" : "in-body";
 
   const auth = await resolveFolderAccount(targetDir, state.account, { onStatus: onLoginStatus });
   if (!auth.ckdatabasewsUrl) {
@@ -206,7 +207,7 @@ export async function runPull(
         }
 
         const existing = notes[record.recordName];
-        const decoded = classifyNoteRecord(record);
+        const decoded = classifyNoteRecord(record, { titleMode });
 
         if (decoded.status === "deleted") {
           // A note this tool soft-deleted stays in the trash registry until
@@ -323,7 +324,7 @@ export async function runPull(
 
         if (!existing) {
           const usedInDir = usedNamesFor(usedFileNames, noteDir);
-          const fileName = uniqueFileName(noteFileName(decoded.title), usedInDir);
+          const fileName = uniqueFileName(noteFileNameFor(decoded.titleLine, titleMode), usedInDir);
           usedInDir.add(fileName);
           const relativeFile = path.posix.join(noteDir, fileName);
 
@@ -474,6 +475,8 @@ export async function runPull(
     // the vault's replica identity on every pull, forcing the next push to
     // mint a fresh replica.
     replicaId: state.replicaId,
+    idInFrontmatter: state.idInFrontmatter,
+    titleMode: state.titleMode,
     notes,
     folders: layout.stateFolders,
     sharerHomes: layout.stateSharerHomes,

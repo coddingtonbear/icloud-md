@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { CorruptStateFileError, UnsupportedVaultLayoutError } from "../errors.js";
-import { readCloneState, writeCloneState, type CloneState } from "./cloneState.js";
+import { CURRENT_LAYOUT_VERSION, readCloneState, writeCloneState, type CloneState } from "./cloneState.js";
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), "clonestate-test-"));
@@ -126,7 +126,7 @@ test("throws CorruptStateFileError for a malformed account field", () =>
     await mkdir(stateDir, { recursive: true });
     await writeFile(
       path.join(stateDir, "state.json"),
-      JSON.stringify({ layoutVersion: 2, notes: {}, account: { appleId: "me@example.com" } }),
+      JSON.stringify({ layoutVersion: CURRENT_LAYOUT_VERSION, notes: {}, account: { appleId: "me@example.com" } }),
       "utf-8",
     );
 
@@ -166,7 +166,7 @@ test("throws CorruptStateFileError for a malformed table attachment entry", () =
     await mkdir(stateDir, { recursive: true });
     await writeFile(
       path.join(stateDir, "state.json"),
-      JSON.stringify({ layoutVersion: 2, notes: {}, tableAttachments: { "ATT-1": {} } }),
+      JSON.stringify({ layoutVersion: CURRENT_LAYOUT_VERSION, notes: {}, tableAttachments: { "ATT-1": {} } }),
       "utf-8",
     );
 
@@ -227,7 +227,7 @@ test("throws CorruptStateFileError for a malformed folder entry", () =>
     await mkdir(stateDir, { recursive: true });
     await writeFile(
       path.join(stateDir, "state.json"),
-      JSON.stringify({ layoutVersion: 2, notes: {}, folders: { "FOLDER-1": { name: "Recipes" } } }),
+      JSON.stringify({ layoutVersion: CURRENT_LAYOUT_VERSION, notes: {}, folders: { "FOLDER-1": { name: "Recipes" } } }),
       "utf-8",
     );
 
@@ -262,7 +262,7 @@ test("throws CorruptStateFileError for a malformed trashed entry", () =>
     await mkdir(stateDir, { recursive: true });
     await writeFile(
       path.join(stateDir, "state.json"),
-      JSON.stringify({ layoutVersion: 2, notes: {}, trashed: { "REC-1": { file: "Gone.md" } } }),
+      JSON.stringify({ layoutVersion: CURRENT_LAYOUT_VERSION, notes: {}, trashed: { "REC-1": { file: "Gone.md" } } }),
       "utf-8",
     );
 

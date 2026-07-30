@@ -81,3 +81,44 @@ test("join re-attaches a preserved envelope above a freshly rendered body", () =
 test("join with no frontmatter is just the body", () => {
   assert.equal(joinFrontmatter("", "# Title"), "# Title");
 });
+
+// --- filename-as-title bodies ---------------------------------------------
+//
+// With the title paragraph gone, a file starts at the note's second
+// paragraph - which can legitimately be a `---` thematic break. Without the
+// guard, a note containing two of them has real content eaten as an envelope.
+
+test("a body opening with a thematic break is not mistaken for frontmatter", () => {
+  const text = "---\n\nSome prose\n\n---\n\nMore prose";
+
+  const split = splitFrontmatter(text, { bodyMayStartWithFence: true });
+
+  assert.equal(split.frontmatter, "");
+  assert.equal(split.body, text);
+});
+
+test("two adjacent thematic breaks stay in the body", () => {
+  const text = "---\n---\nprose";
+
+  const split = splitFrontmatter(text, { bodyMayStartWithFence: true });
+
+  assert.equal(split.frontmatter, "");
+  assert.equal(split.body, text);
+});
+
+test("a real envelope is still recognized in a filename-as-title vault", () => {
+  const text = "---\napple-note-id: 089D915D-C76E-4F44-AB80-2190073281A3\n---\n\nBody";
+
+  const split = splitFrontmatter(text, { bodyMayStartWithFence: true });
+
+  assert.match(split.frontmatter, /apple-note-id/);
+  assert.equal(split.body, "Body");
+});
+
+test("without the option, the original behaviour is unchanged", () => {
+  // The in-body vault's guarantee: a note body genuinely can't start with a
+  // thematic break there, because the title paragraph comes first.
+  const text = "---\n\nSome prose\n\n---\n\nMore prose";
+
+  assert.notEqual(splitFrontmatter(text).frontmatter, "");
+});
