@@ -1,4 +1,5 @@
 import type { CloudKitFieldValue, CloudKitRecord } from "../cloudkit/databaseClient.js";
+import type { TitleMode } from "./cloneState.js";
 import { TRASH_FOLDER_RECORD_NAME } from "./encodeNoteRecord.js";
 import { decodeNoteEmbedSlots, OBJECT_REPLACEMENT_CHARACTER, type AttachmentReference, type EmbedSlot } from "./noteAttachments.js";
 import { decodeNoteFormat, formatsRoundTripEqual, trimTrailingWhitespace, type FormatParagraph } from "./noteFormat.js";
@@ -67,7 +68,7 @@ export interface ClassifyNoteOptions {
    * removing the first paragraph can change how what follows parses (a body
    * beginning `5.` being the classic case).
    */
-  titleMode?: "in-body" | "filename";
+  titleMode?: TitleMode;
 }
 
 /** Shared skip/decode rules used by `clone`, `pull`, and `push` so they can't drift apart. */

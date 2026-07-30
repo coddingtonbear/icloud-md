@@ -30,7 +30,9 @@
  * everything it can from a fresh fetch.
  */
 
+import path from "node:path";
 import { PLAIN_STYLE, type FormatParagraph } from "./noteFormat.js";
+import { decodeTitleStem } from "./titleFilename.js";
 
 export interface SplitTitleParagraph {
   /** The note's first paragraph - its title. Undefined only for a note with
@@ -73,6 +75,38 @@ export function restoreTitleParagraph(
     offset += paragraph.text.length + 1;
   }
   return paragraphs;
+}
+
+/**
+ * `restoreTitleParagraph` plus the plain text the rebuilt model projects to -
+ * the pair every push site needs, since the text drives the CRDT splice and
+ * the paragraphs drive the formatting reconciler, and the two must describe
+ * the same note or the reconciler restyles the wrong characters.
+ *
+ * The join mirrors `parseNoteMarkdown`'s own `text`, which is what makes the
+ * result indistinguishable from having parsed a file that still had its
+ * title in it.
+ */
+export function restoreTitleParagraphText(
+  title: FormatParagraph,
+  body: readonly FormatParagraph[],
+): { text: string; paragraphs: FormatParagraph[] } {
+  const paragraphs = restoreTitleParagraph(title, body);
+  return { text: paragraphs.map((paragraph) => paragraph.text).join("\n"), paragraphs };
+}
+
+/**
+ * The title a note's file name carries in a filename-as-title vault.
+ *
+ * Note what this is *not* used for: deciding an unrenamed note's title.
+ * A file name can be a lossy record of the title it was derived from - pull's
+ * collision uniquifier appends " 2", and a future `apple-note-title` covers
+ * the titles a name can't hold at all - so push only ever reads a title back
+ * out of a name the user has just *changed*, where the name is the
+ * instruction. Everywhere else the live remote paragraph is authoritative.
+ */
+export function titleFromNoteFileName(file: string): string {
+  return decodeTitleStem(path.posix.basename(file, ".md"));
 }
 
 /**

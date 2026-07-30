@@ -15,7 +15,7 @@ import {
   type RecordUpdate,
 } from "../cloudkit/databaseClient.js";
 import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
-import { writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
+import { writeCloneState, type CloneState, type CloneStateNoteEntry, type TitleMode } from "../notes/cloneState.js";
 import { openVault } from "../notes/vaultMigrations.js";
 import { NOTE_ID_KEY, readNoteId, setNoteId } from "../notes/noteIdFrontmatter.js";
 import { resolveNoteIds } from "../notes/noteIdPairing.js";
@@ -36,6 +36,12 @@ import { decodeNoteFormat, formatsRoundTripEqual, type FormatParagraph } from ".
 import { compressNoteDocument, decodeNoteBodyText, decodeNoteString, decompressNoteDocument } from "../notes/noteText.js";
 import { joinFrontmatter, splitFrontmatter } from "../notes/frontmatter.js";
 import { parseNoteMarkdown } from "../notes/parseNoteMarkdown.js";
+import {
+  restoreTitleParagraphText,
+  splitTitleParagraph,
+  titleFromNoteFileName,
+  titleParagraphFromFilename,
+} from "../notes/noteTitleParagraph.js";
 import { reconcileNoteFormat } from "../notes/formatReconcile.js";
 import { prepareTableAttachmentUpdate } from "../notes/tablePushEdit.js";
 import { historyRecordNames } from "../notes/trackedFile.js";
@@ -186,6 +192,13 @@ export async function buildPushPlan(
 
   const entries: ExecutablePlanEntry[] = [];
   const dirIndex = stateDirIndex(state);
+  // In a filename-as-title vault every working file holds the note's *body*
+  // only, so every path from local markdown to a note document has to put the
+  // title paragraph back before the text is spliced or the formatting
+  // reconciled - see `restoreStrippedTitle` (the update and embed paths),
+  // the create path's own reconstruction, and `prepareRetitle` for the
+  // rename that changes a title rather than restoring one.
+  const titleMode = state.titleMode === "filename" ? "filename" : "in-body";
   // Set when planning itself rewrites tracked state (the eager remote-merge
   // path advances recordChangeTags); the plan must then be persisted even by
   // callers that never execute anything (`status`, an all-conflict `push`) -
@@ -238,7 +251,11 @@ export async function buildPushPlan(
       });
       continue;
     }
-    if (localText === "") {
+    // An empty file means different things in the two vault shapes: in-body
+    // it's a note with nothing left at all, but under filename-as-title it's
+    // the ordinary title-only note (the title is in the name), so the note
+    // that gets built is not empty and there is nothing to refuse.
+    if (localText === "" && titleMode !== "filename") {
       entries.push({
         kind: "update",
         file: entry.file,
@@ -410,9 +427,24 @@ export async function buildPushPlan(
   // Classify each pair's target locally; only moves into a real own folder
   // ever need the network. Everything else resolves to a refusal right
   // here, so `status` can show it without a login.
-  const readyMovePairs: Array<{ recordName: string; entry: CloneStateNoteEntry; toFile: string; folderRecordName: string }> = [];
+  const readyMovePairs: Array<{
+    recordName: string;
+    entry: CloneStateNoteEntry;
+    toFile: string;
+    folderRecordName: string;
+    /** Whether the file changed *directory*, as opposed to only changing
+     * name - the half of a pair that has a remote counterpart, since a
+     * note's folder is a real field and its file name is not. */
+    relocated: boolean;
+    /** The note's new title, when this pair renamed the file in a vault
+     * where the file name *is* the title. Undefined for a pure relocation
+     * (and for every in-body vault), where a file name means nothing
+     * remotely and the move is metadata-only. */
+    newTitle?: string | undefined;
+  }> = [];
   for (const pair of movePairs) {
     const toDir = noteDirOf(pair.toFile);
+    const relocated = toDir !== noteDirOf(pair.entry.file);
     const info = dirIndex.get(toDir);
     const base: ExecutablePlanEntry = { kind: "move", file: pair.toFile, previousFile: pair.entry.file, resolution: "refused" };
 
@@ -445,10 +477,14 @@ export async function buildPushPlan(
       entries.push({ ...base, reason: "moved into a sharer's area - notes can't be moved into someone else's share" });
       continue;
     }
+    // Only a change of *directory* has to relocate anything: attachments
+    // live in an `attachments/` directory per folder, named after the
+    // attachment rather than the note, so a rename in place leaves every
+    // attachment file exactly where its note's links already point.
     const hasTrackedAttachments = Object.values(state.attachments ?? {}).some(
       (attachment) => attachment.noteRecordName === pair.recordName,
     );
-    if (hasTrackedAttachments) {
+    if (relocated && hasTrackedAttachments) {
       entries.push({
         ...base,
         reason:
@@ -457,7 +493,22 @@ export async function buildPushPlan(
       });
       continue;
     }
-    readyMovePairs.push({ ...pair, folderRecordName: info.folderRecordName as string });
+    // Under filename-as-title a rename is a retitle, and it has to be sent:
+    // the file name is the only local record of the title, so leaving it
+    // unsent would let the next pull quietly restore the old name.
+    // Deliberately compared against the *state-recorded* path rather than a
+    // title re-derived from the note, so that pull's collision uniquifier
+    // (which is why a note can sit at "Foo 2.md" while being titled "Foo")
+    // never leaks into a title.
+    const previousTitle = titleFromNoteFileName(pair.entry.file);
+    const newTitle = titleFromNoteFileName(pair.toFile);
+    const retitled = titleMode === "filename" && newTitle !== previousTitle;
+    readyMovePairs.push({
+      ...pair,
+      folderRecordName: info.folderRecordName as string,
+      relocated,
+      newTitle: retitled ? newTitle : undefined,
+    });
   }
 
   // --- Classify the remaining untracked files by where they sit. Every
@@ -516,7 +567,10 @@ export async function buildPushPlan(
       });
       continue;
     }
-    if (localText === "") {
+    // Empty means "nothing to create" only in an in-body vault; under
+    // filename-as-title the file name still carries a title, and an empty
+    // body is how a one-line note looks on disk.
+    if (localText === "" && titleMode !== "filename") {
       entries.push({ kind: "create", file, resolution: "refused", reason: "the file is empty - nothing to create" });
       continue;
     }
@@ -609,8 +663,19 @@ export async function buildPushPlan(
     }
   }
 
+  // Every write below builds CRDT operations, which need this clone's own
+  // replica identity - moves included now that one can carry a retitle.
+  const replicaId = state.replicaId ?? randomBytes(16).toString("base64");
+  state.replicaId = replicaId;
+  const replicaIdBytes = new Uint8Array(Buffer.from(replicaId, "base64"));
+  if (replicaIdBytes.length !== 16) {
+    throw new CorruptStateFileError("state.json has a malformed replicaId (expected 16 bytes, base64-encoded)");
+  }
+
   // --- Local moves: push a Folder-reference update - the exact write shape
-  // trash-move deletion already uses live, pointed at a real folder.
+  // trash-move deletion already uses live, pointed at a real folder - plus,
+  // in a filename-as-title vault, the note-text update that carries the new
+  // title when the file was renamed rather than relocated.
   for (const pair of readyMovePairs) {
     const base: ExecutablePlanEntry = { kind: "move", file: pair.toFile, previousFile: pair.entry.file, resolution: "refused" };
     const record = recordsByName.get(pair.recordName);
@@ -623,30 +688,77 @@ export async function buildPushPlan(
       continue;
     }
 
+    // Built during planning, like every other write, so `status` shows a
+    // retitle that can't be applied as a refusal instead of discovering it
+    // mid-push. Undefined when the pair is a plain relocation.
+    let retitle: { payloadBase64: string; plainText: string } | undefined;
+    if (pair.newTitle !== undefined) {
+      const prepared = prepareRetitle(record, pair, replicaIdBytes, titleMode);
+      if (!prepared.ok) {
+        entries.push({ ...base, resolution: prepared.resolution, reason: prepared.reason });
+        continue;
+      }
+      retitle = prepared.retitle;
+    }
+
     const folderRecordName = pair.folderRecordName;
     entries.push({
       ...base,
       resolution: "ready",
       execute: async () => {
-        const result = await updateNoteRecord(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, {
-          recordName: pair.recordName,
-          recordChangeTag: record.recordChangeTag ?? "",
-          fields: buildNoteMoveFields(record, folderRecordName, Date.now()),
-          parentRecordName: record.parentRecordName,
-        });
-        if (!result.ok) {
-          const detail = result.reason ? ` (${result.reason})` : "";
-          return { succeeded: false, message: `${pair.toFile}: server rejected the move: ${result.serverErrorCode}${detail}` };
+        const modify = async (
+          fields: Record<string, { value: unknown }>,
+          recordChangeTag: string,
+        ): Promise<CloudKitRecord | { failure: string }> => {
+          const result = await updateNoteRecord(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, {
+            recordName: pair.recordName,
+            recordChangeTag,
+            fields,
+            parentRecordName: record.parentRecordName,
+          });
+          if (!result.ok) {
+            const detail = result.reason ? ` (${result.reason})` : "";
+            return { failure: `${result.serverErrorCode}${detail}` };
+          }
+          return result.record;
+        };
+
+        // The relocation goes first when there are two writes: it leaves the
+        // note findable in the folder the user put it in, and a retitle that
+        // then fails is re-planned (and re-sent) by the next push, since
+        // tracked state only advances once both halves are through. The
+        // reverse order would strand a note under its new title in its old
+        // folder, which reads like the tool did nothing.
+        let current = record;
+        if (pair.relocated || retitle === undefined) {
+          const moved = await modify(buildNoteMoveFields(current, folderRecordName, Date.now()), current.recordChangeTag ?? "");
+          if ("failure" in moved) {
+            return { succeeded: false, message: `${pair.toFile}: server rejected the move: ${moved.failure}` };
+          }
+          current = moved;
         }
+        if (retitle !== undefined) {
+          // Freshly against whatever the record now is: a preceding
+          // relocation both advanced the change tag and is what the echoed
+          // Folder reference has to come from.
+          const fields = buildNoteUpdateFields(current, retitle.payloadBase64, retitle.plainText, Date.now());
+          const retitled = await modify(fields, current.recordChangeTag ?? "");
+          if ("failure" in retitled) {
+            return { succeeded: false, message: `${pair.toFile}: server rejected the retitle: ${retitled.failure}` };
+          }
+          current = retitled;
+        }
+
         state.notes[pair.recordName] = {
           ...pair.entry,
           file: pair.toFile,
           folderRecordName,
-          recordChangeTag: result.record.recordChangeTag ?? "",
-          modificationDate: modificationDateOf(result.record) || Date.now(),
+          recordChangeTag: current.recordChangeTag ?? "",
+          modificationDate: modificationDateOf(current) || Date.now(),
         };
-        await applyNoteFileTimes(path.join(targetDir, pair.toFile), result.record);
-        return { succeeded: true, message: `Moved ${pair.entry.file} -> ${pair.toFile}` };
+        await applyNoteFileTimes(path.join(targetDir, pair.toFile), current);
+        const what = retitle === undefined ? "Moved" : pair.relocated ? "Moved and retitled" : "Retitled";
+        return { succeeded: true, message: `${what} ${pair.entry.file} -> ${pair.toFile}` };
       },
     });
   }
@@ -717,13 +829,6 @@ export async function buildPushPlan(
     });
   }
 
-  const replicaId = state.replicaId ?? randomBytes(16).toString("base64");
-  state.replicaId = replicaId;
-  const replicaIdBytes = new Uint8Array(Buffer.from(replicaId, "base64"));
-  if (replicaIdBytes.length !== 16) {
-    throw new CorruptStateFileError("state.json has a malformed replicaId (expected 16 bytes, base64-encoded)");
-  }
-
   for (const { file, localText, folderRecordName, sharedZoneOwner } of createCandidates) {
     // The document is built and decode-verified during planning (not at
     // execute time) so `status` shows a build failure as a refusal, with
@@ -739,8 +844,17 @@ export async function buildPushPlan(
         entries.push({ kind: "create", file, resolution: "refused", reason: parsed.reason });
         continue;
       }
-      const doc = buildInitialNoteDocument(parsed.text, replicaIdBytes);
-      const reconciled = reconcileNoteFormat(doc, parsed.paragraphs, replicaIdBytes);
+      // A brand-new note has no remote paragraph to preserve, so under
+      // filename-as-title its title can only come from the file name - and
+      // does, in plain Title style. Everything downstream (the built
+      // document, the verification, and `plainText`) has to see the
+      // reconstructed note rather than the body it was parsed from.
+      const desired =
+        titleMode === "filename"
+          ? restoreTitleParagraphText(titleParagraphFromFilename(titleFromNoteFileName(file)), parsed.paragraphs)
+          : parsed;
+      const doc = buildInitialNoteDocument(desired.text, replicaIdBytes);
+      const reconciled = reconcileNoteFormat(doc, desired.paragraphs, replicaIdBytes);
       if (!reconciled.ok) {
         entries.push({ kind: "create", file, resolution: "refused", reason: reconciled.reason });
         continue;
@@ -749,9 +863,9 @@ export async function buildPushPlan(
       const rebuiltString = decodeNoteString(compressed);
       const rebuiltFormat = decodeNoteFormat(rebuiltString.string, rebuiltString.attributeRun);
       if (
-        rebuiltString.string !== parsed.text ||
+        rebuiltString.string !== desired.text ||
         rebuiltFormat.status !== "ok" ||
-        !formatsRoundTripEqual(rebuiltFormat.paragraphs, parsed.paragraphs)
+        !formatsRoundTripEqual(rebuiltFormat.paragraphs, desired.paragraphs)
       ) {
         entries.push({
           kind: "create",
@@ -762,7 +876,7 @@ export async function buildPushPlan(
         continue;
       }
       payloadBase64 = compressed.toString("base64");
-      plainText = parsed.text;
+      plainText = desired.text;
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       entries.push({ kind: "create", file, resolution: "refused", reason: message });
@@ -864,7 +978,12 @@ export async function buildPushPlan(
     }
 
     if ((record.recordChangeTag ?? "") !== entry.recordChangeTag) {
-      const classified = classifyNoteRecord(record);
+      // Classified in the vault's own shape: the merge below diff3s the
+      // remote rendering against the working file, and under
+      // filename-as-title that file has no title line - merging against a
+      // rendering that still had one would show the title as an insertion in
+      // every note.
+      const classified = classifyNoteRecord(record, { titleMode });
       // An embed-bearing note can't be eagerly merged here: its raw body
       // text carries U+FFFC placeholders where the local file has rendered
       // tables/links/markers, so a diff3 against it would write placeholder
@@ -912,6 +1031,7 @@ export async function buildPushPlan(
       trackedFileAttachmentIds,
       replicaIdBytes,
       modificationDateMs,
+      titleMode,
       summary,
     );
     if (!prepared) {
@@ -1163,9 +1283,13 @@ async function prepareUpdate(
   trackedFileAttachmentIds: ReadonlySet<string>,
   replicaId: Uint8Array,
   modificationDateMs: number,
+  titleMode: TitleMode,
   summary: PushSummary,
 ): Promise<PreparedCandidate | undefined> {
-  const classified = classifyNoteRecord(record);
+  // The mode has to reach the classifier, not just this function: it decides
+  // whether `markdownText` (which the local file is a copy of) omits the
+  // title, and the round-trip gate has to run on that same projection.
+  const classified = classifyNoteRecord(record, { titleMode });
   if (classified.status !== "ok") {
     const reason = classified.status === "unsyncable" ? classified.reason : classified.status;
     summary.refused.push(`${entry.file}: remote note is no longer safely editable (${reason})`);
@@ -1202,7 +1326,11 @@ async function prepareUpdate(
     summary.refused.push(`${entry.file}: ${parsed.reason}. Run "icloud-md restore ${entry.file}" to discard your local edit.`);
     return undefined;
   }
-  const textUpdate = prepareNoteTextUpdate(record, classified.bodyText, parsed, classified.embedSlots, replicaId, entry, summary);
+  const desired = restoreStrippedTitle(classified, parsed, entry, summary);
+  if (!desired) {
+    return undefined;
+  }
+  const textUpdate = prepareNoteTextUpdate(record, classified.bodyText, desired, classified.embedSlots, replicaId, entry, summary);
   if (!textUpdate) {
     return undefined;
   }
@@ -1211,7 +1339,7 @@ async function prepareUpdate(
     // notation, not content) - nothing to send.
     return { updates: [], noteTextUpdated: false };
   }
-  const fields = buildNoteUpdateFields(record, textUpdate.payloadBase64, parsed.text, modificationDateMs);
+  const fields = buildNoteUpdateFields(record, textUpdate.payloadBase64, desired.text, modificationDateMs);
   return {
     updates: [noteRecordUpdate(record, entry, fields)],
     noteTextUpdated: true,
@@ -1255,6 +1383,16 @@ async function prepareEmbedCandidate(
   const parsed = parseNoteMarkdown(plan.reconstructedBodyText);
   if (parsed.status !== "ok") {
     summary.refused.push(`${entry.file}: ${parsed.reason}. Run "icloud-md restore ${entry.file}" to discard your local edit.`);
+    return undefined;
+  }
+  // Easy to miss and silently corrupting if it is: that reconstruction is
+  // relative to the *whole* note, so the title has to be back in place
+  // before any offset into it is computed - the splice that carries the
+  // prose edit, and the attributeRun ranges the reconciler addresses. (The
+  // slots themselves are unaffected: a note whose title paragraph holds a
+  // placeholder is never stripped, so every slot is in the body either way.)
+  const desired = restoreStrippedTitle(classified, parsed, entry, summary);
+  if (!desired) {
     return undefined;
   }
 
@@ -1319,12 +1457,12 @@ async function prepareEmbedCandidate(
 
   let noteTextUpdated = false;
   if (plan.reconstructedBodyText !== classified.markdownText) {
-    const textUpdate = prepareNoteTextUpdate(record, classified.bodyText, parsed, classified.embedSlots, replicaId, entry, summary);
+    const textUpdate = prepareNoteTextUpdate(record, classified.bodyText, desired, classified.embedSlots, replicaId, entry, summary);
     if (!textUpdate) {
       return undefined;
     }
     if (textUpdate.status === "ok") {
-      const fields = buildNoteUpdateFields(record, textUpdate.payloadBase64, parsed.text, modificationDateMs);
+      const fields = buildNoteUpdateFields(record, textUpdate.payloadBase64, desired.text, modificationDateMs);
       updates.unshift(noteRecordUpdate(record, entry, fields));
       noteTextUpdated = true;
     }
@@ -1339,6 +1477,128 @@ async function prepareEmbedCandidate(
     return { updates: [], noteTextUpdated: false };
   }
   return { updates, noteTextUpdated };
+}
+
+/**
+ * Builds the note-text payload that carries a renamed file's new title.
+ *
+ * Only the title paragraph changes: the body is taken from the *remote*
+ * record verbatim, not from the renamed file. A move pair has never pushed
+ * the file's contents (an edit made in the same breath as a rename lands on
+ * the next push, once the note is tracked at its new path), and keeping that
+ * true here means a retitle is the single smallest edit that can express
+ * itself - which is also what keeps it clear of every U+FFFC placeholder in
+ * the body.
+ *
+ * `retitle` comes back undefined when the note already has this title, which
+ * is how renaming `Foo 2.md` (pull's collision spelling of a note genuinely
+ * titled "Foo") back to `Foo.md` resolves: the local name catches up, and
+ * nothing is sent.
+ */
+export function prepareRetitle(
+  record: CloudKitRecord,
+  pair: { entry: CloneStateNoteEntry; toFile: string; newTitle?: string | undefined },
+  replicaId: Uint8Array,
+  titleMode: TitleMode,
+):
+  | { ok: true; retitle: { payloadBase64: string; plainText: string } | undefined }
+  | { ok: false; resolution: "refused" | "conflict"; reason: string } {
+  const refused = (reason: string): { ok: false; resolution: "refused"; reason: string } => ({
+    ok: false,
+    resolution: "refused",
+    reason: `${reason} - rename the file back to ${path.posix.basename(pair.entry.file)}, or retitle the note in Notes instead`,
+  });
+
+  const classified = classifyNoteRecord(record, { titleMode });
+  if (classified.status !== "ok") {
+    const detail = classified.status === "unsyncable" ? classified.reason : classified.status;
+    return refused(`renaming this note would retitle it, but the note is no longer safely editable (${detail})`);
+  }
+  if (!classified.publishable) {
+    return refused(
+      `renaming this note would retitle it, but this note ${classified.unpublishableReason ?? "contains content this tool can't parse"}`,
+    );
+  }
+  if (classified.titleStripped !== true || classified.format === undefined) {
+    // The one note a filename-as-title vault leaves title-in-body: its title
+    // paragraph holds an embed placeholder, so the file name never carried
+    // the title and renaming the file didn't express one.
+    return refused("this note's title contains an embedded object, so its file name doesn't carry the title");
+  }
+
+  const { title, body } = splitTitleParagraph(classified.format);
+  if (title?.text === pair.newTitle) {
+    // The name changed but the title it spells didn't - renaming `Foo 2.md`
+    // (pull's collision spelling) to `Foo.md` is the local name catching up
+    // with a note genuinely titled "Foo". Short-circuited on the title's
+    // *text* rather than left to the payload comparison below, because
+    // rebuilding the paragraph would also restyle it, and this is a rename
+    // that expresses no new title at all.
+    return { ok: true, retitle: undefined };
+  }
+
+  const desired = restoreTitleParagraphText(titleParagraphFromFilename(pair.newTitle ?? ""), body);
+  // The refusals `prepareNoteTextUpdate` records name the file and advise
+  // `restore`, which is the wrong advice for a rename; the detail is still
+  // worth keeping, so it's re-framed rather than re-worded.
+  const summary: PushSummary = { conflicts: [], refused: [] };
+  const textUpdate = prepareNoteTextUpdate(
+    record,
+    classified.bodyText,
+    desired,
+    classified.embedSlots,
+    replicaId,
+    { ...pair.entry, file: pair.toFile },
+    summary,
+  );
+  if (!textUpdate) {
+    const conflict = summary.conflicts[0];
+    if (conflict !== undefined) {
+      return { ok: false, resolution: "conflict", reason: conflict };
+    }
+    const detail = (summary.refused[0] ?? "the new title couldn't be applied").replace(`${pair.toFile}: `, "");
+    return refused(`renaming this note would retitle it, but ${detail}`);
+  }
+  if (textUpdate.status === "unchanged") {
+    return { ok: true, retitle: undefined };
+  }
+  return { ok: true, retitle: { payloadBase64: textUpdate.payloadBase64, plainText: desired.text } };
+}
+
+/**
+ * Puts a note's title paragraph back in front of a body-only local parse,
+ * for the vault shape that keeps titles in file names. A no-op - the parse
+ * handed straight back - whenever the working file already carries its own
+ * title, which covers every in-body vault and the individual notes a
+ * filename-as-title vault can't strip.
+ *
+ * The title comes from the live remote record, style and inline runs intact,
+ * and deliberately *not* from the file name. A file name is a lossy record
+ * of the title it was derived from - pull's collision uniquifier turns a
+ * second "Foo" into `Foo 2.md`, and a title too long for a name will land in
+ * `apple-note-title` - so re-deriving one here would rewrite the titles of
+ * notes nobody touched. The file name only becomes authoritative when the
+ * user *changes* it, and that arrives as a move pair rather than as an
+ * update to the file in place.
+ */
+export function restoreStrippedTitle(
+  classified: OkNoteRecordResult,
+  parsed: { text: string; paragraphs: FormatParagraph[] },
+  entry: CloneStateNoteEntry,
+  summary: PushSummary,
+): { text: string; paragraphs: FormatParagraph[] } | undefined {
+  if (classified.titleStripped !== true) {
+    return parsed;
+  }
+  // `format` is defined for anything publishable, which every caller has
+  // already gated on; the guard keeps that an assertion rather than a cast,
+  // since guessing at a missing title would push a note's body up into it.
+  const title = classified.format?.[0];
+  if (title === undefined) {
+    summary.refused.push(`${entry.file}: the remote note has no title paragraph to restore - refusing to edit`);
+    return undefined;
+  }
+  return restoreTitleParagraphText(title, parsed.paragraphs);
 }
 
 function noteRecordUpdate(record: CloudKitRecord, entry: CloneStateNoteEntry, fields: Record<string, { value: unknown }>): RecordUpdate {

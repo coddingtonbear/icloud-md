@@ -110,6 +110,11 @@ export interface CloneStateAccount {
   dsid: string;
 }
 
+/** Where a vault carries its note titles - see `CloneState.titleMode`, which
+ * is the only place the value is decided. Named here rather than spelled out
+ * at each use so the two shapes can't quietly grow a third. */
+export type TitleMode = "in-body" | "filename";
+
 export interface CloneState {
   /**
    * On-disk layout generation. Version 2 is the folder-tree layout (notes
@@ -144,7 +149,7 @@ export interface CloneState {
    * Every vault records note ids in frontmatter regardless of this, which is
    * what makes a rename resolvable at all - and a rename *is* a retitle here.
    */
-  titleMode?: "in-body" | "filename" | undefined;
+  titleMode?: TitleMode | undefined;
   /**
    * Which Apple ID this folder was cloned for - resolves to that account's
    * own session under `~/.config/icloud-md/accounts/<dsid>/` (see

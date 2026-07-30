@@ -5,7 +5,13 @@ import { AttributeRunSchema } from "./gen/topotext_pb.js";
 import { decodeNoteFormat, PLAIN_STYLE, type FormatParagraph, type ParagraphKind } from "./noteFormat.js";
 import { renderNoteMarkdown } from "./renderNoteMarkdown.js";
 import { parseNoteMarkdown } from "./parseNoteMarkdown.js";
-import { restoreTitleParagraph, splitTitleParagraph, titleParagraphFromFilename } from "./noteTitleParagraph.js";
+import {
+  restoreTitleParagraph,
+  restoreTitleParagraphText,
+  splitTitleParagraph,
+  titleFromNoteFileName,
+  titleParagraphFromFilename,
+} from "./noteTitleParagraph.js";
 
 function runs(...inits: MessageInitShape<typeof AttributeRunSchema>[]) {
   return inits.map((init) => create(AttributeRunSchema, init));
@@ -159,4 +165,40 @@ test("decoded real formatting splits and restores without loss", () => {
   assert.ok(title);
   assert.equal(title.kind, "title");
   assert.deepEqual(restoreTitleParagraph(title, body), decoded.paragraphs);
+});
+
+test("restoring alongside the text projects exactly what parsing the same note would have", () => {
+  // The pair push needs: the text drives the CRDT splice and the paragraphs
+  // drive the formatting reconciler, so the two describing the same note is
+  // the whole point - a mismatch restyles the wrong characters.
+  const parsed = parseNoteMarkdown("\nBody text\nMore body");
+  assert.equal(parsed.status, "ok");
+  if (parsed.status !== "ok") {
+    return;
+  }
+
+  const restored = restoreTitleParagraphText(titleParagraphFromFilename("My Note"), parsed.paragraphs);
+
+  assert.equal(restored.text, "My Note\n\nBody text\nMore body");
+  assert.deepEqual(
+    restored.paragraphs.map((entry) => entry.start),
+    [0, 8, 9, 19],
+    "every following paragraph's offset shifts by the restored title",
+  );
+  const reparsed = parseNoteMarkdown(renderNoteMarkdown(restored.paragraphs));
+  assert.equal(reparsed.status === "ok" ? reparsed.text : "", restored.text);
+});
+
+test("a file name reads back as the title it was made from, homoglyphs and all", () => {
+  assert.equal(titleFromNoteFileName("Notes/Shopping list.md"), "Shopping list");
+  assert.equal(titleFromNoteFileName("Notes/Pat⁄Alex꞉ notes.md"), "Pat/Alex: notes");
+  // A dot in the title survives; only the extension comes off.
+  assert.equal(titleFromNoteFileName("Notes/v1.2 plans.md"), "v1.2 plans");
+});
+
+test("pull's collision suffix is part of the name, so it reads back as part of the title", () => {
+  // Not a bug - it's why push never re-derives an *unrenamed* note's title
+  // from its file name, and only reads one back when the user has just
+  // changed the name themselves.
+  assert.equal(titleFromNoteFileName("Notes/Groceries 2.md"), "Groceries 2");
 });

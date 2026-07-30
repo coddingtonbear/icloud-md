@@ -1,0 +1,221 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
+import type { CloneStateNoteEntry } from "../notes/cloneState.js";
+import { classifyNoteRecord, type OkNoteDecodeResult } from "../notes/decodeNoteRecord.js";
+import { buildInitialNoteDocument, encodeNoteDocument } from "../notes/noteDocument.js";
+import { decodeNoteFormat } from "../notes/noteFormat.js";
+import { compressNoteDocument, decodeNoteString } from "../notes/noteText.js";
+import { parseNoteMarkdown } from "../notes/parseNoteMarkdown.js";
+import { reconcileNoteFormat } from "../notes/formatReconcile.js";
+import { prepareRetitle, restoreStrippedTitle } from "./push.js";
+
+/**
+ * Push's write path for a filename-as-title vault, where the working file
+ * holds the note's *body* and its name holds the title. Every test here is
+ * about the same hazard: a body-only file must become a whole note again
+ * before its text is spliced or its formatting reconciled, and the title
+ * that goes back on has to be the right one.
+ */
+
+const REPLICA = new Uint8Array(16).fill(7);
+
+/** A Note record carrying a real, round-trippable document - built the same
+ * way push's own create path builds one, so the payload these tests decode
+ * is the payload shape the tool actually writes. */
+function noteRecord(markdown: string, recordChangeTag = "1a"): CloudKitRecord {
+  const parsed = parseNoteMarkdown(markdown);
+  assert.equal(parsed.status, "ok");
+  if (parsed.status !== "ok") {
+    throw new Error("unreachable");
+  }
+  const doc = buildInitialNoteDocument(parsed.text, REPLICA);
+  const reconciled = reconcileNoteFormat(doc, parsed.paragraphs, REPLICA);
+  assert.ok(reconciled.ok);
+  const compressed = compressNoteDocument(encodeNoteDocument(doc));
+  return {
+    recordName: "REC1",
+    recordType: "Note",
+    recordChangeTag,
+    fields: {
+      TitleEncrypted: {
+        value: Buffer.from(parsed.text.split("\n")[0] ?? "", "utf-8").toString("base64"),
+        type: "ENCRYPTED_BYTES",
+      },
+      TextDataEncrypted: { value: compressed.toString("base64"), type: "ENCRYPTED_BYTES" },
+    },
+  };
+}
+
+function classifyOk(record: CloudKitRecord, titleMode: "in-body" | "filename"): OkNoteDecodeResult {
+  const classified = classifyNoteRecord(record, { titleMode });
+  assert.equal(classified.status, "ok");
+  if (classified.status !== "ok") {
+    throw new Error("unreachable");
+  }
+  return classified;
+}
+
+function parsedBody(markdown: string) {
+  const parsed = parseNoteMarkdown(markdown);
+  assert.equal(parsed.status, "ok");
+  if (parsed.status !== "ok") {
+    throw new Error("unreachable");
+  }
+  return { text: parsed.text, paragraphs: parsed.paragraphs };
+}
+
+/** What the payload a push would send actually decodes to on the wire. */
+function decodePayload(payloadBase64: string): { text: string; firstParagraphKind: string | undefined } {
+  const decoded = decodeNoteString(Buffer.from(payloadBase64, "base64"));
+  const format = decodeNoteFormat(decoded.string, decoded.attributeRun);
+  return {
+    text: decoded.string,
+    firstParagraphKind: format.status === "ok" ? format.paragraphs[0]?.kind : undefined,
+  };
+}
+
+const ENTRY: CloneStateNoteEntry = {
+  file: "Notes/Shopping list.md",
+  recordChangeTag: "1a",
+  modificationDate: 100,
+  folderRecordName: "DefaultFolder-CloudKit",
+};
+
+const SUMMARY = () => ({ conflicts: [] as string[], refused: [] as string[] });
+
+test("an edited body-only file is made whole again with the note's own title paragraph", () => {
+  const record = noteRecord("# Shopping list\n\nMilk\nEggs");
+  const classified = classifyOk(record, "filename");
+  assert.equal(classified.titleStripped, true, "a filename-as-title vault strips the title on the way out");
+
+  // The file on disk after the user adds a line - no title anywhere in it.
+  const restored = restoreStrippedTitle(classified, parsedBody("\nMilk\nEggs\nBread"), ENTRY, SUMMARY());
+
+  assert.ok(restored);
+  assert.equal(restored.text, "Shopping list\n\nMilk\nEggs\nBread");
+  assert.equal(restored.paragraphs[0]?.kind, "title", "the remote paragraph's own style comes back with it");
+  assert.deepEqual(
+    restored.paragraphs.map((paragraph) => paragraph.start),
+    [0, 14, 15, 20, 25],
+  );
+});
+
+test("an unrenamed note keeps the title the record has, never one re-derived from the file name", () => {
+  // The trap: pull's collision uniquifier put a note genuinely titled
+  // "Shopping list" at "Shopping list 2.md". Pushing an edit to it must not
+  // retitle the note to "Shopping list 2".
+  const record = noteRecord("Shopping list\n\nMilk");
+  const classified = classifyOk(record, "filename");
+
+  const restored = restoreStrippedTitle(
+    classified,
+    parsedBody("\nMilk\nEggs"),
+    { ...ENTRY, file: "Notes/Shopping list 2.md" },
+    SUMMARY(),
+  );
+
+  assert.equal(restored?.text, "Shopping list\n\nMilk\nEggs");
+});
+
+test("an in-body vault's file already carries its title, so nothing is prepended", () => {
+  const record = noteRecord("Shopping list\n\nMilk");
+  const classified = classifyOk(record, "in-body");
+  const parsed = parsedBody("Shopping list\n\nMilk\nEggs");
+
+  const restored = restoreStrippedTitle(classified, parsed, ENTRY, SUMMARY());
+
+  assert.deepEqual(restored, parsed, "the parse is handed straight back");
+});
+
+test("a renamed file pushes its new title and leaves the body exactly as it was", () => {
+  const record = noteRecord("# Shopping list\n\nMilk\nEggs");
+
+  const prepared = prepareRetitle(
+    record,
+    { entry: ENTRY, toFile: "Notes/Groceries.md", newTitle: "Groceries" },
+    REPLICA,
+    "filename",
+  );
+
+  assert.ok(prepared.ok);
+  assert.ok(prepared.retitle);
+  assert.equal(prepared.retitle.plainText, "Groceries\n\nMilk\nEggs");
+  const sent = decodePayload(prepared.retitle.payloadBase64);
+  assert.equal(sent.text, "Groceries\n\nMilk\nEggs", "the document on the wire is the retitled note");
+  assert.equal(sent.firstParagraphKind, "title");
+});
+
+test("a title a file name can only spell with homoglyphs comes back as the character it stands for", () => {
+  const record = noteRecord("Shopping list\n\nMilk");
+
+  const prepared = prepareRetitle(
+    record,
+    // What the user typed as "Pat/Alex" - the slash their filesystem won't
+    // take, written with U+2044 and read back here.
+    { entry: ENTRY, toFile: "Notes/Pat⁄Alex.md", newTitle: "Pat/Alex" },
+    REPLICA,
+    "filename",
+  );
+
+  assert.ok(prepared.ok);
+  assert.equal(prepared.retitle?.plainText, "Pat/Alex\n\nMilk");
+});
+
+test("renaming a file to the title the note already has sends nothing at all", () => {
+  // "Shopping list 2.md" is how pull spells a second note titled "Shopping
+  // list"; renaming it back to "Shopping list.md" is the local name catching
+  // up with the real title, not a retitle.
+  const record = noteRecord("Shopping list\n\nMilk");
+
+  const prepared = prepareRetitle(
+    record,
+    { entry: { ...ENTRY, file: "Notes/Shopping list 2.md" }, toFile: "Notes/Shopping list.md", newTitle: "Shopping list" },
+    REPLICA,
+    "filename",
+  );
+
+  assert.ok(prepared.ok);
+  assert.equal(prepared.retitle, undefined);
+});
+
+test("a rename is refused rather than guessed at when the note can't be safely edited", () => {
+  const record = noteRecord("Shopping list\n\nMilk");
+  record.fields.TextDataEncrypted = { value: "bm90IGEgbm90ZQ==", type: "ENCRYPTED_BYTES" };
+
+  const prepared = prepareRetitle(
+    record,
+    { entry: ENTRY, toFile: "Notes/Groceries.md", newTitle: "Groceries" },
+    REPLICA,
+    "filename",
+  );
+
+  assert.equal(prepared.ok, false);
+  if (prepared.ok) {
+    return;
+  }
+  assert.equal(prepared.resolution, "refused");
+  assert.match(prepared.reason, /no longer safely editable/);
+  assert.match(prepared.reason, /rename the file back to Shopping list\.md/, "the refusal says how to undo it");
+});
+
+test("a genuine retitle normalizes the title paragraph to Title style", () => {
+  // The deliberate drift `titleParagraphFromFilename` documents: a file name
+  // carries no styling, so a new title arrives as plain Title-styled text
+  // even if the paragraph it replaces was body-styled. It applies only to a
+  // title that actually changed - see the test above, where the same name
+  // spelling a title the note already has sends nothing.
+  const record = noteRecord("Shopping list\n\nMilk");
+  const before = classifyOk(record, "filename");
+  assert.equal(before.format?.[0]?.kind, "body");
+
+  const prepared = prepareRetitle(
+    record,
+    { entry: ENTRY, toFile: "Notes/Groceries.md", newTitle: "Groceries" },
+    REPLICA,
+    "filename",
+  );
+
+  assert.ok(prepared.ok);
+  assert.equal(decodePayload(prepared.retitle?.payloadBase64 ?? "").firstParagraphKind, "title");
+});

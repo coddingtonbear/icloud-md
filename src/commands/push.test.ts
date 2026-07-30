@@ -692,3 +692,59 @@ test("a malformed id is ignored rather than failing the push", () =>
     assert.equal(entries[0]?.kind, "create");
     assert.deepEqual(notices, [], "a malformed id is not a stale id - there's nothing to report");
   }));
+
+// --- Filename-as-title vaults, where the file name carries the note's title
+// and the file itself holds only the body. The reconstruction that makes a
+// whole note out of that pair is unit-tested in pushTitleMode.test.ts; these
+// cover the plan-level decisions, which are what a user meets first.
+
+/** state() as a filename-as-title vault. */
+function titleModeState(): CloneState {
+  return { ...state(), titleMode: "filename" };
+}
+
+test("an empty file is a title-only note in a filename-as-title vault, not nothing to create", () =>
+  withTempDir(async (dir) => {
+    // The title still exists - it's the file's name - so there is a real
+    // note to create, and the plan proceeds to the network for it.
+    await writeCloneState(dir, { ...titleModeState(), notes: {} });
+    await writeVaultFile(dir, "Recipes/Sourdough.md", "");
+
+    await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
+  }));
+
+test("an empty file in an in-body vault is still nothing to create", () =>
+  withTempDir(async (dir) => {
+    await writeCloneState(dir, emptyState());
+    await writeVaultFile(dir, "Recipes/Sourdough.md", "");
+
+    const { entries } = await buildPushPlan(dir);
+
+    assert.equal(entries[0]?.resolution, "refused");
+    assert.match(entries[0]?.reason ?? "", /the file is empty/);
+  }));
+
+test("emptying a note's body in a filename-as-title vault is an ordinary edit, not an emptied note", () =>
+  withTempDir(async (dir) => {
+    await writeBaseCopy(dir, "REC1", "Synced text");
+    await writeVaultFile(dir, "Notes/Tracked.md", "");
+    await writeCloneState(dir, titleModeState());
+
+    await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
+  }));
+
+test("renaming a note that has attachments in place is allowed - only relocating it isn't", () =>
+  withTempDir(async (dir) => {
+    // Attachments live in an `attachments/` directory per folder, named
+    // after the attachment: a rename inside the same directory moves no
+    // attachment file and breaks no link the note already holds.
+    const s = titleModeState();
+    s.attachments = {
+      ATT1: { file: "Notes/attachments/pic.jpg", mediaRecordName: "MEDIA1", mediaFileChecksum: "abc", noteRecordName: "REC1" },
+    };
+    await writeBaseCopy(dir, "REC1", "Synced text");
+    await writeVaultFile(dir, "Notes/Renamed.md", "Synced text");
+    await writeCloneState(dir, s);
+
+    await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
+  }));
