@@ -30,6 +30,17 @@ export interface CloneStateNoteEntry {
    * files written before folder support.
    */
   folderRecordName?: string | undefined;
+  /**
+   * A rename this vault owes but hasn't performed: the file *name* the note
+   * should have, recorded when `pull --defer-renames` computed a rename from
+   * a remote retitle and left the file where it was for someone else to move
+   * (see `pendingRename.ts`). Absent whenever the name on disk is already the
+   * one the note wants, which is the normal case.
+   *
+   * A bare name rather than a path, so it survives the note being relocated
+   * into a different folder before the rename is carried out.
+   */
+  pendingRename?: string | undefined;
 }
 
 /** One synced Apple Notes folder - see the folders doc for the tree design. */
@@ -312,6 +323,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
       sharedZoneOwner: typeof entry.sharedZoneOwner === "string" ? entry.sharedZoneOwner : undefined,
       unpublishableReason: typeof entry.unpublishableReason === "string" ? entry.unpublishableReason : undefined,
       folderRecordName: typeof entry.folderRecordName === "string" ? entry.folderRecordName : undefined,
+      pendingRename: typeof entry.pendingRename === "string" ? entry.pendingRename : undefined,
     };
   }
 

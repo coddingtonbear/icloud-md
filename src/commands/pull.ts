@@ -28,6 +28,7 @@ import { readBaseCopy, removeBaseCopy, writeBaseCopy } from "../notes/baseCopy.j
 import { localFileState } from "../notes/localFileState.js";
 import { writeCloneState, type CloneState, type CloneStateNoteEntry } from "../notes/cloneState.js";
 import { openVault } from "../notes/vaultMigrations.js";
+import { pendingRenameTarget, settlePendingRenames } from "../notes/pendingRename.js";
 import { composeNoteFile, NOTE_TITLE_KEY } from "../notes/noteIdFrontmatter.js";
 import { recordEpoch } from "../notes/noteEpoch.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
@@ -63,6 +64,10 @@ export interface PullChange {
    * which renames the file and can land on any kind, since the note's
    * content usually changed in the same breath. */
   previousFile?: string;
+  /** Set by `--defer-renames`: the path this file should be renamed to, which
+   * this pull deliberately did *not* rename it to. The note stays at `file`
+   * until a consumer performs it - see `pendingRename.ts`. */
+  pendingRename?: string;
   remarks?: PullChangeRemark[];
 }
 
@@ -90,16 +95,26 @@ const READ_ONLY_REMARK: PullChangeRemark = {
   message: "read-only: contains content this tool couldn't fully parse",
 };
 
+export interface PullOptions {
+  /** Don't rename files a remote retitle wants renamed - record the rename
+   * and leave the file alone, for a consumer that can update wikilinks as it
+   * goes. See `pendingRename.ts`; a no-op in an in-body vault, which never
+   * renames anything. */
+  deferRenames?: boolean;
+}
+
 export async function runPull(
   targetDir: string,
   progress?: SyncProgress,
   onLoginStatus?: (message: string) => void,
+  options: PullOptions = {},
 ): Promise<PullSummary> {
   const state = await openVault(targetDir);
   if (!state) {
     throw new NotClonedDirectoryError(targetDir);
   }
   const titleMode = state.titleMode === "filename" ? "filename" : "in-body";
+  const deferRenames = options.deferRenames === true;
 
   const auth = await resolveFolderAccount(targetDir, state.account, { onStatus: onLoginStatus });
   if (!auth.ckdatabasewsUrl) {
@@ -132,11 +147,22 @@ export async function runPull(
   const attachments: NonNullable<CloneState["attachments"]> = { ...state.attachments };
   const tableAttachments: NonNullable<CloneState["tableAttachments"]> = { ...state.tableAttachments };
   const trashed: NonNullable<CloneState["trashed"]> = { ...state.trashed };
+  // Before anything reads a tracked path: pick up renames a `--defer-renames`
+  // consumer has since carried out, and - unless this run is deferring too -
+  // finish the ones nobody got to. A plain `pull` is how a vault left holding
+  // a rename forever gets unstuck.
+  const settled = await settlePendingRenames(targetDir, notes, { perform: !deferRenames });
   // File names are unique per directory; both maps are keyed by the note's
-  // vault-root-relative directory ("" for the root).
+  // vault-root-relative directory ("" for the root). A name a deferred rename
+  // is holding counts as taken: the file isn't there yet, but it is spoken
+  // for, and handing it to another note would strand the rename.
   const usedFileNames = new Map<string, Set<string>>();
-  for (const entry of Object.values(state.notes)) {
+  for (const entry of Object.values(notes)) {
     usedNamesFor(usedFileNames, noteDirOf(entry.file)).add(path.posix.basename(entry.file));
+    const pending = pendingRenameTarget(entry);
+    if (pending !== undefined) {
+      usedNamesFor(usedFileNames, noteDirOf(pending)).add(path.posix.basename(pending));
+    }
   }
   const usedAttachmentFileNames = new Map<string, Set<string>>();
   for (const entry of Object.values(attachments)) {
@@ -158,6 +184,15 @@ export async function runPull(
     conflicts: [],
     notices: [],
   };
+  for (const done of settled.performed) {
+    summary.changes.push({ kind: "move", file: done.to, previousFile: done.from });
+  }
+  for (const stuck of settled.blocked) {
+    summary.notices.push({
+      level: "warn",
+      message: `Couldn't rename ${stuck.file} to ${stuck.to}: something else is already there. The rename stays pending.`,
+    });
+  }
 
   const sources: Array<{ records: CloudKitRecord[]; sharedZoneOwner?: string | undefined }> = [{ records }];
   const sharedZoneSyncTokens: Record<string, string> = {};
@@ -385,11 +420,24 @@ export async function runPull(
         // new title, so a name that silently disagrees with the note is a
         // retitle waiting to be reverted by whoever next touches the file.
         // Deliberately after `localFileState`, which reads the old path.
-        const file = await renameForRemoteTitle(targetDir, existing.file, decoded.titleLine, titleMode, {
+        const { file, pendingRename } = await renameForRemoteTitle(targetDir, existing.file, decoded.titleLine, titleMode, {
           usedFileNames,
           onDisk: local !== "missing",
+          defer: deferRenames,
         });
         const previousFile = file === existing.file ? undefined : { previousFile: existing.file };
+        // Every branch below rewrites this note's entry, so `pendingRename`
+        // is set unconditionally rather than carried through `...existing`:
+        // undefined is the answer that *clears* a rename that has since been
+        // performed or overtaken by a newer title.
+        const renameFields = { pendingRename };
+        const deferred =
+          pendingRename === undefined ? {} : { pendingRename: path.posix.join(noteDirOf(file), pendingRename) };
+        const deferredRemarks: PullChangeRemark[] =
+          pendingRename === undefined
+            ? []
+            : [{ tone: "note", message: `rename deferred: this file should become "${pendingRename}"` }];
+        const infoRemarks: PullChangeRemark[] = [...titleRemarks, ...deferredRemarks];
 
         if (local === "clean" || local === "missing") {
           const filePath = path.join(targetDir, file);
@@ -417,13 +465,15 @@ export async function runPull(
             modificationDate: modificationDateOf(record),
             unpublishableReason,
             folderRecordName: placement.folderRecordName,
+            ...renameFields,
           };
           summary.updated += 1;
           summary.changes.push({
             kind: "update",
             file,
             ...previousFile,
-            ...remarksFor(titleRemarks, unpublishableReason),
+            ...deferred,
+            ...remarksFor(infoRemarks, unpublishableReason),
           });
           continue;
         }
@@ -444,7 +494,7 @@ export async function runPull(
           // retitle has already moved the file: leaving the old path
           // recorded would read as "missing" on the next pull and recreate
           // the note beside itself.
-          notes[record.recordName] = { ...existing, file };
+          notes[record.recordName] = { ...existing, file, ...renameFields };
           summary.conflicts.push(
             `${file}: still contains diff3 conflict markers - resolve them, then run "push" to reconcile`,
           );
@@ -452,8 +502,10 @@ export async function runPull(
             kind: "update",
             file,
             ...previousFile,
+            ...deferred,
             remarks: [
               { tone: "conflict", message: 'still contains diff3 conflict markers - resolve them, then run "push" to reconcile' },
+              ...deferredRemarks,
             ],
           });
           continue;
@@ -465,6 +517,7 @@ export async function runPull(
           modificationDate: modificationDateOf(record),
           unpublishableReason,
           folderRecordName: placement.folderRecordName,
+          ...renameFields,
         };
 
         if (merged.status === "conflict") {
@@ -473,9 +526,10 @@ export async function runPull(
             kind: "merge",
             file,
             ...previousFile,
+            ...deferred,
             remarks: [
               { tone: "conflict", message: "merged with conflict markers - resolve manually" },
-              ...titleRemarks,
+              ...infoRemarks,
               ...(unpublishableReason !== undefined ? [READ_ONLY_REMARK] : []),
             ],
           });
@@ -485,7 +539,8 @@ export async function runPull(
             kind: "merge",
             file,
             ...previousFile,
-            ...remarksFor(titleRemarks, unpublishableReason),
+            ...deferred,
+            ...remarksFor(infoRemarks, unpublishableReason),
           });
         }
       } finally {
@@ -585,8 +640,12 @@ async function backfillSharePermissions(
  *
  * The known cost, accepted when the mode was designed: a rename performed
  * outside Obsidian doesn't trigger its link updating, so wikilinks pointing
- * at a remotely-retitled note go stale. `--defer-renames` exists to hand the
- * rename to a consumer that can do better.
+ * at a remotely-retitled note go stale. `context.defer` is `--defer-renames`,
+ * which hands the rename to a consumer that can do better: the file stays
+ * where it is and the target name comes back as `pendingRename` for the
+ * caller to record. Deferring only applies to a file that's actually there -
+ * a missing note is recreated further down, and recreating it under a title
+ * it no longer has would be a rename nobody could complete.
  *
  * The new name is resolved against both the names this run has claimed and
  * what is actually on disk. Tracked names alone aren't enough here the way
@@ -599,12 +658,13 @@ export async function renameForRemoteTitle(
   currentFile: string,
   titleLine: string,
   titleMode: "in-body" | "filename",
-  context: { usedFileNames: Map<string, Set<string>>; onDisk: boolean },
-): Promise<string> {
+  context: { usedFileNames: Map<string, Set<string>>; onDisk: boolean; defer?: boolean },
+): Promise<{ file: string; pendingRename?: string | undefined }> {
   const currentName = path.posix.basename(currentFile);
   if (titleMode !== "filename" || fileNameCarriesTitle(currentName, titleLine)) {
-    return currentFile;
+    return { file: currentFile };
   }
+  const defer = context.defer === true && context.onDisk;
 
   const dir = noteDirOf(currentFile);
   const usedInDir = usedNamesFor(context.usedFileNames, dir);
@@ -620,11 +680,18 @@ export async function renameForRemoteTitle(
   }
   usedInDir.add(wanted);
 
+  if (defer) {
+    // The old name is still occupied - by this very file, which isn't going
+    // anywhere this run - so it goes back in the pool of taken names.
+    usedInDir.add(currentName);
+    return { file: currentFile, pendingRename: wanted };
+  }
+
   const newFile = path.posix.join(dir, wanted);
   if (context.onDisk) {
     await rename(path.join(targetDir, currentFile), path.join(targetDir, newFile));
   }
-  return newFile;
+  return { file: newFile };
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -642,8 +709,8 @@ async function fileExists(filePath: string): Promise<boolean> {
 /** The remarks a change carries, or nothing at all - the field stays absent
  * rather than an empty array, which is what every `--json` consumer written
  * against the old shape expects. */
-function remarksFor(titleRemarks: PullChangeRemark[], unpublishableReason: string | undefined): { remarks?: PullChangeRemark[] } {
-  const remarks = [...titleRemarks, ...(unpublishableReason !== undefined ? [READ_ONLY_REMARK] : [])];
+function remarksFor(leading: PullChangeRemark[], unpublishableReason: string | undefined): { remarks?: PullChangeRemark[] } {
+  const remarks = [...leading, ...(unpublishableReason !== undefined ? [READ_ONLY_REMARK] : [])];
   return remarks.length > 0 ? { remarks } : {};
 }
 

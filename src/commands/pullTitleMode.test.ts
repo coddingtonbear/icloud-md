@@ -38,7 +38,7 @@ test("a note retitled remotely gets its file renamed to match", () =>
   withVault(async (dir) => {
     await writeFile(path.join(dir, "Notes/Shopping list.md"), "Milk", "utf-8");
 
-    const file = await renameForRemoteTitle(dir, "Notes/Shopping list.md", "Groceries", "filename", {
+    const { file } = await renameForRemoteTitle(dir, "Notes/Shopping list.md", "Groceries", "filename", {
       usedFileNames: used("Notes/Shopping list.md"),
       onDisk: true,
     });
@@ -52,7 +52,7 @@ test("a file that already carries the title is left alone", () =>
   withVault(async (dir) => {
     await writeFile(path.join(dir, "Notes/Groceries.md"), "Milk", "utf-8");
 
-    const file = await renameForRemoteTitle(dir, "Notes/Groceries.md", "Groceries", "filename", {
+    const { file } = await renameForRemoteTitle(dir, "Notes/Groceries.md", "Groceries", "filename", {
       usedFileNames: used("Notes/Groceries.md"),
       onDisk: true,
     });
@@ -69,7 +69,7 @@ test("a uniquified name is already an acceptable spelling, so it isn't walked up
     await writeFile(path.join(dir, "Notes/Groceries.md"), "Other note", "utf-8");
     await writeFile(path.join(dir, "Notes/Groceries 2.md"), "Milk", "utf-8");
 
-    const file = await renameForRemoteTitle(dir, "Notes/Groceries 2.md", "Groceries", "filename", {
+    const { file } = await renameForRemoteTitle(dir, "Notes/Groceries 2.md", "Groceries", "filename", {
       usedFileNames: used("Notes/Groceries.md", "Notes/Groceries 2.md"),
       onDisk: true,
     });
@@ -83,7 +83,7 @@ test("a rename never lands on top of a file the vault doesn't track", () =>
     // Not in tracked state - something the user put there themselves.
     await writeFile(path.join(dir, "Notes/Groceries.md"), "MINE, UNTRACKED", "utf-8");
 
-    const file = await renameForRemoteTitle(dir, "Notes/Shopping list.md", "Groceries", "filename", {
+    const { file } = await renameForRemoteTitle(dir, "Notes/Shopping list.md", "Groceries", "filename", {
       usedFileNames: used("Notes/Shopping list.md"),
       onDisk: true,
     });
@@ -101,7 +101,7 @@ test("a title a file name can only hold with homoglyphs is renamed to that spell
   withVault(async (dir) => {
     await writeFile(path.join(dir, "Notes/Old.md"), "Body", "utf-8");
 
-    const file = await renameForRemoteTitle(dir, "Notes/Old.md", "Pat/Alex: notes", "filename", {
+    const { file } = await renameForRemoteTitle(dir, "Notes/Old.md", "Pat/Alex: notes", "filename", {
       usedFileNames: used("Notes/Old.md"),
       onDisk: true,
     });
@@ -114,7 +114,7 @@ test("a missing file is placed at its new name without a filesystem rename", () 
   withVault(async (dir) => {
     // The file is gone locally; pull recreates it further down, and it must
     // be recreated under the note's *current* title, not its old one.
-    const file = await renameForRemoteTitle(dir, "Notes/Shopping list.md", "Groceries", "filename", {
+    const { file } = await renameForRemoteTitle(dir, "Notes/Shopping list.md", "Groceries", "filename", {
       usedFileNames: used("Notes/Shopping list.md"),
       onDisk: false,
     });
@@ -127,13 +127,58 @@ test("an in-body vault never renames - the title is in the file, and the name is
   withVault(async (dir) => {
     await writeFile(path.join(dir, "Notes/Shopping list.md"), "Groceries\n\nMilk", "utf-8");
 
-    const file = await renameForRemoteTitle(dir, "Notes/Shopping list.md", "Groceries", "in-body", {
+    const { file } = await renameForRemoteTitle(dir, "Notes/Shopping list.md", "Groceries", "in-body", {
       usedFileNames: used("Notes/Shopping list.md"),
       onDisk: true,
     });
 
     assert.equal(file, "Notes/Shopping list.md");
     assert.deepEqual(await readdir(path.join(dir, "Notes")), ["Shopping list.md"]);
+  }));
+
+test("--defer-renames records the rename instead of performing it", () =>
+  withVault(async (dir) => {
+    await writeFile(path.join(dir, "Notes/Shopping list.md"), "Milk", "utf-8");
+
+    const result = await renameForRemoteTitle(dir, "Notes/Shopping list.md", "Groceries", "filename", {
+      usedFileNames: used("Notes/Shopping list.md"),
+      onDisk: true,
+      defer: true,
+    });
+
+    assert.deepEqual(result, { file: "Notes/Shopping list.md", pendingRename: "Groceries.md" });
+    assert.deepEqual(await readdir(path.join(dir, "Notes")), ["Shopping list.md"], "nothing moved on disk");
+  }));
+
+test("a deferred rename holds both names: the one it has and the one it's owed", () =>
+  withVault(async (dir) => {
+    // The file is still at "A.md", so a second note can't be given that name
+    // - and "C.md" is spoken for by the rename, so it can't be given that
+    // one either, or completing the deferred rename would clobber it.
+    await writeFile(path.join(dir, "Notes/A.md"), "first", "utf-8");
+    await writeFile(path.join(dir, "Notes/B.md"), "second", "utf-8");
+    const usedFileNames = used("Notes/A.md", "Notes/B.md");
+
+    await renameForRemoteTitle(dir, "Notes/A.md", "C", "filename", { usedFileNames, onDisk: true, defer: true });
+    const wantsA = await renameForRemoteTitle(dir, "Notes/B.md", "A", "filename", { usedFileNames, onDisk: true, defer: true });
+    const wantsC = await renameForRemoteTitle(dir, "Notes/B.md", "C", "filename", { usedFileNames, onDisk: true, defer: true });
+
+    assert.equal(wantsA.pendingRename, "A 2.md");
+    assert.equal(wantsC.pendingRename, "C 2.md");
+  }));
+
+test("a missing file is never deferred - it is recreated under the note's current title", () =>
+  withVault(async (dir) => {
+    // There is nothing on disk to rename, so there would be nothing for a
+    // consumer to do; deferring would record a rename that can never be
+    // completed, and pull would recreate the file under the old title.
+    const result = await renameForRemoteTitle(dir, "Notes/Shopping list.md", "Groceries", "filename", {
+      usedFileNames: used("Notes/Shopping list.md"),
+      onDisk: false,
+      defer: true,
+    });
+
+    assert.deepEqual(result, { file: "Notes/Groceries.md" });
   }));
 
 test("the name a rename frees is available to the next note that wants it", () =>
@@ -145,8 +190,8 @@ test("the name a rename frees is available to the next note that wants it", () =
     await writeFile(path.join(dir, "Notes/B.md"), "second", "utf-8");
     const usedFileNames = used("Notes/A.md", "Notes/B.md");
 
-    const first = await renameForRemoteTitle(dir, "Notes/A.md", "C", "filename", { usedFileNames, onDisk: true });
-    const second = await renameForRemoteTitle(dir, "Notes/B.md", "A", "filename", { usedFileNames, onDisk: true });
+    const { file: first } = await renameForRemoteTitle(dir, "Notes/A.md", "C", "filename", { usedFileNames, onDisk: true });
+    const { file: second } = await renameForRemoteTitle(dir, "Notes/B.md", "A", "filename", { usedFileNames, onDisk: true });
 
     assert.equal(first, "Notes/C.md");
     assert.equal(second, "Notes/A.md");

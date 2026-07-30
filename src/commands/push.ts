@@ -17,6 +17,7 @@ import {
 import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { writeCloneState, type CloneState, type CloneStateNoteEntry, type TitleMode } from "../notes/cloneState.js";
 import { openVault } from "../notes/vaultMigrations.js";
+import { pendingRenameTarget, settlePendingRenames } from "../notes/pendingRename.js";
 import { NOTE_ID_KEY, readNoteId, readNoteTitle, setNoteId } from "../notes/noteIdFrontmatter.js";
 import { resolveNoteIds } from "../notes/noteIdPairing.js";
 import { classifyNoteRecord, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
@@ -190,6 +191,22 @@ export async function buildPushPlan(
     throw new NotClonedDirectoryError(targetDir);
   }
 
+  // Before any path is read as evidence of anything: a file a
+  // `--defer-renames` consumer has already moved is not a mystery move to be
+  // pushed back to iCloud as a retitle, it is a rename this vault asked for.
+  // Settling first turns it into an ordinary tracked note sitting at its
+  // tracked path, so none of the machinery below has to know about it. Push
+  // never *performs* a deferred rename - that is the consumer's job, and
+  // `pull` is the escape hatch when nobody does it.
+  //
+  // `planningMutatedState` means the plan rewrote tracked state and so must
+  // be persisted even by callers that never execute anything (`status`, an
+  // all-conflict `push`): settling here, and the eager remote-merge path
+  // advancing recordChangeTags below. Leaving a tag stale while the base
+  // copy and file had already been rewritten is what silently stranded local
+  // edits (dev log 2026-07-29).
+  let planningMutatedState = (await settlePendingRenames(targetDir, state.notes, { perform: false })).changed;
+
   const entries: ExecutablePlanEntry[] = [];
   const dirIndex = stateDirIndex(state);
   // In a filename-as-title vault every working file holds the note's *body*
@@ -199,13 +216,28 @@ export async function buildPushPlan(
   // the create path's own reconstruction, and `prepareRetitle` for the
   // rename that changes a title rather than restoring one.
   const titleMode = state.titleMode === "filename" ? "filename" : "in-body";
-  // Set when planning itself rewrites tracked state (the eager remote-merge
-  // path advances recordChangeTags); the plan must then be persisted even by
-  // callers that never execute anything (`status`, an all-conflict `push`) -
-  // leaving the tag stale while the base copy and file had already been
-  // rewritten is what silently stranded local edits (dev log 2026-07-29).
-  let planningMutatedState = false;
   const notices: SyncNotice[] = [];
+
+  // Renames still outstanding, listed before everything else because they're
+  // the one thing in this plan the *reader* has to do. They are shown rather
+  // than acted on, and rather than refused: the stale name is harmless to
+  // push (a tracked note's title always comes from the live record), so
+  // blocking its content from syncing would cost something and protect
+  // nothing. A note can appear here and again below as a real change; that's
+  // two true statements about one file, not a double count.
+  for (const entry of Object.values(state.notes)) {
+    const target = pendingRenameTarget(entry);
+    if (target === undefined) {
+      continue;
+    }
+    entries.push({
+      kind: "rename",
+      file: entry.file,
+      pendingRename: target,
+      resolution: "conflict",
+      reason: 'rename deferred by a previous pull and not yet performed - rename it, or run "pull" to have icloud-md do it',
+    });
+  }
 
   const untracked: {
     file: string;

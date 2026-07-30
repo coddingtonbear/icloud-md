@@ -291,10 +291,17 @@ program
 program
   .command("pull [directory]")
   .description("Fetch changes since the last clone/pull (defaults to the current directory)")
-  .action(async (directory: string | undefined, _opts: unknown, command: Command) => {
+  .option(
+    "--defer-renames",
+    "in a filename-as-title vault, report the renames a remote retitle needs instead of performing them, for an " +
+      "editor integration that can update links as it goes; a later plain \"pull\" performs any left undone",
+  )
+  .action(async (directory: string | undefined, opts: { deferRenames?: boolean }, command: Command) => {
     const context = contextFor(command);
     const targetDir = await resolveTargetDir(directory);
-    const summary = await runPull(targetDir, makeSyncProgress(context), makeStatusSink(context));
+    const summary = await runPull(targetDir, makeSyncProgress(context), makeStatusSink(context), {
+      deferRenames: opts.deferRenames === true,
+    });
     emitResult(context, summary, (result) => printPullSummary(targetDir, result));
   });
 

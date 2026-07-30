@@ -186,3 +186,29 @@ test("renderPullReport renders a plain note unmarked, so an explanation doesn't 
     "1 added, 0 updated, 0 auto-merged, 0 deleted.",
   ]);
 });
+
+test("renderPullReport shows a deferred rename as a remark, not as an arrow - the file didn't move", () => {
+  // The distinction the arrow carries is "this file is somewhere else now".
+  // A deferred rename is the opposite claim: it's exactly where it was, and
+  // the name it should have is still owed.
+  const summary = summaryWith({
+    updated: 1,
+    changes: [
+      {
+        kind: "update",
+        file: "Notes/Shopping list.md",
+        pendingRename: "Notes/Groceries.md",
+        remarks: [{ tone: "note", message: 'rename deferred: this file should become "Groceries.md"' }],
+      },
+    ],
+  });
+
+  assert.deepEqual(renderPullReport(summary), [
+    "Changes pulled from iCloud:",
+    "",
+    "        modified:  Notes/Shopping list.md",
+    '                     rename deferred: this file should become "Groceries.md"',
+    "",
+    "0 added, 1 updated, 0 auto-merged, 0 deleted.",
+  ]);
+});

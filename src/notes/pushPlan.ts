@@ -14,8 +14,11 @@ import {
 
 /** Which of the ways a local file can differ from `state.json` this entry
  * represents. "move" is a locally-relocated tracked note (detected by
- * pairing a missing tracked file with an untracked one - see push.ts). */
-export type PlanEntryKind = "create" | "update" | "delete" | "move";
+ * pairing a missing tracked file with an untracked one - see push.ts).
+ * "rename" is the odd one out: not something push will do, but something the
+ * reader still has to - a rename `pull --defer-renames` handed off and
+ * nobody has performed. */
+export type PlanEntryKind = "create" | "update" | "delete" | "move" | "rename";
 
 /**
  * "noop" covers both a clean tracked file (nothing to do) and a "modified"
@@ -35,6 +38,10 @@ export interface PlanEntry {
   /** kind "move" only: the vault-root-relative path the note was tracked
    * at before the local move. */
   previousFile?: string;
+  /** kind "rename" only: the vault-root-relative path this file is supposed
+   * to be renamed to. Structured rather than spelled out in `reason` because
+   * the consumer that performs the rename reads this listing as JSON. */
+  pendingRename?: string;
 }
 
 /** Borrowed from `git status` verbatim, because a person who has used git
@@ -45,6 +52,7 @@ const LABELS: Record<PlanEntryKind, [label: string, color: ChalkInstance]> = {
   update: ["modified:", CHANGED],
   delete: ["deleted:", GONE],
   move: ["moved:", MOVED],
+  rename: ["rename:", MOVED],
 };
 
 /** Labels are padded to a common width so the listing reads as a column
@@ -121,7 +129,9 @@ export function renderPlan(
     const subject =
       entry.kind === "move"
         ? `${formatPath(entry.previousFile ?? entry.file)} -> ${formatPath(entry.file)}`
-        : formatPath(entry.file);
+        : entry.kind === "rename" && entry.pendingRename !== undefined
+          ? `${formatPath(entry.file)} -> ${formatPath(entry.pendingRename)}`
+          : formatPath(entry.file);
     lines.push(LISTING_INDENT + labelledLine(label, color, LABEL_WIDTH, subject));
     if (entry.resolution === "refused" || entry.resolution === "conflict") {
       const reason = (entry.reason ?? "refused").split(entry.file).join(formatPath(entry.file));
@@ -139,7 +149,7 @@ export function renderPlan(
       toUpdate += 1;
     } else if (entry.kind === "move") {
       toMove += 1;
-    } else {
+    } else if (entry.kind === "delete") {
       toDelete += 1;
     }
   }
@@ -174,10 +184,15 @@ export function renderPlan(
  * accounts for exactly one tracked note; creates are untracked files, and a
  * clean tracked note produces no entry at all. A "noop" update (a byte-level
  * difference that resolved to no server-side change) counts as unchanged,
- * matching how the listing hides it.
+ * matching how the listing hides it. So does a "rename": what's out of step
+ * there is the file's *name*, not the note, and the same note can carry a
+ * real change entry alongside it - counting both would make the tally
+ * describe more notes than the vault has.
  */
 export function countUnchangedNotes(entries: readonly Pick<PlanEntry, "kind" | "resolution">[], trackedNotes: number): number {
-  const touched = entries.filter((entry) => entry.kind !== "create" && entry.resolution !== "noop").length;
+  const touched = entries.filter(
+    (entry) => entry.kind !== "create" && entry.kind !== "rename" && entry.resolution !== "noop",
+  ).length;
   return Math.max(0, trackedNotes - touched);
 }
 
@@ -193,17 +208,21 @@ export function stripFilePrefix(message: string, file: string): string {
  * `push --dry-run` both hand to `--json` callers (dropping `push`'s
  * `execute` closure, which isn't serializable and isn't anyone's business
  * outside this process). */
-export type SerializedPlanEntry = Pick<PlanEntry, "kind" | "file" | "resolution" | "reason" | "previousFile">;
+export type SerializedPlanEntry = Pick<
+  PlanEntry,
+  "kind" | "file" | "resolution" | "reason" | "previousFile" | "pendingRename"
+>;
 
 /** Projects any `PlanEntry` (including `push`'s `ExecutablePlanEntry`, which
  * extends it with `execute`) down to its serializable fields. */
 export function serializePlanEntry(entry: PlanEntry): SerializedPlanEntry {
-  const { kind, file, resolution, reason, previousFile } = entry;
+  const { kind, file, resolution, reason, previousFile, pendingRename } = entry;
   return {
     kind,
     file,
     resolution,
     ...(reason !== undefined ? { reason } : {}),
     ...(previousFile !== undefined ? { previousFile } : {}),
+    ...(pendingRename !== undefined ? { pendingRename } : {}),
   };
 }

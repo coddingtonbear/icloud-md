@@ -160,3 +160,35 @@ test("renderPlan re-expresses paths through formatPath, including inside reason 
   assert.match(lines[1] ?? "", /modified: \.\.\/Recipes\/Pie\.md/);
   assert.match(lines[2] ?? "", /restore \.\.\/Recipes\/Pie\.md/);
 });
+
+test("renderPlan shows a pending rename as \"file -> target\" and tallies it as a conflict", () => {
+  // The one entry kind push won't act on: a rename `pull --defer-renames`
+  // handed off and nobody performed. It belongs on the status screen anyway,
+  // because it's work the reader still owes.
+  const entries: PlanEntry[] = [
+    {
+      kind: "rename",
+      file: "Notes/Shopping list.md",
+      pendingRename: "Notes/Groceries.md",
+      resolution: "conflict",
+      reason: "rename deferred by a previous pull and not yet performed",
+    },
+  ];
+  assert.deepEqual(renderPlan(entries), [
+    "",
+    "        rename:   Notes/Shopping list.md -> Notes/Groceries.md",
+    "                  ! rename deferred by a previous pull and not yet performed",
+    "",
+    "0 to create, 0 changed, 0 to delete. (1 conflict(s))",
+  ]);
+});
+
+test("countUnchangedNotes ignores a pending rename, which can sit alongside a real change to the same note", () => {
+  // What's out of step there is the name, not the note - and counting both
+  // entries would make the tally describe more notes than the vault has.
+  const entries: PlanEntry[] = [
+    { kind: "rename", file: "Edited.md", pendingRename: "Renamed.md", resolution: "conflict", reason: "pending" },
+    { kind: "update", file: "Edited.md", resolution: "ready" },
+  ];
+  assert.equal(countUnchangedNotes(entries, 10), 9);
+});

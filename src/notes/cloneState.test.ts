@@ -65,6 +65,26 @@ test("round-trips unpublishableReason, absent means fully publishable", () =>
     assert.equal(readBack?.notes["REC-CLEAN"]?.unpublishableReason, undefined);
   }));
 
+test("round-trips pendingRename, so a deferred rename survives until it's done", () =>
+  withTempDir(async (dir) => {
+    // The name is what makes a vault left mid-handoff recoverable: without
+    // it the next run would see a file whose name disagrees with its note
+    // and no record of why.
+    const state: CloneState = {
+      syncToken: "token",
+      notes: {
+        "REC-PENDING": { file: "Shopping list.md", recordChangeTag: "a", modificationDate: 1, pendingRename: "Groceries.md" },
+        "REC-SETTLED": { file: "Plain.md", recordChangeTag: "b", modificationDate: 2 },
+      },
+    };
+
+    await writeCloneState(dir, state);
+    const readBack = await readCloneState(dir);
+
+    assert.equal(readBack?.notes["REC-PENDING"]?.pendingRename, "Groceries.md");
+    assert.equal(readBack?.notes["REC-SETTLED"]?.pendingRename, undefined);
+  }));
+
 test("reads a pre-shared-notes state file (no shared fields) without error", () =>
   withTempDir(async (dir) => {
     // Exactly what writeCloneState produced before shared-note support existed.
