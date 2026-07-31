@@ -22,7 +22,7 @@ import { writeCloneState, type CloneState, type CloneStateNoteEntry, type TitleM
 import { migrationReporter, openVault } from "../notes/vaultMigrations.js";
 import { pendingRenameTarget, settlePendingRenames } from "../notes/pendingRename.js";
 import { NOTE_ID_KEY, NOTE_TITLE_KEY, readNoteId, readNoteTitle, setNoteId } from "../notes/noteIdFrontmatter.js";
-import { representabilityProblem, titleIsRepresentable } from "../notes/titleFilename.js";
+import { carriedTitleSpelling, representabilityProblem, titleIsRepresentable } from "../notes/titleFilename.js";
 import { resolveNoteIds } from "../notes/noteIdPairing.js";
 import { classifyNoteRecord, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
@@ -131,6 +131,11 @@ interface PushCandidate {
    * the title the file asks this note to have. Undefined whenever the file
    * states none, which is the common case - the file name says it instead. */
   requestedTitle?: string | undefined;
+  /** The body matches the base copy - this is a candidate solely because its
+   * `apple-note-title` isn't the one state recorded, so the plan may settle
+   * it against the live title alone (and refuse a shared note only if a
+   * retitle is genuinely being requested). */
+  titleOnly: boolean;
 }
 
 interface PushSummary {
@@ -299,18 +304,26 @@ export async function buildPushPlan(
     // A title the file states outright, which under filename-as-title is the
     // one thing a file can say about itself that its *body* cannot. It makes
     // a note a candidate even when the body is clean, because a frontmatter
-    // edit is deliberately invisible to the base-copy comparison; whether it
-    // actually differs from the note's current title is settled against the
-    // live record further down, which is the only non-lossy comparison there
-    // is. In an in-body vault the title is the first line and the key would
-    // be a second source of truth, so it isn't read at all.
+    // edit is deliberately invisible to the base-copy comparison - unless the
+    // key still says what the last sync recorded (`frontmatterTitle`), which
+    // is the key `pull` itself wrote for a title no file name can carry, not
+    // an edit at all. Whether an unrecognized key actually differs from the
+    // note's current title is settled against the live record further down,
+    // which is the only non-lossy comparison there is. In an in-body vault
+    // the title is the first line and the key would be a second source of
+    // truth, so it isn't read at all.
     const requestedTitle = filenameAsTitle ? readNoteTitle(frontmatter) : undefined;
-    if (local.status === "clean" && requestedTitle === undefined) {
+    const titleOnly = local.status === "clean";
+    if (titleOnly && (requestedTitle === undefined || requestedTitle === entry.frontmatterTitle)) {
       continue;
     }
 
+    // A title-only candidate whose state predates `frontmatterTitle` is
+    // ambiguous - the key may be pull's own record of the title, not a
+    // retitle request - so its shared-note refusal waits for the live-record
+    // comparison below rather than condemning a clean note here forever.
     const sharedRefusal = sharedNoteWriteRefusal(state, entry);
-    if (sharedRefusal !== undefined) {
+    if (sharedRefusal !== undefined && !(titleOnly && entry.frontmatterTitle === undefined)) {
       entries.push({ kind: "update", file: entry.file, resolution: "refused", reason: sharedRefusal });
       continue;
     }
@@ -368,7 +381,7 @@ export async function buildPushPlan(
       });
       continue;
     }
-    updateCandidates.push({ recordName, entry, localText, frontmatter, requestedTitle });
+    updateCandidates.push({ recordName, entry, localText, frontmatter, requestedTitle, titleOnly });
   }
 
   // --- Local-move pairing: a missing tracked file plus an untracked one
@@ -1162,6 +1175,27 @@ export async function buildPushPlan(
       continue;
     }
 
+    // A title-only candidate got this far because its `apple-note-title`
+    // wasn't recognized as the last sync's own record of the title (state
+    // predating `frontmatterTitle`, or a genuine retitle request). The live
+    // title settles which: when they agree, the key was never an edit -
+    // remember that in state so the next plan doesn't need this fetch - and
+    // when they differ, a shared note's refusal applies now, to the retitle
+    // it actually is.
+    if (candidate.titleOnly) {
+      const classified = classifyNoteRecord(record, { titleMode });
+      if (classified.status === "ok" && requestedRetitle(classified, requestedTitle) === undefined) {
+        state.notes[recordName] = { ...entry, frontmatterTitle: requestedTitle };
+        planningMutatedState = true;
+        continue;
+      }
+      const sharedRefusal = sharedNoteWriteRefusal(state, entry);
+      if (sharedRefusal !== undefined) {
+        entries.push({ kind: "update", file: entry.file, resolution: "refused", reason: sharedRefusal });
+        continue;
+      }
+    }
+
     const fileStat = await stat(path.join(targetDir, entry.file));
     const modificationDateMs = Math.round(fileStat.mtimeMs);
 
@@ -1251,6 +1285,10 @@ export async function buildPushPlan(
               ...entry,
               recordChangeTag: noteResult.record.recordChangeTag ?? "",
               modificationDate: modificationDateOf(noteResult.record) || modificationDateMs,
+              // The file's `apple-note-title` (when it has one) is now the
+              // note's title as far as the server is concerned - record it so
+              // the next plan reads the key as synced, not as a fresh request.
+              ...(requestedTitle !== undefined ? { frontmatterTitle: requestedTitle } : {}),
             };
             await applyNoteFileTimes(path.join(targetDir, entry.file), noteResult.record);
           }
@@ -1694,13 +1732,18 @@ export function prepareRetitle(
   }
 
   const { title, body } = splitTitleParagraph(classified.format);
-  if (title?.text === pair.newTitle) {
+  if (title !== undefined && (title.text === pair.newTitle || carriedTitleSpelling(title.text) === pair.newTitle)) {
     // The name changed but the title it spells didn't - renaming `Foo 2.md`
     // (pull's collision spelling) to `Foo.md` is the local name catching up
     // with a note genuinely titled "Foo". Short-circuited on the title's
     // *text* rather than left to the payload comparison below, because
     // rebuilding the paragraph would also restyle it, and this is a rename
     // that expresses no new title at all.
+    // The second arm is the trailing-whitespace equivalence: a file name
+    // only ever carries a title's trimmed spelling, so a name spelling
+    // exactly that expresses no new title either - the remote spelling
+    // wins. Stripping the whitespace on purpose still works, through
+    // `apple-note-title` (see `requestedRetitle`, which compares exactly).
     return { ok: true, retitle: undefined };
   }
 

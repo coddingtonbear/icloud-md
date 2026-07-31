@@ -1,5 +1,5 @@
 import path from "node:path";
-import { encodeTitleStem, titleIsRepresentable } from "./titleFilename.js";
+import { carriedTitleSpelling, encodeTitleStem, titleIsRepresentable } from "./titleFilename.js";
 
 /**
  * The file name for a note, given how this vault carries titles.
@@ -7,16 +7,17 @@ import { encodeTitleStem, titleIsRepresentable } from "./titleFilename.js";
  * In-body mode keeps `noteFileName`'s destructive sanitizing: the name is
  * only a display convenience there, since the title also sits in the file.
  * Filename mode uses the reversible projection instead, because the name is
- * the only place the title lives - and falls back to "Untitled" for a title
- * a name genuinely can't carry, with the real one recorded in
- * `apple-note-title` frontmatter by the caller.
+ * the only place the title lives - reversible up to trailing whitespace,
+ * which the name drops (see `carriedTitleSpelling`) - and falls back to
+ * "Untitled" for a title a name genuinely can't carry, with the real one
+ * recorded in `apple-note-title` frontmatter by the caller.
  */
 export function noteFileNameFor(titleLine: string, titleMode: "in-body" | "filename"): string {
   if (titleMode !== "filename") {
     return noteFileName(titleLine);
   }
   const firstLine = titleLine.split("\n")[0] ?? "";
-  return titleIsRepresentable(firstLine) ? `${encodeTitleStem(firstLine)}.md` : "Untitled.md";
+  return titleIsRepresentable(firstLine) ? `${encodeTitleStem(carriedTitleSpelling(firstLine))}.md` : "Untitled.md";
 }
 
 /**

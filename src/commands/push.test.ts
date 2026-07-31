@@ -205,6 +205,93 @@ test("buildPushPlan refuses an edit to an individually-shared note loose in a sh
     assert.match(entries[0]?.reason ?? "", /individually-shared/);
   }));
 
+test("buildPushPlan reads a recorded apple-note-title as synced, not as an edit - the note stays clean without the network", () =>
+  withTempDir(async (dir) => {
+    // The live-vault trap this guards (dev log 2026-07-31): pull files a
+    // title no file name can carry ("Restaurants ") as Untitled.md with the
+    // title in frontmatter. That key must not read as a retitle request -
+    // for an individually-shared note it was refused as one on every status,
+    // forever, and restore (which preserves frontmatter) couldn't clear it.
+    const shared = { ...emptyState(), titleMode: "filename" as const };
+    shared.notes = {
+      LOOSE1: {
+        file: "Pat/Untitled.md",
+        recordChangeTag: "1a",
+        modificationDate: 100,
+        sharedZoneOwner: "_owner1",
+        frontmatterTitle: "Restaurants ",
+      },
+    };
+    await writeCloneState(dir, shared);
+    await writeBaseCopy(dir, "LOOSE1", "Hello");
+    await writeVaultFile(
+      dir,
+      "Pat/Untitled.md",
+      '---\napple-note-id: LOOSE1\napple-note-title: "Restaurants "\n---\n\nHello',
+    );
+
+    // No account bound: reaching the network would throw UnboundAccountError,
+    // so a clean plan proves the note was settled entirely locally.
+    const { entries } = await buildPushPlan(dir);
+
+    assert.deepEqual(entries, []);
+  }));
+
+test("buildPushPlan refuses a genuine retitle-via-key of an individually-shared note locally", () =>
+  withTempDir(async (dir) => {
+    const shared = { ...emptyState(), titleMode: "filename" as const };
+    shared.notes = {
+      LOOSE1: {
+        file: "Pat/Untitled.md",
+        recordChangeTag: "1a",
+        modificationDate: 100,
+        sharedZoneOwner: "_owner1",
+        frontmatterTitle: "Restaurants ",
+      },
+    };
+    await writeCloneState(dir, shared);
+    await writeBaseCopy(dir, "LOOSE1", "Hello");
+    // The key no longer says what the last sync recorded - the user edited
+    // it, and that *is* a retitle request, refused like any other edit.
+    await writeVaultFile(
+      dir,
+      "Pat/Untitled.md",
+      '---\napple-note-id: LOOSE1\napple-note-title: "A new name "\n---\n\nHello',
+    );
+
+    const { entries } = await buildPushPlan(dir);
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.resolution, "refused");
+    assert.match(entries[0]?.reason ?? "", /individually-shared/);
+  }));
+
+test("buildPushPlan defers a shared note's title-only refusal to the live record when state predates frontmatterTitle", () =>
+  withTempDir(async (dir) => {
+    // Same file, but state written before `frontmatterTitle` existed: the
+    // key is ambiguous (pull's own record, or a real request), so the plan
+    // must consult the live title rather than refuse locally - proven, as in
+    // the create tests, by it needing a session.
+    const shared = { ...emptyState(), titleMode: "filename" as const };
+    shared.notes = {
+      LOOSE1: {
+        file: "Pat/Untitled.md",
+        recordChangeTag: "1a",
+        modificationDate: 100,
+        sharedZoneOwner: "_owner1",
+      },
+    };
+    await writeCloneState(dir, shared);
+    await writeBaseCopy(dir, "LOOSE1", "Hello");
+    await writeVaultFile(
+      dir,
+      "Pat/Untitled.md",
+      '---\napple-note-id: LOOSE1\napple-note-title: "Restaurants "\n---\n\nHello',
+    );
+
+    await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
+  }));
+
 test("buildPushPlan refuses a locally-deleted shared note without touching the network - never 'already deleted remotely'", () =>
   withTempDir(async (dir) => {
     const shared = emptyState();

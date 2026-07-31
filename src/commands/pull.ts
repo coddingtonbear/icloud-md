@@ -206,9 +206,11 @@ export async function runPull(
     }
     sources.push({ records: zone.records, sharedZoneOwner: zone.zoneID.ownerRecordName });
   }
-  // A skipped zone (ZONE_NOT_FOUND on fetch) yielded no new sync token -
-  // carry the stored one forward so a zone that turns out to be reachable
-  // again later resumes incrementally instead of refetching from scratch.
+  // A skipped zone yielded no new sync token - carry the stored one forward
+  // so the zone resumes incrementally on a later pull instead of refetching
+  // from scratch (and, for a missing-bodies skip, so the records that didn't
+  // come through complete are re-delivered rather than lost to an advanced
+  // token).
   for (const skipped of skippedZones) {
     const owner = skipped.zoneID.ownerRecordName;
     const carried = owner ? (state.sharedZoneSyncTokens ?? {})[owner] : undefined;
@@ -218,8 +220,12 @@ export async function runPull(
     summary.notices.push({
       level: "warn",
       message:
-        `Skipped a shared zone the server no longer has (owner ${owner ?? "unknown"}, ${skipped.serverErrorCode}) - ` +
-        "its share was likely revoked or deleted; its local notes were left in place and stay tracked for now",
+        skipped.reason === "zone-not-found"
+          ? `Skipped a shared zone the server no longer has (owner ${owner ?? "unknown"}, ${skipped.serverErrorCode}) - ` +
+            "its share was likely revoked or deleted; its local notes were left in place and stay tracked for now"
+          : `Skipped the shared zone owned by ${owner ?? "unknown"} this run: ${skipped.missingRecordNames.length} ` +
+            "note(s) came through without their text and looking them up didn't fill it in - nothing from that zone " +
+            "was touched, and the next pull will retry it",
     });
   }
 
@@ -265,6 +271,24 @@ export async function runPull(
         }
 
         if (decoded.status === "unsyncable") {
+          // A record delivered without its body says nothing durable about
+          // the note - only that this run didn't get its text (shared-zone
+          // listings omit bodies; a lookup backfill can fail). Untracking on
+          // it would sever the sync relationship over a transient gap, so a
+          // tracked note is left exactly as it is; the shared-database fetch
+          // already holds back whole zones with missing bodies, so this is
+          // the last line of defense, not the usual path.
+          if (decoded.reason === "missing-body") {
+            if (existing) {
+              summary.notices.push({
+                level: "warn",
+                message: `${existing.file}: the server sent this note without its text this run - left unchanged and still tracked`,
+              });
+            } else {
+              summary.skippedNewUnsyncable += 1;
+            }
+            continue;
+          }
           if (!existing) {
             summary.skippedNewUnsyncable += 1;
             continue;
@@ -402,6 +426,7 @@ export async function runPull(
             sharedZoneOwner: source.sharedZoneOwner,
             unpublishableReason,
             folderRecordName: placement.folderRecordName,
+            frontmatterTitle: recordedTitle,
           };
           summary.added += 1;
           summary.changes.push({
@@ -467,6 +492,7 @@ export async function runPull(
             modificationDate: modificationDateOf(record),
             unpublishableReason,
             folderRecordName: placement.folderRecordName,
+            frontmatterTitle: recordedTitle,
             ...renameFields,
           };
           summary.updated += 1;
@@ -520,6 +546,7 @@ export async function runPull(
           modificationDate: modificationDateOf(record),
           unpublishableReason,
           folderRecordName: placement.folderRecordName,
+          frontmatterTitle: recordedTitle,
           ...renameFields,
         };
 
@@ -819,12 +846,14 @@ async function handleRemoteDeletion(
 
 /**
  * A previously-tracked note that's no longer safely syncable at all -
- * `classifyNoteRecord` returned `"unsyncable"` (a genuine decode failure,
- * e.g. missing text data). Unrecognized *embedded* content no longer lands
- * here - it's written with an unknown-content marker and flagged
- * unpublishable instead, per the Safety Guarantee Audit. Local edits are
- * never discarded silently: a modified file is left in place but reported
- * as a conflict; a clean one is left in place and simply untracked.
+ * `classifyNoteRecord` returned `"unsyncable"` with reason `"undecodable"`:
+ * body bytes are present but don't parse, a durable fact about the record. A
+ * record merely *missing* its body never lands here (that's a delivery gap,
+ * handled above by leaving the note tracked), and neither does unrecognized
+ * *embedded* content - that's written with an unknown-content marker and
+ * flagged unpublishable instead, per the Safety Guarantee Audit. Local edits
+ * are never discarded silently: a modified file is left in place but
+ * reported as a conflict; a clean one is left in place and simply untracked.
  */
 async function dropUnsyncableNote(
   targetDir: string,

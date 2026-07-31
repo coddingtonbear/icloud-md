@@ -41,6 +41,10 @@
  * the caller records the real title in `apple-note-title` frontmatter
  * instead.
  *
+ * Trailing whitespace is the deliberate exception to "unrepresentable means
+ * frontmatter": the name carries the *trimmed* spelling and the difference
+ * counts as no difference at all - see `carriedTitleSpelling`.
+ *
  * The key says "the title this file's name doesn't carry", which is not
  * quite the same as "a title no name *could* carry". Both `pull` (writing
  * one) and `push` (reading one) treat it as outranking the name, so it is
@@ -150,19 +154,42 @@ export function representabilityProblem(title: string): string | undefined {
   if (title.trim() === "") {
     return "the title is empty";
   }
-  if (title.length > MAX_TITLE_LENGTH) {
+  // Every check below runs on the trimmed spelling, because that's what the
+  // name will actually carry - see `carriedTitleSpelling`. "CON " or a
+  // title padded past the length limit must not sneak through on the
+  // strength of whitespace the name drops.
+  const carried = carriedTitleSpelling(title);
+  if (carried.length > MAX_TITLE_LENGTH) {
     return `the title is longer than ${MAX_TITLE_LENGTH} characters`;
   }
-  if (title.startsWith(".")) {
+  if (carried.startsWith(".")) {
     // Obsidian ignores dotfiles outright, so the note would vanish from the
     // vault rather than merely being hidden.
     return "the title starts with a dot, which would make it a hidden file";
   }
-  if (title !== title.trimEnd() || title.endsWith(".")) {
-    return "the title ends with a dot or a space, which Windows silently strips";
+  if (carried.endsWith(".")) {
+    return "the title ends with a dot, which Windows silently strips";
   }
-  if (RESERVED_DEVICE_NAMES.has(title.toUpperCase())) {
+  if (RESERVED_DEVICE_NAMES.has(carried.toUpperCase())) {
     return "the title is a reserved device name on Windows";
   }
   return undefined;
+}
+
+/**
+ * The spelling of a title that its file name carries: trailing whitespace
+ * dropped, everything else exact.
+ *
+ * A trailing space is real title content in Apple Notes (nothing there ever
+ * strips it) but poison in a file name: Windows silently drops it, users can
+ * neither see nor retype it, and an Obsidian rename would shed it without
+ * anyone deciding to. So the name holds the trimmed spelling, and the
+ * difference is treated as *no difference* everywhere a name is read back
+ * against a title - with the remote spelling winning, so a push never
+ * "corrects" a title nobody touched (see `prepareRetitle`'s equivalence
+ * check). Deliberately stripping the whitespace remains expressible, through
+ * `apple-note-title`, whose comparison stays exact.
+ */
+export function carriedTitleSpelling(title: string): string {
+  return title.trimEnd();
 }

@@ -589,7 +589,9 @@ function noteHealth(record: CloudKitRecord): string | undefined {
     }
   }
   if (classified.status === "unsyncable") {
-    return "undecodable: the note document doesn't parse with this tool's model";
+    return classified.reason === "missing-body"
+      ? "no text data present on the record"
+      : "undecodable: the note document doesn't parse with this tool's model";
   }
   if (classified.status === "ok" && !classified.publishable) {
     return `contains content this tool can't parse${classified.unpublishableReason ? ` (${classified.unpublishableReason})` : ""}`;

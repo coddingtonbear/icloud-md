@@ -344,6 +344,11 @@ export function parseSharedZoneList(body: unknown): CloudKitZoneID[] {
  * (`TextDataEncrypted`) even when asked - the web client fetches those
  * per-note through this same lookup call.
  */
+/** CloudKit web services cap the operation list of a `records/lookup` at 200
+ * records per request; an unbounded batch (a large first shared pull) would
+ * fail the whole lookup at once. */
+const LOOKUP_BATCH_SIZE = 200;
+
 export async function lookupRecords(
   session: IcloudSession,
   ckDatabaseHost: string,
@@ -352,39 +357,52 @@ export async function lookupRecords(
   zoneID: CloudKitZoneID,
   recordNames: string[],
 ): Promise<CloudKitRecord[]> {
-  if (recordNames.length === 0) {
-    return [];
-  }
-  const body = await postDatabase(
-    "lookupRecords:records/lookup",
-    session,
-    ckDatabaseHost,
-    dsid,
-    database,
-    "records/lookup",
-    { records: recordNames.map((recordName) => ({ recordName })), zoneID },
-  );
+  const records: CloudKitRecord[] = [];
+  for (let start = 0; start < recordNames.length; start += LOOKUP_BATCH_SIZE) {
+    const batch = recordNames.slice(start, start + LOOKUP_BATCH_SIZE);
+    const body = await postDatabase(
+      "lookupRecords:records/lookup",
+      session,
+      ckDatabaseHost,
+      dsid,
+      database,
+      "records/lookup",
+      { records: batch.map((recordName) => ({ recordName })), zoneID },
+    );
 
-  if (!isRecord(body) || !Array.isArray(body.records)) {
-    throw new Error("Unexpected response shape from records/lookup (missing records array)");
+    if (!isRecord(body) || !Array.isArray(body.records)) {
+      throw new Error("Unexpected response shape from records/lookup (missing records array)");
+    }
+    // Per-record errors (e.g. NOT_FOUND for a record deleted since it was
+    // listed) come back as entries without `fields`/`recordType` - skip those
+    // rather than failing the whole lookup; the caller's record keeps whatever
+    // the zone listing returned and decides what a still-missing body means
+    // (`fetchSharedNoteRecords` treats it as a failed zone fetch).
+    records.push(
+      ...body.records
+        .filter((entry: unknown) => isRecord(entry) && typeof entry.recordType === "string" && isRecord(entry.fields))
+        .map(parseRecord),
+    );
   }
-  // Per-record errors (e.g. NOT_FOUND for a record deleted since it was
-  // listed) come back as entries without `fields`/`recordType` - skip those
-  // rather than failing the whole lookup; the caller's record keeps whatever
-  // the zone listing returned and gets classified from that.
-  return body.records
-    .filter((entry: unknown) => isRecord(entry) && typeof entry.recordType === "string" && isRecord(entry.fields))
-    .map(parseRecord);
+  return records;
 }
 
-/** A shared zone the `changes/database` listing advertised but whose
- * `changes/zone` fetch answered ZONE_NOT_FOUND - a share revoked or deleted
- * out from under the listing. Skipped rather than fatal; see
- * `fetchSharedNoteRecords`. */
-export interface SkippedSharedZone {
-  zoneID: CloudKitZoneID;
-  serverErrorCode: string;
-}
+/** A shared zone whose fetch didn't complete this run, skipped rather than
+ * fatal; see `fetchSharedNoteRecords`. Two distinct shapes:
+ *
+ * - `"zone-not-found"`: `changes/zone` answered ZONE_NOT_FOUND for a zone the
+ *   `changes/database` listing advertised - a share revoked or deleted out
+ *   from under the listing.
+ * - `"missing-note-bodies"`: the zone listed fine, but one or more live Note
+ *   records still had no `TextDataEncrypted` after the `records/lookup`
+ *   backfill (a throttled/failed per-record lookup, or a record deleted
+ *   between listing and lookup). Processing the zone anyway would classify
+ *   those notes unsyncable and permanently untrack them over what is usually
+ *   a transient failure - so the whole zone waits for a later pull, and its
+ *   syncToken must not advance. */
+export type SkippedSharedZone =
+  | { zoneID: CloudKitZoneID; reason: "zone-not-found"; serverErrorCode: string }
+  | { zoneID: CloudKitZoneID; reason: "missing-note-bodies"; missingRecordNames: string[] };
 
 export interface SharedNoteRecordsResult {
   zones: SharedZoneChanges[];
@@ -400,9 +418,12 @@ export interface SharedNoteRecordsResult {
  * A zone that answers ZONE_NOT_FOUND (a share revoked/deleted but still
  * enumerated by `changes/database`) is reported in `skippedZones` instead of
  * aborting the run - one unfetchable share shouldn't discard every other
- * zone's successful results. Any other zone-level error stays fatal: that's
- * a broken fetch, not a missing zone, and swallowing it would make it look
- * like a clean sync.
+ * zone's successful results. So is a zone with note bodies still missing
+ * after the lookup backfill (see `SkippedSharedZone`): its results are
+ * incomplete, and acting on them would untrack notes over a transient
+ * failure. Any other zone-level error stays fatal: that's a broken fetch,
+ * not a missing zone, and swallowing it would make it look like a clean
+ * sync.
  */
 export async function fetchSharedNoteRecords(
   session: IcloudSession,
@@ -442,10 +463,24 @@ export async function fetchSharedNoteRecords(
         mergeLookedUpRecords(records, lookedUp);
       }
 
+      // A body still missing after the lookup means this zone's fetch is
+      // incomplete, not that those notes are unsyncable - hand the zone back
+      // as skipped (old syncToken kept, no records processed) so a transient
+      // lookup failure costs one pull, not the note's tracking.
+      const stillMissing = records.filter(needsBodyLookup);
+      if (stillMissing.length > 0) {
+        skippedZones.push({
+          zoneID,
+          reason: "missing-note-bodies",
+          missingRecordNames: stillMissing.map((record) => record.recordName),
+        });
+        continue;
+      }
+
       zones.push({ zoneID, records, syncToken });
     } catch (error) {
       if (error instanceof CloudKitZoneFetchFailedError && error.serverErrorCode === "ZONE_NOT_FOUND") {
-        skippedZones.push({ zoneID, serverErrorCode: error.serverErrorCode });
+        skippedZones.push({ zoneID, reason: "zone-not-found", serverErrorCode: error.serverErrorCode });
         continue;
       }
       throw error;

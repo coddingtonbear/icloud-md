@@ -41,6 +41,19 @@ export interface CloneStateNoteEntry {
    * into a different folder before the rename is carried out.
    */
   pendingRename?: string | undefined;
+  /**
+   * The `apple-note-title` value the last sync left in this note's working
+   * file - the title-side counterpart of the base copy. Recorded when a
+   * filename-as-title pull files a title no file name can carry (see
+   * `titleFilename.ts`), so `push` can tell "the key pull wrote" from "a
+   * user-edited retitle request" without fetching the live record - without
+   * it, such a note read as retitled on every plan forever (and an
+   * individually-shared one was refused on every `status`). Absent when the
+   * last sync left no key, which is the common case; also absent in state
+   * written before the field existed, where one plan-time comparison against
+   * the live record backfills it.
+   */
+  frontmatterTitle?: string | undefined;
 }
 
 /** One synced Apple Notes folder - see the folders doc for the tree design. */
@@ -324,6 +337,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
       unpublishableReason: typeof entry.unpublishableReason === "string" ? entry.unpublishableReason : undefined,
       folderRecordName: typeof entry.folderRecordName === "string" ? entry.folderRecordName : undefined,
       pendingRename: typeof entry.pendingRename === "string" ? entry.pendingRename : undefined,
+      frontmatterTitle: typeof entry.frontmatterTitle === "string" ? entry.frontmatterTitle : undefined,
     };
   }
 

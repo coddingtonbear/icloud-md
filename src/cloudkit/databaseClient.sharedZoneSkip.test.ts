@@ -95,7 +95,7 @@ test("fetchSharedNoteRecords skips a ZONE_NOT_FOUND zone and keeps every other z
     assert.equal(result.zones[0]?.syncToken, "token-a");
     assert.equal(result.zones[0]?.records[0]?.recordName, "note-a");
     assert.deepEqual(result.skippedZones, [
-      { zoneID: { zoneName: "Notes", ownerRecordName: "_ownerB" }, serverErrorCode: "ZONE_NOT_FOUND" },
+      { zoneID: { zoneName: "Notes", ownerRecordName: "_ownerB" }, reason: "zone-not-found", serverErrorCode: "ZONE_NOT_FOUND" },
     ]);
   } finally {
     restore();

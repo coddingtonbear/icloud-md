@@ -38,6 +38,16 @@ test("fileNameCarriesTitle accepts a uniquified spelling, so pull doesn't walk i
   assert.equal(fileNameCarriesTitle("Groceries 17.md", "Groceries"), true);
 });
 
+test("a trailing-whitespace title is carried by the trimmed name, not banished to frontmatter", () => {
+  // Apple's editors make a trailing space in a title easy to type and
+  // impossible to see; a file name drops it (see `carriedTitleSpelling`),
+  // and the trimmed name must then be acceptable for the real title or pull
+  // would rename it (or re-file it as Untitled) on every run.
+  assert.equal(noteFileNameFor("Restaurants & Places List ", "filename"), "Restaurants & Places List.md");
+  assert.equal(fileNameCarriesTitle("Restaurants & Places List.md", "Restaurants & Places List "), true);
+  assert.equal(fileNameCarriesTitle("Restaurants & Places List 2.md", "Restaurants & Places List "), true);
+});
+
 test("fileNameCarriesTitle rejects a name for a different title", () => {
   assert.equal(fileNameCarriesTitle("Shopping list.md", "Groceries"), false);
   // " 1" is not a suffix the uniquifier ever produces (it starts at 2), and
@@ -67,8 +77,14 @@ test("titleNeedingFrontmatter names only the titles a file name genuinely can't 
 
   assert.equal(titleNeedingFrontmatter("x".repeat(200), "filename"), "x".repeat(200));
   assert.equal(titleNeedingFrontmatter(".hidden", "filename"), ".hidden");
-  assert.equal(titleNeedingFrontmatter("Trailing space ", "filename"), "Trailing space ");
   assert.equal(titleNeedingFrontmatter("CON", "filename"), "CON");
+
+  // Trailing whitespace doesn't force frontmatter: the name carries the
+  // trimmed spelling and the difference counts as no difference (see
+  // `carriedTitleSpelling`) - but the trimmed spelling gets no free pass
+  // through the other checks.
+  assert.equal(titleNeedingFrontmatter("Trailing space ", "filename"), undefined);
+  assert.equal(titleNeedingFrontmatter("CON ", "filename"), "CON ");
 });
 
 test("titleNeedingFrontmatter records nothing for a genuinely untitled note", () => {
@@ -88,7 +104,7 @@ test("titleNeedingFrontmatter is never anything in an in-body vault", () => {
 test("titleNeedingFrontmatter and noteFileNameFor agree on which titles fall back", () => {
   // Two answers to one question; a disagreement would either lose a title or
   // duplicate a representable one into frontmatter for nothing.
-  for (const title of ["Groceries", "Pat/Alex", ".hidden", "CON", "x".repeat(200), "Trailing space "]) {
+  for (const title of ["Groceries", "Pat/Alex", ".hidden", "CON", "CON ", "x".repeat(200), "Trailing space "]) {
     const needsFrontmatter = titleNeedingFrontmatter(title, "filename") !== undefined;
     assert.equal(noteFileNameFor(title, "filename") === "Untitled.md", needsFrontmatter, `disagreed about: ${title}`);
   }

@@ -85,6 +85,25 @@ test("round-trips pendingRename, so a deferred rename survives until it's done",
     assert.equal(readBack?.notes["REC-SETTLED"]?.pendingRename, undefined);
   }));
 
+test("round-trips frontmatterTitle, so a pull-written apple-note-title stays recognizable as synced", () =>
+  withTempDir(async (dir) => {
+    // Without it, push reads the key pull wrote (for a title no file name
+    // can carry) as a retitle request on every plan - see the field's doc.
+    const state: CloneState = {
+      syncToken: "token",
+      notes: {
+        "REC-KEYED": { file: "Untitled.md", recordChangeTag: "a", modificationDate: 1, frontmatterTitle: "Restaurants " },
+        "REC-PLAIN": { file: "Plain.md", recordChangeTag: "b", modificationDate: 2 },
+      },
+    };
+
+    await writeCloneState(dir, state);
+    const readBack = await readCloneState(dir);
+
+    assert.equal(readBack?.notes["REC-KEYED"]?.frontmatterTitle, "Restaurants ");
+    assert.equal(readBack?.notes["REC-PLAIN"]?.frontmatterTitle, undefined);
+  }));
+
 test("reads a pre-shared-notes state file (no shared fields) without error", () =>
   withTempDir(async (dir) => {
     // Exactly what writeCloneState produced before shared-note support existed.

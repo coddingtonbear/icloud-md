@@ -107,8 +107,12 @@ export async function runClone(
     summary.notices.push({
       level: "warn",
       message:
-        `Skipped a shared zone the server no longer has (owner ${skipped.zoneID.ownerRecordName ?? "unknown"}, ` +
-        `${skipped.serverErrorCode}) - its share was likely revoked or deleted; no notes from it were cloned`,
+        skipped.reason === "zone-not-found"
+          ? `Skipped a shared zone the server no longer has (owner ${skipped.zoneID.ownerRecordName ?? "unknown"}, ` +
+            `${skipped.serverErrorCode}) - its share was likely revoked or deleted; no notes from it were cloned`
+          : `Skipped the shared zone owned by ${skipped.zoneID.ownerRecordName ?? "unknown"}: ` +
+            `${skipped.missingRecordNames.length} note(s) came through without their text and looking them up didn't ` +
+            "fill it in - no notes from it were cloned; the first pull will retry it",
     });
   }
   const notes: CloneState["notes"] = {};
@@ -191,11 +195,12 @@ export async function runClone(
         const relativeFile = path.posix.join(placement.dir, fileName);
 
         const filePath = path.join(targetDir, relativeFile);
+        // The rare title a file name can't hold is recorded in
+        // frontmatter instead; `noteFileNameFor` filed it as "Untitled.md".
+        const recordedTitle = titleNeedingFrontmatter(decoded.titleLine, titleMode);
         await writeFile(
           filePath,
-          // The rare title a file name can't hold is recorded in
-          // frontmatter instead; `noteFileNameFor` filed it as "Untitled.md".
-          composeNoteFile("", bodyText, record.recordName, titleNeedingFrontmatter(decoded.titleLine, titleMode)),
+          composeNoteFile("", bodyText, record.recordName, recordedTitle),
           "utf-8",
         );
         await applyNoteFileTimes(filePath, record);
@@ -218,6 +223,7 @@ export async function runClone(
           sharedZoneOwner: source.sharedZoneOwner,
           unpublishableReason,
           folderRecordName: placement.folderRecordName,
+          frontmatterTitle: recordedTitle,
         };
       } finally {
         progress?.onRecordProcessed?.();
