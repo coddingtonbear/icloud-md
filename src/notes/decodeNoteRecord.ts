@@ -57,7 +57,18 @@ export type OkNoteDecodeResult = {
   unpublishableReason?: string | undefined;
 };
 
-export type NoteDecodeResult = { status: "deleted" } | { status: "unsyncable"; reason: "undecodable" } | OkNoteDecodeResult;
+/**
+ * The two unsyncable reasons differ in what they say about the *note*:
+ * "undecodable" means the body bytes are present but don't parse with this
+ * tool's model - a durable fact about the record. "missing-body" means the
+ * record arrived without `TextDataEncrypted` at all, which is a fact about
+ * the *delivery* (shared-zone listings omit bodies, and a per-record lookup
+ * can fail transiently) - pull must never untrack a note over it.
+ */
+export type NoteDecodeResult =
+  | { status: "deleted" }
+  | { status: "unsyncable"; reason: "undecodable" | "missing-body" }
+  | OkNoteDecodeResult;
 
 export interface ClassifyNoteOptions {
   /**
@@ -79,7 +90,7 @@ export function classifyNoteRecord(record: CloudKitRecord, options: ClassifyNote
 
   const textField = record.fields.TextDataEncrypted;
   if (!textField || typeof textField.value !== "string") {
-    return { status: "unsyncable", reason: "undecodable" };
+    return { status: "unsyncable", reason: "missing-body" };
   }
 
   const compressed = Buffer.from(textField.value, "base64");

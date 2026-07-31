@@ -140,8 +140,18 @@ test("an attachmentInfo run not sitting on a lone placeholder banner-marks the n
   });
 });
 
-test("a note missing TextDataEncrypted is undecodable", () => {
+test("a note missing TextDataEncrypted is unsyncable with the missing-body reason, not undecodable", () => {
+  // The distinction is load-bearing: missing-body can be a transient
+  // delivery gap (a failed shared-zone body lookup), and pull must never
+  // untrack a note over it - unlike a genuine decode failure.
   const record = makeRecord({});
+  assert.deepEqual(classifyNoteRecord(record), { status: "unsyncable", reason: "missing-body" });
+});
+
+test("a note whose body bytes are present but unparseable is undecodable", () => {
+  const record = makeRecord({
+    TextDataEncrypted: { value: Buffer.from("not a gzipped note document").toString("base64"), type: "ENCRYPTED_BYTES" },
+  });
   assert.deepEqual(classifyNoteRecord(record), { status: "unsyncable", reason: "undecodable" });
 });
 
