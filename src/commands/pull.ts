@@ -127,7 +127,7 @@ export async function runPull(
     fetchedCount += pageRecordCount;
     progress?.onFetchPage?.(fetchedCount);
   };
-  const { records, syncToken } = await fetchAllNoteRecords(
+  const { records, syncToken, resyncedFromScratch } = await fetchAllNoteRecords(
     auth.session,
     auth.ckdatabasewsUrl,
     auth.dsid,
@@ -194,7 +194,9 @@ export async function runPull(
     });
   }
 
-  const sources: Array<{ records: CloudKitRecord[]; sharedZoneOwner?: string | undefined }> = [{ records }];
+  const sources: Array<{ records: CloudKitRecord[]; sharedZoneOwner?: string | undefined; resynced: boolean }> = [
+    { records, resynced: resyncedFromScratch },
+  ];
   const sharedZoneSyncTokens: Record<string, string> = {};
   const sharedZoneRecords: SharedZoneRecords[] = [];
   for (const zone of sharedZones) {
@@ -204,7 +206,7 @@ export async function runPull(
     if (zone.zoneID.ownerRecordName) {
       sharedZoneRecords.push({ ownerRecordName: zone.zoneID.ownerRecordName, records: zone.records });
     }
-    sources.push({ records: zone.records, sharedZoneOwner: zone.zoneID.ownerRecordName });
+    sources.push({ records: zone.records, sharedZoneOwner: zone.zoneID.ownerRecordName, resynced: zone.resyncedFromScratch });
   }
   // A skipped zone yielded no new sync token - carry the stored one forward
   // so the zone resumes incrementally on a later pull instead of refetching
@@ -252,6 +254,17 @@ export async function runPull(
         }
 
         const existing = notes[record.recordName];
+
+        // A resynced zone re-delivers *every* record, changed or not. One
+        // whose change tag still matches what this vault last synced hasn't
+        // moved remotely - skip it, exactly as an incremental fetch would
+        // have by never sending it. (A record with local-only edits is
+        // untouched either way: not rewriting it here is what an incremental
+        // pull already does, and `push` picks the edits up as usual.)
+        if (source.resynced && existing !== undefined && record.recordChangeTag !== undefined && record.recordChangeTag === existing.recordChangeTag) {
+          continue;
+        }
+
         const decoded = classifyNoteRecord(record, { titleMode });
 
         if (decoded.status === "deleted") {
@@ -581,6 +594,34 @@ export async function runPull(
 
   progress?.onProcessComplete?.();
 
+  // A zone that was resynced from scratch (its stored sync token rejected -
+  // see `fetchZoneNoteRecords`) delivered a complete listing rather than a
+  // delta, and a full listing carries no tombstones: whatever was deleted
+  // remotely while the token was unusable simply isn't in it. Reconcile by
+  // absence, zone by zone, so those deletions aren't silently missed forever.
+  for (const source of sources) {
+    if (!source.resynced) {
+      continue;
+    }
+    const removed = await reconcileNotesAfterResync(
+      targetDir,
+      source.sharedZoneOwner,
+      new Set(source.records.map((record) => record.recordName)),
+      notes,
+      attachments,
+      tableAttachments,
+      summary,
+      titleMode,
+    );
+    const zoneLabel = source.sharedZoneOwner === undefined ? "this vault's own notes" : `the notes shared by ${source.sharedZoneOwner}`;
+    summary.notices.push({
+      level: "warn",
+      message:
+        `iCloud no longer accepted the stored sync token for ${zoneLabel}, so they were resynced from scratch` +
+        (removed > 0 ? ` - ${removed} note(s) deleted remotely in the meantime were reconciled` : ""),
+    });
+  }
+
   // A skipped zone is unreachable, not proven vanished: ZONE_NOT_FOUND on
   // its fetch could be a service-side inconsistency, and untracking every
   // note in it would be destructive if so. Count it as still-live here; a
@@ -791,6 +832,42 @@ async function handleVanishedSharedZones(
     }
     summary.unsharedUntracked += 1;
   }
+}
+
+/**
+ * Applies the deletions a from-scratch resync can only reveal by absence: a
+ * note tracked to this zone (`sharedZoneOwner` `undefined` = the private
+ * zone) whose record appears nowhere in the zone's complete listing no
+ * longer exists remotely, and goes through the same remote-deletion handling
+ * a tombstone would have driven - a clean local copy is removed, one with
+ * local edits becomes a delete/modify conflict and stays put.
+ *
+ * `seenRecordNames` must come from the *complete* listing, every record type
+ * included: matching on Note records alone would misread a record whose type
+ * changed (e.g. a note that got password-protected) as a deletion. And it
+ * must only ever be called for a zone whose full walk actually completed -
+ * absence from a partial listing proves nothing.
+ */
+export async function reconcileNotesAfterResync(
+  targetDir: string,
+  sharedZoneOwner: string | undefined,
+  seenRecordNames: ReadonlySet<string>,
+  notes: CloneState["notes"],
+  attachments: NonNullable<CloneState["attachments"]>,
+  tableAttachments: NonNullable<CloneState["tableAttachments"]>,
+  summary: PullSummary,
+  titleMode: TitleMode,
+): Promise<number> {
+  let removed = 0;
+  for (const [recordName, entry] of Object.entries(notes)) {
+    if (entry.sharedZoneOwner !== sharedZoneOwner || seenRecordNames.has(recordName)) {
+      continue;
+    }
+    const tombstone: CloudKitRecord = { recordName, recordType: "Note", fields: {}, deleted: true };
+    await handleRemoteDeletion(targetDir, tombstone, entry, notes, attachments, tableAttachments, summary, titleMode);
+    removed += 1;
+  }
+  return removed;
 }
 
 async function handleRemoteDeletion(

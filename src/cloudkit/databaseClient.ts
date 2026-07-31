@@ -1,5 +1,5 @@
 import type { IcloudSession } from "../session.js";
-import { loggedFetch } from "../debugLog.js";
+import { appendDebugLog, loggedFetch } from "../debugLog.js";
 import { CloudKitRequestFailedError, CloudKitZoneFetchFailedError } from "../errors.js";
 
 export interface CloudKitFieldValue {
@@ -53,6 +53,12 @@ export interface CloudKitRecord {
 export interface ZoneChangesResult {
   records: CloudKitRecord[];
   syncToken: string | undefined;
+  /** True when the caller's sync token was rejected by the server and the
+   * zone was refetched from scratch instead. `records` is then a *complete
+   * listing* of the zone, not an incremental delta - deletions carry no
+   * tombstones, so a tracked record absent from it no longer exists remotely
+   * and the caller must reconcile that itself. */
+  resyncedFromScratch: boolean;
 }
 
 /** Which of the container's databases to talk to. Notes shared *with* this
@@ -85,6 +91,8 @@ export interface SharedZoneChanges {
   zoneID: CloudKitZoneID;
   records: CloudKitRecord[];
   syncToken: string | undefined;
+  /** See `ZoneChangesResult.resyncedFromScratch` - same semantics, per zone. */
+  resyncedFromScratch: boolean;
 }
 
 // Client version identifiers observed from a real www.icloud.com session (see
@@ -185,6 +193,21 @@ async function postDatabase(
  * prior call's result) to fetch only what changed since then; omit it for a
  * full initial fetch. Returns the new syncToken so a future call can resume
  * from here.
+ *
+ * A `sinceSyncToken` the server no longer accepts doesn't abort the fetch:
+ * the zone is refetched from scratch instead, reported via
+ * `resyncedFromScratch` (see `ZoneChangesResult`). Live probing (2026-07-31)
+ * established how an unusable token actually surfaces: a zone-level
+ * BAD_REQUEST inside an HTTP 200 ("Unknown sync continuation type" for a
+ * malformed token, "Invalid continuation format" for a corrupted one), while
+ * a merely *old* token - 15 days, in the probe - still syncs incrementally.
+ * A genuinely expired token can't be forced on demand, so BAD_REQUEST is the
+ * one observed failure shape and the only code that triggers the fallback;
+ * the web client offers no more guidance, since it holds tokens only in page
+ * memory and can never see one expire. If BAD_REQUEST was actually caused by
+ * something else in the request, the token-free retry hits it identically
+ * and that error propagates - the fallback only "sticks" when dropping the
+ * token was the fix.
  */
 export async function fetchZoneNoteRecords(
   session: IcloudSession,
@@ -195,45 +218,65 @@ export async function fetchZoneNoteRecords(
   sinceSyncToken?: string,
   onPage?: (pageRecordCount: number) => void,
 ): Promise<ZoneChangesResult> {
-  const records: CloudKitRecord[] = [];
-  let syncToken: string | undefined = sinceSyncToken;
-  let moreComing = true;
+  const walkFrom = async (startToken: string | undefined): Promise<{ records: CloudKitRecord[]; syncToken: string | undefined }> => {
+    const records: CloudKitRecord[] = [];
+    let syncToken: string | undefined = startToken;
+    let moreComing = true;
 
-  while (moreComing) {
-    const zoneRequest: Record<string, unknown> = {
-      zoneID,
-      desiredKeys: NOTE_DESIRED_KEYS,
-      desiredRecordTypes: NOTE_DESIRED_RECORD_TYPES,
-    };
-    // The shared database rejects `reverse` outright ("Reverse sync of share
-    // db is unsupported", BAD_REQUEST) - only send it where the web client
-    // does, on private-zone fetches.
-    if (database === "private") {
-      zoneRequest.reverse = true;
+    while (moreComing) {
+      const zoneRequest: Record<string, unknown> = {
+        zoneID,
+        desiredKeys: NOTE_DESIRED_KEYS,
+        desiredRecordTypes: NOTE_DESIRED_RECORD_TYPES,
+      };
+      // The shared database rejects `reverse` outright ("Reverse sync of share
+      // db is unsupported", BAD_REQUEST) - only send it where the web client
+      // does, on private-zone fetches.
+      if (database === "private") {
+        zoneRequest.reverse = true;
+      }
+      if (syncToken) {
+        zoneRequest.syncToken = syncToken;
+      }
+
+      const body = await postDatabase(
+        "fetchZoneNoteRecords:changes/zone",
+        session,
+        ckDatabaseHost,
+        dsid,
+        database,
+        "changes/zone",
+        { zones: [zoneRequest] },
+      );
+      const zone = firstZone(body);
+      const pageRecords = zone.records ?? [];
+
+      records.push(...pageRecords);
+      syncToken = zone.syncToken ?? syncToken;
+      moreComing = zone.moreComing === true;
+      onPage?.(pageRecords.length);
     }
-    if (syncToken) {
-      zoneRequest.syncToken = syncToken;
-    }
 
-    const body = await postDatabase(
-      "fetchZoneNoteRecords:changes/zone",
-      session,
-      ckDatabaseHost,
-      dsid,
-      database,
-      "changes/zone",
-      { zones: [zoneRequest] },
-    );
-    const zone = firstZone(body);
-    const pageRecords = zone.records ?? [];
+    return { records, syncToken };
+  };
 
-    records.push(...pageRecords);
-    syncToken = zone.syncToken ?? syncToken;
-    moreComing = zone.moreComing === true;
-    onPage?.(pageRecords.length);
+  if (sinceSyncToken === undefined) {
+    return { ...(await walkFrom(undefined)), resyncedFromScratch: false };
   }
 
-  return { records, syncToken };
+  try {
+    return { ...(await walkFrom(sinceSyncToken)), resyncedFromScratch: false };
+  } catch (error) {
+    if (!(error instanceof CloudKitZoneFetchFailedError) || error.serverErrorCode !== "BAD_REQUEST") {
+      throw error;
+    }
+    await appendDebugLog({
+      note:
+        `fetchZoneNoteRecords: stored sync token rejected (${error.serverErrorCode}: ${error.message}) - ` +
+        `refetching ${database} zone ${zoneID.ownerRecordName ?? "Notes"} from scratch`,
+    });
+    return { ...(await walkFrom(undefined)), resyncedFromScratch: true };
+  }
 }
 
 /**
@@ -479,7 +522,7 @@ export async function fetchSharedNoteRecords(
     const owner = zoneID.ownerRecordName;
     const sinceSyncToken = owner ? sinceSyncTokens[owner] : undefined;
     try {
-      const { records, syncToken } = await fetchZoneNoteRecords(
+      const { records, syncToken, resyncedFromScratch } = await fetchZoneNoteRecords(
         session,
         ckDatabaseHost,
         dsid,
@@ -516,7 +559,7 @@ export async function fetchSharedNoteRecords(
         continue;
       }
 
-      zones.push({ zoneID, records, syncToken });
+      zones.push({ zoneID, records, syncToken, resyncedFromScratch });
     } catch (error) {
       if (error instanceof CloudKitZoneFetchFailedError && error.serverErrorCode === "ZONE_NOT_FOUND") {
         skippedZones.push({ zoneID, reason: "zone-not-found", serverErrorCode: error.serverErrorCode });
