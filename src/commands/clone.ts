@@ -191,11 +191,12 @@ export async function runClone(
         const relativeFile = path.posix.join(placement.dir, fileName);
 
         const filePath = path.join(targetDir, relativeFile);
+        // The rare title a file name can't hold is recorded in
+        // frontmatter instead; `noteFileNameFor` filed it as "Untitled.md".
+        const recordedTitle = titleNeedingFrontmatter(decoded.titleLine, titleMode);
         await writeFile(
           filePath,
-          // The rare title a file name can't hold is recorded in
-          // frontmatter instead; `noteFileNameFor` filed it as "Untitled.md".
-          composeNoteFile("", bodyText, record.recordName, titleNeedingFrontmatter(decoded.titleLine, titleMode)),
+          composeNoteFile("", bodyText, record.recordName, recordedTitle),
           "utf-8",
         );
         await applyNoteFileTimes(filePath, record);
@@ -218,6 +219,7 @@ export async function runClone(
           sharedZoneOwner: source.sharedZoneOwner,
           unpublishableReason,
           folderRecordName: placement.folderRecordName,
+          frontmatterTitle: recordedTitle,
         };
       } finally {
         progress?.onRecordProcessed?.();

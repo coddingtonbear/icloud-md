@@ -402,6 +402,7 @@ export async function runPull(
             sharedZoneOwner: source.sharedZoneOwner,
             unpublishableReason,
             folderRecordName: placement.folderRecordName,
+            frontmatterTitle: recordedTitle,
           };
           summary.added += 1;
           summary.changes.push({
@@ -467,6 +468,7 @@ export async function runPull(
             modificationDate: modificationDateOf(record),
             unpublishableReason,
             folderRecordName: placement.folderRecordName,
+            frontmatterTitle: recordedTitle,
             ...renameFields,
           };
           summary.updated += 1;
@@ -520,6 +522,7 @@ export async function runPull(
           modificationDate: modificationDateOf(record),
           unpublishableReason,
           folderRecordName: placement.folderRecordName,
+          frontmatterTitle: recordedTitle,
           ...renameFields,
         };
 
