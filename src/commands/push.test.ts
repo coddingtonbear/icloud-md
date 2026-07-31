@@ -747,3 +747,47 @@ test("renaming a note that has attachments in place is allowed - only relocating
 
     await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
   }));
+
+// --- `apple-note-title` as a retitle request ---------------------------------
+//
+// A frontmatter-only edit is invisible to the base-copy comparison by design.
+// The one key push does read out of the envelope is the exception, because
+// under filename-as-title it says something no body ever could.
+
+/** state(), as a filename-as-title vault. */
+function filenameTitleState(): CloneState {
+  return { ...state(), titleMode: "filename" };
+}
+
+test("buildPushPlan takes a clean file's apple-note-title to the network - it may be asking for a retitle", () =>
+  withTempDir(async (dir) => {
+    await writeBaseCopy(dir, "REC1", "Synced text");
+    await writeVaultFile(dir, "Notes/Tracked.md", '---\napple-note-title: "A new title"\n---\nSynced text');
+    await writeCloneState(dir, filenameTitleState());
+
+    // Whether it differs from the note's real title can only be settled
+    // against the live record; the UnboundAccountError proves it got there.
+    await assert.rejects(() => buildPushPlan(dir), UnboundAccountError);
+  }));
+
+test("buildPushPlan leaves an in-body vault's apple-note-title alone - the title is the first line there", () =>
+  withTempDir(async (dir) => {
+    await writeBaseCopy(dir, "REC1", "Synced text");
+    await writeVaultFile(dir, "Notes/Tracked.md", '---\napple-note-title: "A new title"\n---\nSynced text');
+    await writeCloneState(dir, state());
+
+    const { entries } = await buildPushPlan(dir);
+
+    assert.deepEqual(entries, [], "no candidate, and so no network");
+  }));
+
+test("buildPushPlan still ignores ordinary frontmatter on a clean file", () =>
+  withTempDir(async (dir) => {
+    await writeBaseCopy(dir, "REC1", "Synced text");
+    await writeVaultFile(dir, "Notes/Tracked.md", "---\ntags: [personal]\n---\nSynced text");
+    await writeCloneState(dir, filenameTitleState());
+
+    const { entries } = await buildPushPlan(dir);
+
+    assert.deepEqual(entries, []);
+  }));

@@ -259,7 +259,7 @@ vault picks one at `clone` time:
 | --- | --- | --- |
 | The file contains | the title as its first line, then the body | the body only |
 | The file is named | after the title, as a convenience | after the title, because that *is* the title |
-| Retitling a note | edit the first line | rename the file |
+| Retitling a note | edit the first line | rename the file, or set `apple-note-title` |
 | Suits | plain Markdown, git, anything that reads a file top to bottom | Obsidian and friends, where the file name is the document title |
 
 Both shapes record each note's identity in local-only
@@ -276,8 +276,15 @@ A few consequences worth knowing before you pick:
   no name can carry at all (extremely long, leading dot, a reserved name
   like `CON`) is filed as `Untitled.md` with the real title recorded in
   `apple-note-title` frontmatter, and `pull` says so on the changelist line.
+- **`apple-note-title` also works in the other direction.** Setting it on a
+  note asks for that title, which is the only way to give a note a title no
+  file name could spell. `push` sends the retitle; the file itself is
+  renamed on the next `pull`, which then drops the key again if the new
+  title turns out to be one a name can carry after all.
 - **A note retitled on your phone gets its file renamed on the next
-  `pull`**, since there is nowhere else for the new title to go.
+  `pull`**, since there is nowhere else for the new title to go. A retitle
+  you asked for locally takes the same road, which is why renaming is always
+  something `pull` does and never something `push` does.
 - **The mode is chosen once.** Switching an existing vault between the two
   shapes isn't supported yet: it would have to rewrite every file in the
   vault, which is a different (and more dangerous) operation than the

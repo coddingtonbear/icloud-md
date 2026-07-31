@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { writeBaseCopy } from "./baseCopy.js";
 import type { CloneStateNoteEntry } from "./cloneState.js";
-import { localFileState } from "./localFileState.js";
+import { localFileState, readLocalNote } from "./localFileState.js";
 import { composeNoteFile } from "./noteIdFrontmatter.js";
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
@@ -92,4 +92,49 @@ test("trimming that leading blank line is a real edit, and reads as one", () =>
     await writeBaseCopy(dir, REC, "\n**Yield:** 8 servings");
 
     assert.equal(await localFileState(dir, ENTRY, REC, "filename"), "modified");
+  }));
+
+// --- The split the state was judged on, handed back ---------------------------
+//
+// `push` needs both halves of every tracked file it looks at - the body to
+// compare and send, and the envelope to read `apple-note-title` out of - and
+// reading the same file twice to get them is how the two can drift apart.
+
+test("readLocalNote hands back the frontmatter a clean file carries", () =>
+  withTempDir(async (dir) => {
+    await seed(dir, `---\napple-note-title: A very long title\n---\n${BODY}`);
+
+    const local = await readLocalNote(dir, ENTRY, REC);
+
+    assert.notEqual(local.status, "missing");
+    if (local.status === "missing") {
+      throw new Error("unreachable");
+    }
+    assert.equal(local.status, "clean", "a frontmatter-only difference is still clean");
+    assert.equal(local.body, BODY);
+    assert.match(local.frontmatter, /apple-note-title: A very long title/);
+  }));
+
+test("readLocalNote splits with the vault's shape, so a blank first body line survives", () =>
+  withTempDir(async (dir) => {
+    const body = "\n**Yield:** 8 servings";
+    await mkdir(path.join(dir, path.dirname(ENTRY.file)), { recursive: true });
+    await writeFile(path.join(dir, ENTRY.file), composeNoteFile("", body, NOTE_ID), "utf-8");
+    await writeBaseCopy(dir, REC, body);
+
+    const local = await readLocalNote(dir, ENTRY, REC, "filename");
+
+    assert.notEqual(local.status, "missing");
+    if (local.status === "missing") {
+      throw new Error("unreachable");
+    }
+    assert.equal(local.status, "clean");
+    assert.equal(local.body, body, "the note's own empty first paragraph is body, not envelope");
+  }));
+
+test("readLocalNote reports a vanished file as missing, with no content to offer", () =>
+  withTempDir(async (dir) => {
+    await writeBaseCopy(dir, REC, BODY);
+
+    assert.deepEqual(await readLocalNote(dir, ENTRY, REC), { status: "missing" });
   }));

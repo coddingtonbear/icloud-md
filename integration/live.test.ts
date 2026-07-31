@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { RunContext } from "./harness.js";
-import { stripFrontmatter, type Vault } from "./vault.js";
+import { readFrontmatterField, stripFrontmatter, type Vault } from "./vault.js";
 
 const enabled = process.env.ICLOUD_MD_ITEST === "1";
 
@@ -363,6 +363,65 @@ describe(
       // A later plain pull performs what was left undone.
       await titled.pull();
       assert.ok(await titled.noteExists(`${renamed}.md`), "a plain pull should carry out the deferred rename");
+    });
+
+    it("pushes an apple-note-title as a retitle, and pull renames the file to match", async () => {
+      const before = run.title("frontmatter retitle before");
+      const after = run.title("frontmatter retitle after");
+      await titled.writeNote(`${before}.md`, ["stable body", ""].join("\n"));
+      await titled.push();
+      const noteId = await titled.noteId(`${before}.md`);
+
+      // The file keeps its name; only the envelope changes. That is
+      // deliberately invisible to the base-copy comparison, so this also
+      // proves the key is what made the note a candidate at all.
+      const existing = await titled.readNote(`${before}.md`);
+      await titled.writeNote(`${before}.md`, `---\napple-note-id: ${noteId}\napple-note-title: "${after}"\n---\n${stripFrontmatter(existing)}`);
+      await titled.push();
+
+      const web = await (await run.oracle()).readNote(noteId);
+      assert.equal(web.title, after, "the key should have retitled the note");
+      assert.match(web.plainText, /stable body/, "a retitle must not disturb the body");
+      assert.ok(await titled.noteExists(`${before}.md`), "push must not rename the file - that is pull's job");
+
+      await titled.pull();
+      assert.ok(await titled.noteExists(`${after}.md`), "the pull should rename the file to the new title");
+      assert.equal(await titled.noteExists(`${before}.md`), false, "the old file name should be gone");
+      assert.equal(
+        readFrontmatterField(await titled.readNote(`${after}.md`), "apple-note-title"),
+        undefined,
+        "a title the name now carries must not stay duplicated in frontmatter",
+      );
+      assert.equal((await titled.status()).exitCode, 0, "the vault should settle after the round trip");
+    });
+
+    it("keeps a title no file name can hold in frontmatter, and pushes it exactly once", async () => {
+      const before = run.title("unrepresentable retitle");
+      // Over MAX_TITLE_LENGTH, so no file name can carry it.
+      const after = run.title(`a title far too long for any file name to hold ${"x".repeat(60)}`);
+      await titled.writeNote(`${before}.md`, ["stable body", ""].join("\n"));
+      await titled.push();
+      const noteId = await titled.noteId(`${before}.md`);
+
+      const existing = await titled.readNote(`${before}.md`);
+      await titled.writeNote(`${before}.md`, `---\napple-note-id: ${noteId}\napple-note-title: "${after}"\n---\n${stripFrontmatter(existing)}`);
+      await titled.push();
+
+      const web = await (await run.oracle()).readNote(noteId);
+      assert.equal(web.title, after, "the key is the only channel this title has");
+
+      await titled.pull();
+      const file = await titled.findFileByNoteId(noteId);
+      assert.ok(file !== undefined, "the note should still be findable by id");
+      assert.equal(
+        readFrontmatterField(await titled.readVaultFile(file), "apple-note-title"),
+        after,
+        "a title no name can hold keeps living in frontmatter",
+      );
+      // The key now records the title the note already has. Pushing again
+      // must read that as "nothing to do" rather than as a fresh retitle -
+      // otherwise every push would rewrite the title paragraph forever.
+      assert.equal((await titled.status()).exitCode, 0, "a key that merely records the title is not a pending change");
     });
   },
 );

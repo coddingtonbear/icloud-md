@@ -19,12 +19,19 @@ import { readNoteId } from "./noteIdFrontmatter.js";
  *
  * Between the two, the name on disk knowingly disagrees with the note's
  * title. That is safe rather than merely tolerable, because no path that
- * reads a tracked note ever re-derives a title from its file name - push
+ * reads a tracked note ever *re-derives* a title from its file name - push
  * takes the title from the live record (see `restoreStrippedTitle`), and
  * only a file found somewhere *other* than its tracked path is read as a
  * retitle. Settling below runs before anything reasons about which file is
  * which, so a completed rename never reaches that machinery as a mystery
  * move.
+ *
+ * The one thing a tracked file can say about its own title is an explicit
+ * `apple-note-title`, which is not a re-derivation - it's an exact string
+ * the user wrote. Push sends that as a retitle and renames nothing; the
+ * name catches up here, on the pull that follows, which is why a retitle
+ * requested locally and one made on another device arrive by the same
+ * road.
  */
 
 /**

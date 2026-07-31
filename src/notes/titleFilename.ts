@@ -39,9 +39,16 @@
  * Some titles can't be carried by a file name at all - too long, a leading
  * `.`, a reserved device name. `titleIsRepresentable` identifies them, and
  * the caller records the real title in `apple-note-title` frontmatter
- * instead. That key is deliberately absent for everything else: duplicating
- * a representable title into frontmatter would create a second source of
- * truth for no benefit.
+ * instead.
+ *
+ * The key says "the title this file's name doesn't carry", which is not
+ * quite the same as "a title no name *could* carry". Both `pull` (writing
+ * one) and `push` (reading one) treat it as outranking the name, so it is
+ * also how a user asks for a new title their file name can't express: they
+ * write the key, `push` sends the retitle, and `pull` renames the file and
+ * clears the key again if the new title turns out to be representable after
+ * all. Outside that round trip the key stays absent, which is what keeps it
+ * from becoming a second source of truth for titles a name holds fine.
  */
 
 /** Illegal (or Obsidian-hostile) character -> the legal character that

@@ -46,6 +46,11 @@ export interface PlanEntry {
    * to be renamed to. Structured rather than spelled out in `reason` because
    * the consumer that performs the rename reads this listing as JSON. */
   pendingRename?: string;
+  /** Something true about an entry that is going through fine - shown in the
+   * quiet tone under the entry's line, where `reason` would sit for one that
+   * isn't. For consequences the user can't infer from the label alone, like
+   * a retitle whose file rename lands on the next pull. */
+  remark?: string;
 }
 
 /** Borrowed from `git status` verbatim, because a person who has used git
@@ -167,6 +172,9 @@ export function renderPlan(
       }
       continue;
     }
+    if (entry.remark !== undefined) {
+      lines.push(LISTING_INDENT + remarkLine(QUIET, LABEL_WIDTH, entry.remark));
+    }
     if (entry.kind === "create") {
       toCreate += 1;
     } else if (entry.kind === "createFolder") {
@@ -252,6 +260,7 @@ export type SerializedPlanEntry = Pick<
   | "previousFile"
   | "pendingRename"
   | "folderTitle"
+  | "remark"
 >;
 
 /** Projects any `PlanEntry` (including `push`'s `ExecutablePlanEntry`, which
@@ -265,6 +274,7 @@ export function serializePlanEntry(entry: PlanEntry): SerializedPlanEntry {
     previousFile,
     pendingRename,
     folderTitle,
+    remark,
   } = entry;
   return {
     kind,
@@ -274,5 +284,6 @@ export function serializePlanEntry(entry: PlanEntry): SerializedPlanEntry {
     ...(previousFile !== undefined ? { previousFile } : {}),
     ...(pendingRename !== undefined ? { pendingRename } : {}),
     ...(folderTitle !== undefined ? { folderTitle } : {}),
+    ...(remark !== undefined ? { remark } : {}),
   };
 }

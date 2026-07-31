@@ -21,7 +21,8 @@ import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { writeCloneState, type CloneState, type CloneStateNoteEntry, type TitleMode } from "../notes/cloneState.js";
 import { migrationReporter, openVault } from "../notes/vaultMigrations.js";
 import { pendingRenameTarget, settlePendingRenames } from "../notes/pendingRename.js";
-import { NOTE_ID_KEY, readNoteId, readNoteTitle, setNoteId } from "../notes/noteIdFrontmatter.js";
+import { NOTE_ID_KEY, NOTE_TITLE_KEY, readNoteId, readNoteTitle, setNoteId } from "../notes/noteIdFrontmatter.js";
+import { representabilityProblem, titleIsRepresentable } from "../notes/titleFilename.js";
 import { resolveNoteIds } from "../notes/noteIdPairing.js";
 import { classifyNoteRecord, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
@@ -32,7 +33,7 @@ import { isEnoent } from "../fsUtil.js";
 import { hasConflictMarkers, mergeNoteVersions } from "../notes/mergeConflict.js";
 import { decodeNoteEmbedSlots, hasAttachmentReference, OBJECT_REPLACEMENT_CHARACTER, type EmbedSlot } from "../notes/noteAttachments.js";
 import { hasEmbedMarker, hasUnknownContentMarker } from "../notes/unknownContent.js";
-import { localFileState } from "../notes/localFileState.js";
+import { readLocalNote } from "../notes/localFileState.js";
 import { recordEpoch } from "../notes/noteEpoch.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
 import { countUnchangedNotes, serializePlanEntry, stripFilePrefix, type PlanEntry, type SerializedPlanEntry } from "../notes/pushPlan.js";
@@ -126,6 +127,10 @@ interface PushCandidate {
    * re-attached verbatim if a remote-merge rewrites the file (see the
    * `mergeNoteVersions` path below). Empty string when the file has none. */
   frontmatter: string;
+  /** `apple-note-title` from that envelope, in a filename-as-title vault:
+   * the title the file asks this note to have. Undefined whenever the file
+   * states none, which is the common case - the file name says it instead. */
+  requestedTitle?: string | undefined;
 }
 
 interface PushSummary {
@@ -142,6 +147,10 @@ type OkNoteRecordResult = Extract<NoteDecodeResult, { status: "ok" }>;
 interface PreparedCandidate {
   updates: RecordUpdate[];
   noteTextUpdated: boolean;
+  /** The new title this update carries, when an `apple-note-title` asked for
+   * one the note didn't already have - what the plan entry's remark reports.
+   * Undefined for the ordinary content update, which changes no title. */
+  retitledTo?: string | undefined;
 }
 
 /** What actually happened when an `ExecutablePlanEntry.execute` ran: whether
@@ -182,8 +191,11 @@ export interface BuildPushPlanResult {
  * apart - see the "Push becomes the full reconciler" project notes.
  *
  * Login/network access is skipped entirely when there's nothing that needs
- * it (no tracked note is missing or modified, and no untracked file passed
- * the local creation gates).
+ * it (no tracked note is missing, modified, or asking for a new title via
+ * `apple-note-title`, and no untracked file passed the local creation
+ * gates). A title request needs the network even when the body is clean:
+ * whether it differs from the note's current title is only answerable
+ * against the live record.
  */
 export async function buildPushPlan(
   targetDir: string,
@@ -273,22 +285,29 @@ export async function buildPushPlan(
   const missingCandidates: { recordName: string; entry: CloneStateNoteEntry }[] = [];
 
   for (const [recordName, entry] of Object.entries(state.notes)) {
-    const fileState = await localFileState(targetDir, entry, recordName, titleMode);
-    if (fileState === "clean") {
-      continue;
-    }
-    if (fileState === "missing") {
+    // One read for both questions: whether the body differs from the base
+    // copy, and what the local-only frontmatter envelope says. Every check,
+    // parse, merge, and base-copy comparison below operates on the body, and
+    // `frontmatter` is re-attached only if a remote-merge rewrites the file.
+    const local = await readLocalNote(targetDir, entry, recordName, titleMode);
+    if (local.status === "missing") {
       missingCandidates.push({ recordName, entry });
       continue;
     }
+    const { frontmatter, body: localText } = local;
 
-    // Split the local-only frontmatter envelope off before anything below
-    // touches the note: every check, parse, merge, and base-copy comparison
-    // operates on the body, and `frontmatter` is re-attached only if a
-    // remote-merge rewrites the working file.
-    const { frontmatter, body: localText } = splitFrontmatter(await readFile(path.join(targetDir, entry.file), "utf-8"), {
-      filenameAsTitle,
-    });
+    // A title the file states outright, which under filename-as-title is the
+    // one thing a file can say about itself that its *body* cannot. It makes
+    // a note a candidate even when the body is clean, because a frontmatter
+    // edit is deliberately invisible to the base-copy comparison; whether it
+    // actually differs from the note's current title is settled against the
+    // live record further down, which is the only non-lossy comparison there
+    // is. In an in-body vault the title is the first line and the key would
+    // be a second source of truth, so it isn't read at all.
+    const requestedTitle = filenameAsTitle ? readNoteTitle(frontmatter) : undefined;
+    if (local.status === "clean" && requestedTitle === undefined) {
+      continue;
+    }
 
     const sharedRefusal = sharedNoteWriteRefusal(state, entry);
     if (sharedRefusal !== undefined) {
@@ -349,7 +368,7 @@ export async function buildPushPlan(
       });
       continue;
     }
-    updateCandidates.push({ recordName, entry, localText, frontmatter });
+    updateCandidates.push({ recordName, entry, localText, frontmatter, requestedTitle });
   }
 
   // --- Local-move pairing: a missing tracked file plus an untracked one
@@ -1085,7 +1104,7 @@ export async function buildPushPlan(
   }
 
   for (const candidate of updateCandidates) {
-    const { recordName, entry, localText, frontmatter } = candidate;
+    const { recordName, entry, localText, frontmatter, requestedTitle } = candidate;
     const record = recordsByName.get(recordName);
     if (!record || record.deleted === true) {
       entries.push({
@@ -1169,6 +1188,7 @@ export async function buildPushPlan(
       modificationDateMs,
       titleMode,
       summary,
+      requestedTitle,
     );
     if (!prepared) {
       const newConflict = summary.conflicts[conflictsBefore];
@@ -1187,7 +1207,7 @@ export async function buildPushPlan(
     }
     if (prepared.updates.length === 0) {
       // The table write path resolved every table's diff to a no-op and the
-      // surrounding prose didn't change either - `localFileState` saw a
+      // surrounding prose didn't change either - `readLocalNote` saw a
       // byte-level difference (e.g. cosmetic markdown formatting) but
       // there's nothing to actually send. Bring the base copy back in sync
       // so this doesn't keep re-triggering "modified" on every future push.
@@ -1207,6 +1227,7 @@ export async function buildPushPlan(
       kind: "update",
       file: entry.file,
       resolution: "ready",
+      ...(prepared.retitledTo !== undefined ? { remark: retitleRemark(prepared.retitledTo) } : {}),
       execute: async () => {
         const results = await updateRecords(session, ckdatabasewsUrl, dsid, zone.database, zone.zoneID, prepared.updates);
         const failure = results.find((result) => !result.ok);
@@ -1421,6 +1442,7 @@ async function prepareUpdate(
   modificationDateMs: number,
   titleMode: TitleMode,
   summary: PushSummary,
+  requestedTitle?: string | undefined,
 ): Promise<PreparedCandidate | undefined> {
   // The mode has to reach the classifier, not just this function: it decides
   // whether `markdownText` (which the local file is a copy of) omits the
@@ -1454,6 +1476,7 @@ async function prepareUpdate(
       replicaId,
       modificationDateMs,
       summary,
+      requestedTitle,
     );
   }
 
@@ -1462,7 +1485,7 @@ async function prepareUpdate(
     summary.refused.push(`${entry.file}: ${parsed.reason}. Run "icloud-md restore ${entry.file}" to discard your local edit.`);
     return undefined;
   }
-  const desired = restoreStrippedTitle(classified, parsed, entry, summary);
+  const desired = restoreStrippedTitle(classified, parsed, entry, summary, requestedTitle);
   if (!desired) {
     return undefined;
   }
@@ -1471,14 +1494,17 @@ async function prepareUpdate(
     return undefined;
   }
   if (textUpdate.status === "unchanged") {
-    // The file differs from the base copy only cosmetically (markdown
-    // notation, not content) - nothing to send.
+    // Nothing to send: either the file differs from the base copy only
+    // cosmetically (markdown notation, not content), or it was a candidate
+    // solely because it carries an `apple-note-title` that turned out to
+    // record the title the note already has.
     return { updates: [], noteTextUpdated: false };
   }
   const fields = buildNoteUpdateFields(record, textUpdate.payloadBase64, desired.text, modificationDateMs);
   return {
     updates: [noteRecordUpdate(record, entry, fields)],
     noteTextUpdated: true,
+    retitledTo: requestedRetitle(classified, requestedTitle),
   };
 }
 
@@ -1508,6 +1534,7 @@ async function prepareEmbedCandidate(
   replicaId: Uint8Array,
   modificationDateMs: number,
   summary: PushSummary,
+  requestedTitle?: string | undefined,
 ): Promise<PreparedCandidate | undefined> {
   const plan = planEmbedRepresentations(localText, classified.embedSlots, trackedFileAttachmentIds);
   if (!plan.ok) {
@@ -1527,7 +1554,7 @@ async function prepareEmbedCandidate(
   // prose edit, and the attributeRun ranges the reconciler addresses. (The
   // slots themselves are unaffected: a note whose title paragraph holds a
   // placeholder is never stripped, so every slot is in the body either way.)
-  const desired = restoreStrippedTitle(classified, parsed, entry, summary);
+  const desired = restoreStrippedTitle(classified, parsed, entry, summary, requestedTitle);
   if (!desired) {
     return undefined;
   }
@@ -1591,8 +1618,12 @@ async function prepareEmbedCandidate(
     }
   }
 
+  // A retitle has to reach the note record even when every byte of the body
+  // is where it was: this note is a candidate at all because its frontmatter
+  // asked for a new title, and the body comparison alone would drop it.
+  const retitledTo = requestedRetitle(classified, requestedTitle);
   let noteTextUpdated = false;
-  if (plan.reconstructedBodyText !== classified.markdownText) {
+  if (plan.reconstructedBodyText !== classified.markdownText || retitledTo !== undefined) {
     const textUpdate = prepareNoteTextUpdate(record, classified.bodyText, desired, classified.embedSlots, replicaId, entry, summary);
     if (!textUpdate) {
       return undefined;
@@ -1608,11 +1639,11 @@ async function prepareEmbedCandidate(
 
   if (updates.length === 0) {
     // Every table's diff resolved to a no-op and the surrounding prose
-    // didn't change either - `localFileState` said "modified", but nothing
+    // didn't change either - `readLocalNote` said "modified", but nothing
     // about the note's actual content differs from the last sync.
     return { updates: [], noteTextUpdated: false };
   }
-  return { updates, noteTextUpdated };
+  return { updates, noteTextUpdated, retitledTo };
 }
 
 /**
@@ -1702,22 +1733,6 @@ export function prepareRetitle(
 }
 
 /**
- * Puts a note's title paragraph back in front of a body-only local parse,
- * for the vault shape that keeps titles in file names. A no-op - the parse
- * handed straight back - whenever the working file already carries its own
- * title, which covers every in-body vault and the individual notes a
- * filename-as-title vault can't strip.
- *
- * The title comes from the live remote record, style and inline runs intact,
- * and deliberately *not* from the file name. A file name is a lossy record
- * of the title it was derived from - pull's collision uniquifier turns a
- * second "Foo" into `Foo 2.md`, and a title too long for a name will land in
- * `apple-note-title` - so re-deriving one here would rewrite the titles of
- * notes nobody touched. The file name only becomes authoritative when the
- * user *changes* it, and that arrives as a move pair rather than as an
- * update to the file in place.
- */
-/**
  * The title a local file expresses, in a vault where the file name is the
  * title: what its name spells, unless it carries an `apple-note-title`,
  * which outranks the name.
@@ -1733,23 +1748,94 @@ export function titleExpressedByFile(file: string, recordedTitles: ReadonlyMap<s
   return recordedTitles.get(file) ?? titleFromNoteFileName(file);
 }
 
+/**
+ * What a retitle leaves for the reader to expect, since push never renames a
+ * file: the name catches up on the next `pull`, along exactly the path a
+ * retitle made on another device takes. A title no file name can hold has no
+ * rename coming at all - it keeps living in frontmatter, which is what the
+ * key was for in the first place.
+ */
+function retitleRemark(title: string): string {
+  return titleIsRepresentable(title)
+    ? `retitled to "${title}" - the next "pull" renames this file to match`
+    : `retitled to "${title}" - ${representabilityProblem(title) ?? "a file name can't hold it"}, so it stays in "${NOTE_TITLE_KEY}"`;
+}
+
+/**
+ * What an `apple-note-title` is actually asking to *change*, or undefined
+ * when it asks for nothing new.
+ *
+ * Compared on the title's text: a key that merely records what the note is
+ * already called is the ordinary state of a note whose name can't carry its
+ * title, and treating that as a retitle would rebuild the paragraph - and so
+ * strip the real one's styling - on every push, forever.
+ */
+function requestedRetitle(classified: OkNoteRecordResult, requestedTitle: string | undefined): string | undefined {
+  if (requestedTitle === undefined || classified.titleStripped !== true) {
+    return undefined;
+  }
+  return requestedTitle === classified.format?.[0]?.text ? undefined : requestedTitle;
+}
+
+/**
+ * Puts a note's title paragraph back in front of a body-only local parse,
+ * for the vault shape that keeps titles in file names. A no-op - the parse
+ * handed straight back - whenever the working file already carries its own
+ * title, which covers every in-body vault and the individual notes a
+ * filename-as-title vault can't strip.
+ *
+ * The title comes from the live remote record, style and inline runs intact,
+ * and deliberately *not* from the file name. A file name is a lossy record
+ * of the title it was derived from - pull's collision uniquifier turns a
+ * second "Foo" into `Foo 2.md`, and a title too long for a name will land in
+ * `apple-note-title` - so re-deriving one here would rewrite the titles of
+ * notes nobody touched. The file name only becomes authoritative when the
+ * user *changes* it, and that arrives as a move pair rather than as an
+ * update to the file in place.
+ *
+ * `requestedTitle` is the exception that proves that rule: an
+ * `apple-note-title` the file states outright. It is not a re-derivation and
+ * carries no loss - it's an exact string the user wrote - so it outranks the
+ * record. Applied only when it actually differs from the note's current
+ * title: an equal one is the ordinary record of an unrepresentable title,
+ * and rebuilding the paragraph for it would restyle a title nobody touched.
+ *
+ * Nothing here renames the file to match. That is pull's job, on the next
+ * pull, through exactly the path a retitle made on another device takes -
+ * `renameForRemoteTitle`, which honours `--defer-renames` and clears the
+ * frontmatter key once the name can carry the title itself.
+ */
 export function restoreStrippedTitle(
   classified: OkNoteRecordResult,
   parsed: { text: string; paragraphs: FormatParagraph[] },
   entry: CloneStateNoteEntry,
   summary: PushSummary,
+  requestedTitle?: string | undefined,
 ): { text: string; paragraphs: FormatParagraph[] } | undefined {
   if (classified.titleStripped !== true) {
+    if (requestedTitle !== undefined) {
+      // The one note a filename-as-title vault leaves title-in-body: its
+      // title paragraph holds an embed placeholder. Refused rather than
+      // ignored - silently dropping a title the user asked for would look
+      // like the push succeeded at something it never attempted.
+      summary.refused.push(
+        `${entry.file}: this note's title contains an embedded object, so "${NOTE_TITLE_KEY}" can't retitle it - ` +
+          "retitle it in Notes instead.",
+      );
+      return undefined;
+    }
     return parsed;
   }
   // `format` is defined for anything publishable, which every caller has
   // already gated on; the guard keeps that an assertion rather than a cast,
   // since guessing at a missing title would push a note's body up into it.
-  const title = classified.format?.[0];
-  if (title === undefined) {
+  const current = classified.format?.[0];
+  if (current === undefined) {
     summary.refused.push(`${entry.file}: the remote note has no title paragraph to restore - refusing to edit`);
     return undefined;
   }
+  const retitle = requestedRetitle(classified, requestedTitle);
+  const title = retitle !== undefined ? titleParagraphFromFilename(retitle) : current;
   return restoreTitleParagraphText(title, parsed.paragraphs);
 }
 

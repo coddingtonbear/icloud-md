@@ -15,34 +15,59 @@ import { splitFrontmatter } from "./frontmatter.js";
  */
 export type LocalFileState = "clean" | "modified" | "missing";
 
+/**
+ * A tracked note's file as it currently sits on disk: its state, and - for
+ * anything actually there - the split it was judged on, so a caller that
+ * needs the content doesn't read the same file a second time.
+ *
+ * The envelope is worth having even when the body came back "clean": a
+ * frontmatter-only edit is invisible to the comparison below by design, but
+ * it isn't nothing. `push` reads `apple-note-title` out of it to find a
+ * retitle the body could never express (see `restoreStrippedTitle`).
+ */
+export type LocalNote =
+  | { status: "missing" }
+  | { status: "clean" | "modified"; frontmatter: string; body: string };
+
+export async function readLocalNote(
+  targetDir: string,
+  entry: CloneStateNoteEntry,
+  recordName: string,
+  titleMode: TitleMode = "in-body",
+): Promise<LocalNote> {
+  let content: string;
+  try {
+    content = await readFile(path.join(targetDir, entry.file), "utf-8");
+  } catch (cause) {
+    if (isEnoent(cause)) {
+      return { status: "missing" };
+    }
+    throw cause;
+  }
+
+  // `titleMode` matters here for a reason that isn't obvious: under
+  // filename-as-title a body can begin with a blank line, and splitting
+  // without it folds that line into the envelope, so a freshly cloned note
+  // never matches its base copy at all.
+  const { frontmatter, body } = splitFrontmatter(content, { filenameAsTitle: titleMode === "filename" });
+
+  const base = await readBaseCopy(targetDir, recordName);
+  if (base === undefined) {
+    // No base copy on disk for a tracked note shouldn't normally happen, but
+    // if it does, we can't verify cleanliness - treat conservatively.
+    return { status: "modified", frontmatter, body };
+  }
+  // Compare body-only: the base copy never carries frontmatter, so a local-
+  // only frontmatter edit leaves the body equal to base and stays "clean" -
+  // it must not read as a note change (which would trigger a spurious push).
+  return { status: body === base ? "clean" : "modified", frontmatter, body };
+}
+
 export async function localFileState(
   targetDir: string,
   entry: CloneStateNoteEntry,
   recordName: string,
   titleMode: TitleMode = "in-body",
 ): Promise<LocalFileState> {
-  let content: string;
-  try {
-    content = await readFile(path.join(targetDir, entry.file), "utf-8");
-  } catch (cause) {
-    if (isEnoent(cause)) {
-      return "missing";
-    }
-    throw cause;
-  }
-
-  const base = await readBaseCopy(targetDir, recordName);
-  if (base === undefined) {
-    // No base copy on disk for a tracked note shouldn't normally happen, but
-    // if it does, we can't verify cleanliness - treat conservatively.
-    return "modified";
-  }
-  // Compare body-only: the base copy never carries frontmatter, so a local-
-  // only frontmatter edit leaves the body equal to base and stays "clean" -
-  // it must not read as a note change (which would trigger a spurious push).
-  // `titleMode` matters here for a reason that isn't obvious: under
-  // filename-as-title a body can begin with a blank line, and splitting
-  // without it folds that line into the envelope, so a freshly cloned note
-  // never matches its base copy at all.
-  return splitFrontmatter(content, { filenameAsTitle: titleMode === "filename" }).body === base ? "clean" : "modified";
+  return (await readLocalNote(targetDir, entry, recordName, titleMode)).status;
 }

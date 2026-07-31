@@ -225,3 +225,44 @@ test("serializePlanEntry carries folderTitle only for a folder create", () => {
     false,
   );
 });
+
+test("renderPlan shows a remark under an entry that is going through fine", () => {
+  // Where a reason line would sit for something refused, but in the quiet
+  // tone: this push is working, and the remark is a consequence the label
+  // alone can't convey - here, that the file rename lands on the next pull.
+  const entries: PlanEntry[] = [
+    { kind: "update", file: "Untitled.md", resolution: "ready", remark: 'retitled to "Groceries" - the next "pull" renames this file to match' },
+  ];
+  assert.deepEqual(renderPlan(entries), [
+    "",
+    "        modified: Untitled.md",
+    '                  retitled to "Groceries" - the next "pull" renames this file to match',
+    "",
+    "0 to create, 1 changed, 0 to delete.",
+  ]);
+});
+
+test("a remark never displaces the reason line a refusal owns", () => {
+  const entries: PlanEntry[] = [
+    { kind: "update", file: "Untitled.md", resolution: "refused", reason: "this note has an attachment", remark: "ignored" },
+  ];
+  assert.deepEqual(renderPlan(entries), [
+    "",
+    "        modified: Untitled.md",
+    "                  ! this note has an attachment",
+    "",
+    "0 to create, 0 changed, 0 to delete. (1 refused)",
+  ]);
+});
+
+test("serializePlanEntry carries a remark through to --json, and omits it when absent", () => {
+  assert.deepEqual(
+    serializePlanEntry({ kind: "update", file: "Untitled.md", resolution: "ready", remark: 'retitled to "Groceries"' }),
+    { kind: "update", file: "Untitled.md", resolution: "ready", remark: 'retitled to "Groceries"' },
+  );
+  assert.deepEqual(serializePlanEntry({ kind: "update", file: "Edited.md", resolution: "ready" }), {
+    kind: "update",
+    file: "Edited.md",
+    resolution: "ready",
+  });
+});

@@ -235,3 +235,68 @@ test("a recorded title outranks the file name, so an Untitled.md file isn't reti
 test("a note whose title only a name can hold takes it from the name, homoglyphs decoded", () => {
   assert.equal(titleExpressedByFile("Notes/Pat⁄Alex.md", new Map()), "Pat/Alex");
 });
+
+// --- Retitling through `apple-note-title` ------------------------------------
+//
+// The one retitle a file name can't express: a title no name can hold. The
+// key states it outright, and push sends it as an ordinary text update -
+// leaving the *file* alone, because renaming is pull's job.
+
+test("a frontmatter title the note doesn't have yet is pushed as the note's new title", () => {
+  const record = noteRecord("# Shopping list\n\nMilk\nEggs");
+  const classified = classifyOk(record, "filename");
+  const long = "A title far too long for any file name to hold, ".repeat(3).trimEnd();
+
+  const restored = restoreStrippedTitle(classified, parsedBody("\nMilk\nEggs"), ENTRY, SUMMARY(), long);
+
+  assert.ok(restored);
+  assert.equal(restored.text, `${long}\n\nMilk\nEggs`);
+  assert.equal(restored.paragraphs[0]?.kind, "title");
+  assert.deepEqual(
+    restored.paragraphs.map((paragraph) => paragraph.start),
+    [0, long.length + 1, long.length + 2, long.length + 7],
+    "every following offset shifts by the new title's length, not the old one's",
+  );
+});
+
+test("a frontmatter title equal to the note's own is left alone, styling and all", () => {
+  // The common case, and the one that must not churn: `apple-note-title` on an
+  // Untitled.md file normally just *records* the title the note already has.
+  // Rebuilding the paragraph for it would restyle a title nobody touched,
+  // and would do so on every push forever.
+  const record = noteRecord("Shopping list\n\nMilk");
+  const classified = classifyOk(record, "filename");
+  assert.equal(classified.format?.[0]?.kind, "body", "the remote title paragraph is body-styled");
+
+  const restored = restoreStrippedTitle(classified, parsedBody("\nMilk"), ENTRY, SUMMARY(), "Shopping list");
+
+  assert.equal(restored?.text, "Shopping list\n\nMilk");
+  assert.equal(restored?.paragraphs[0]?.kind, "body", "the record's own paragraph came back, not a rebuilt one");
+});
+
+test("an in-body vault ignores the key entirely - its title is the first line", () => {
+  const record = noteRecord("Shopping list\n\nMilk");
+  const classified = classifyOk(record, "in-body");
+  const parsed = parsedBody("Shopping list\n\nMilk");
+
+  // push never reads the key outside a filename-as-title vault, so this is
+  // the shape `restoreStrippedTitle` is always called with there.
+  const restored = restoreStrippedTitle(classified, parsed, ENTRY, SUMMARY());
+
+  assert.deepEqual(restored, parsed);
+});
+
+test("a note whose title holds an embedded object refuses the retitle instead of dropping it", () => {
+  // The one note a filename-as-title vault leaves title-in-body: nothing
+  // about it can express a new title, and silently ignoring the key would
+  // look like the push had done what was asked.
+  const record = noteRecord("Shopping list\n\nMilk");
+  const classified = classifyOk(record, "in-body");
+  assert.notEqual(classified.titleStripped, true);
+  const summary = SUMMARY();
+
+  const restored = restoreStrippedTitle(classified, parsedBody("Shopping list\n\nMilk"), ENTRY, summary, "Groceries");
+
+  assert.equal(restored, undefined);
+  assert.match(summary.refused[0] ?? "", /apple-note-title.*can't retitle it/);
+});
