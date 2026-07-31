@@ -47,6 +47,26 @@ function noteRecord(markdown: string, recordChangeTag = "1a"): CloudKitRecord {
   };
 }
 
+/** A Note record built from raw text rather than markdown - for titles the
+ * markdown parser would alter, like one ending in whitespace (a line-end
+ * space isn't markdown content, but it *is* Apple Notes title content). */
+function rawNoteRecord(text: string, recordChangeTag = "1a"): CloudKitRecord {
+  const doc = buildInitialNoteDocument(text, REPLICA);
+  const compressed = compressNoteDocument(encodeNoteDocument(doc));
+  return {
+    recordName: "REC1",
+    recordType: "Note",
+    recordChangeTag,
+    fields: {
+      TitleEncrypted: {
+        value: Buffer.from(text.split("\n")[0] ?? "", "utf-8").toString("base64"),
+        type: "ENCRYPTED_BYTES",
+      },
+      TextDataEncrypted: { value: compressed.toString("base64"), type: "ENCRYPTED_BYTES" },
+    },
+  };
+}
+
 function classifyOk(record: CloudKitRecord, titleMode: "in-body" | "filename"): OkNoteDecodeResult {
   const classified = classifyNoteRecord(record, { titleMode });
   assert.equal(classified.status, "ok");
@@ -177,6 +197,43 @@ test("renaming a file to the title the note already has sends nothing at all", (
 
   assert.ok(prepared.ok);
   assert.equal(prepared.retitle, undefined);
+});
+
+test("a name spelling the trimmed form of a trailing-whitespace title sends nothing - the remote spelling wins", () => {
+  // A file name only ever carries a title's trimmed spelling (see
+  // `carriedTitleSpelling`), so this note lives at "Shopping list.md" while
+  // being titled "Shopping list " - and a rename landing on exactly that
+  // name expresses no new title. Without the equivalence, any rename or
+  // move of such a note would silently strip the space from a title nobody
+  // touched.
+  const record = rawNoteRecord("Shopping list \n\nMilk");
+  assert.equal(classifyOk(record, "filename").format?.[0]?.text, "Shopping list ", "the space survives into the title");
+
+  const prepared = prepareRetitle(
+    record,
+    { entry: { ...ENTRY, file: "Notes/Shopping list 2.md" }, toFile: "Notes/Shopping list.md", newTitle: "Shopping list" },
+    REPLICA,
+    "filename",
+  );
+
+  assert.ok(prepared.ok);
+  assert.equal(prepared.retitle, undefined);
+});
+
+test("a rename to a genuinely different name still retitles a trailing-whitespace note", () => {
+  // The equivalence is exactly one spelling wide: anything but the trimmed
+  // form of the current title is a real retitle, whitespace or not.
+  const record = rawNoteRecord("Shopping list \n\nMilk");
+
+  const prepared = prepareRetitle(
+    record,
+    { entry: ENTRY, toFile: "Notes/Groceries.md", newTitle: "Groceries" },
+    REPLICA,
+    "filename",
+  );
+
+  assert.ok(prepared.ok);
+  assert.equal(prepared.retitle?.plainText, "Groceries\n\nMilk");
 });
 
 test("a rename is refused rather than guessed at when the note can't be safely edited", () => {

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  carriedTitleSpelling,
   decodeTitleStem,
   encodeTitleStem,
   MAX_TITLE_LENGTH,
@@ -83,10 +84,27 @@ test("a title starting with a dot is not representable - Obsidian ignores dotfil
   assert.match(representabilityProblem(".hidden") ?? "", /hidden file/);
 });
 
-test("a title ending in a dot or space is not representable - Windows strips them", () => {
-  assert.ok(!titleIsRepresentable("Trailing space "));
+test("a title ending in a dot is not representable - Windows strips it", () => {
   assert.ok(!titleIsRepresentable("Trailing dot."));
   assert.match(representabilityProblem("Trailing dot.") ?? "", /Windows silently strips/);
+});
+
+test("a title ending in whitespace is representable - the name carries its trimmed spelling", () => {
+  // Not a relaxation of the Windows rule but a projection: the trailing
+  // space never reaches the file name (see `carriedTitleSpelling`), and the
+  // difference between the two spellings counts as no difference at all.
+  assert.ok(titleIsRepresentable("Trailing space "));
+  assert.equal(carriedTitleSpelling("Trailing space "), "Trailing space");
+});
+
+test("the trimmed spelling gets no free pass through the other checks", () => {
+  // Whitespace padding must not smuggle a reserved name, an over-long
+  // title, or a trailing dot past representability.
+  assert.ok(!titleIsRepresentable("CON "));
+  assert.match(representabilityProblem("CON ") ?? "", /reserved device name/);
+  assert.ok(!titleIsRepresentable("Trailing dot. "));
+  assert.ok(titleIsRepresentable(`${"x".repeat(60)} `), "padding beyond the limit trims away");
+  assert.ok(!titleIsRepresentable(`${"x".repeat(61)} `));
 });
 
 test("Windows reserved device names are not representable, in any case", () => {

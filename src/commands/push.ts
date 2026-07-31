@@ -22,7 +22,7 @@ import { writeCloneState, type CloneState, type CloneStateNoteEntry, type TitleM
 import { migrationReporter, openVault } from "../notes/vaultMigrations.js";
 import { pendingRenameTarget, settlePendingRenames } from "../notes/pendingRename.js";
 import { NOTE_ID_KEY, NOTE_TITLE_KEY, readNoteId, readNoteTitle, setNoteId } from "../notes/noteIdFrontmatter.js";
-import { representabilityProblem, titleIsRepresentable } from "../notes/titleFilename.js";
+import { carriedTitleSpelling, representabilityProblem, titleIsRepresentable } from "../notes/titleFilename.js";
 import { resolveNoteIds } from "../notes/noteIdPairing.js";
 import { classifyNoteRecord, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
@@ -1732,13 +1732,18 @@ export function prepareRetitle(
   }
 
   const { title, body } = splitTitleParagraph(classified.format);
-  if (title?.text === pair.newTitle) {
+  if (title !== undefined && (title.text === pair.newTitle || carriedTitleSpelling(title.text) === pair.newTitle)) {
     // The name changed but the title it spells didn't - renaming `Foo 2.md`
     // (pull's collision spelling) to `Foo.md` is the local name catching up
     // with a note genuinely titled "Foo". Short-circuited on the title's
     // *text* rather than left to the payload comparison below, because
     // rebuilding the paragraph would also restyle it, and this is a rename
     // that expresses no new title at all.
+    // The second arm is the trailing-whitespace equivalence: a file name
+    // only ever carries a title's trimmed spelling, so a name spelling
+    // exactly that expresses no new title either - the remote spelling
+    // wins. Stripping the whitespace on purpose still works, through
+    // `apple-note-title` (see `requestedRetitle`, which compares exactly).
     return { ok: true, retitle: undefined };
   }
 
