@@ -34,14 +34,27 @@ test("parseSharedZoneList extracts zoneName and ownerRecordName per zone", () =>
     ],
   };
 
-  assert.deepEqual(parseSharedZoneList(body), [
-    { zoneName: "Notes", ownerRecordName: "_35c0dc4416a1c75e7d98713af3f50348" },
-    { zoneName: "Notes", ownerRecordName: "_3ae5f00b01edbda385d0db894253c622" },
-  ]);
+  assert.deepEqual(parseSharedZoneList(body), {
+    zoneIds: [
+      { zoneName: "Notes", ownerRecordName: "_35c0dc4416a1c75e7d98713af3f50348" },
+      { zoneName: "Notes", ownerRecordName: "_3ae5f00b01edbda385d0db894253c622" },
+    ],
+    moreComing: false,
+    syncToken: "AQAAAZ9XZ9gy",
+  });
+});
+
+test("parseSharedZoneList surfaces moreComing so the fetch loop can page", () => {
+  const body = { moreComing: true, syncToken: "page-1", zones: [] };
+  assert.deepEqual(parseSharedZoneList(body), { zoneIds: [], moreComing: true, syncToken: "page-1" });
 });
 
 test("parseSharedZoneList handles an account with no shared zones", () => {
-  assert.deepEqual(parseSharedZoneList({ moreComing: false, zones: [] }), []);
+  assert.deepEqual(parseSharedZoneList({ moreComing: false, zones: [] }), {
+    zoneIds: [],
+    moreComing: false,
+    syncToken: undefined,
+  });
 });
 
 test("parseSharedZoneList rejects responses without a zones array", () => {
@@ -61,7 +74,7 @@ test("parseSharedZoneList skips tombstoned (deleted) zones instead of feeding th
     ],
   };
 
-  assert.deepEqual(parseSharedZoneList(body), [{ zoneName: "Notes", ownerRecordName: "_live" }]);
+  assert.deepEqual(parseSharedZoneList(body).zoneIds, [{ zoneName: "Notes", ownerRecordName: "_live" }]);
 });
 
 test("firstZone throws on a zone-level server error instead of returning an empty zone", () => {

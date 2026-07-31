@@ -294,31 +294,65 @@ export async function fetchAllNoteRecords(
  * note(s) with this account (`zoneName` is "Notes", `ownerRecordName`
  * identifies the sharer). Mirrors the web client's `shared/changes/database`
  * call, which it issues with an empty body on every load rather than a
- * stored database-level syncToken; zone-level tokens carry the actual
- * incremental state.
+ * stored database-level syncToken (zone-level tokens carry the actual
+ * incremental state), then pages with the response's top-level `syncToken`
+ * until `moreComing` is false. A truncated listing would be silently
+ * destructive: any zone past page one looks vanished, and pull untracks
+ * every note from that sharer as "no longer shared with you".
  */
 export async function fetchSharedZoneIds(
   session: IcloudSession,
   ckDatabaseHost: string,
   dsid: string,
 ): Promise<CloudKitZoneID[]> {
-  const body = await postDatabase(
-    "fetchSharedZoneIds:changes/database",
-    session,
-    ckDatabaseHost,
-    dsid,
-    "shared",
-    "changes/database",
-    {},
-  );
-  return parseSharedZoneList(body);
+  const zoneIds: CloudKitZoneID[] = [];
+  let syncToken: string | undefined;
+  let moreComing = true;
+
+  while (moreComing) {
+    const request: Record<string, unknown> = {};
+    if (syncToken) {
+      request.syncToken = syncToken;
+    }
+    const body = await postDatabase(
+      "fetchSharedZoneIds:changes/database",
+      session,
+      ckDatabaseHost,
+      dsid,
+      "shared",
+      "changes/database",
+      request,
+    );
+    const page = parseSharedZoneList(body);
+    zoneIds.push(...page.zoneIds);
+    // Without a fresh token, a continuation request would replay this same
+    // page forever. The web client treats this as fatal too ("Critical CK
+    // Error: Server returned the same sync token").
+    if (page.moreComing && (page.syncToken === undefined || page.syncToken === syncToken)) {
+      throw new CloudKitRequestFailedError(
+        "shared changes/database reported moreComing without a new syncToken; refusing to re-request the same page",
+      );
+    }
+    syncToken = page.syncToken ?? syncToken;
+    moreComing = page.moreComing;
+  }
+
+  return zoneIds;
 }
 
-export function parseSharedZoneList(body: unknown): CloudKitZoneID[] {
+/** One page of a shared `changes/database` listing; `moreComing`/`syncToken`
+ * drive the pagination loop in `fetchSharedZoneIds`. */
+export interface SharedZoneListPage {
+  zoneIds: CloudKitZoneID[];
+  moreComing: boolean;
+  syncToken: string | undefined;
+}
+
+export function parseSharedZoneList(body: unknown): SharedZoneListPage {
   if (!isRecord(body) || !Array.isArray(body.zones)) {
     throw new Error("Unexpected response shape from shared changes/database (missing zones array)");
   }
-  return body.zones.flatMap((zone: unknown) => {
+  const zoneIds = body.zones.flatMap((zone: unknown) => {
     if (!isRecord(zone) || !isRecord(zone.zoneID) || typeof zone.zoneID.zoneName !== "string") {
       throw new Error("Unexpected zone shape in shared changes/database response");
     }
@@ -336,6 +370,11 @@ export function parseSharedZoneList(body: unknown): CloudKitZoneID[] {
       },
     ];
   });
+  return {
+    zoneIds,
+    moreComing: body.moreComing === true,
+    syncToken: typeof body.syncToken === "string" ? body.syncToken : undefined,
+  };
 }
 
 /**
