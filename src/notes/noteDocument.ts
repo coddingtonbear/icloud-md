@@ -943,6 +943,15 @@ function adjustAttributeRuns(doc: NoteDocument, start: number, deleteLength: num
 
 // --- validation ------------------------------------------------------------
 
+/**
+ * No delta check here, deliberately: `tableEdit.ts` refuses a document
+ * carrying a populated `CRDT.Document.startVersion` (a partial graph from
+ * Apple's `CRDocument.deltaSince`), but a note body isn't a `CRDT.Document`
+ * at all - `TextDataEncrypted`'s wrapper holds a `topotext.String`
+ * (`versionedDocument.ts`), whose schema has no delta marker: `string`,
+ * `substring`, `timestamp`, `attributeRun`, and nothing that says "changes
+ * since". The exposure is table-side only (audit, 2026-08-02).
+ */
 export function validateDocumentInvariants(doc: NoteDocument): void {
   const visibleLength = doc.runs.filter((run) => !run.tombstone).reduce((sum, run) => sum + run.length, 0);
   if (visibleLength !== doc.text.length) {
