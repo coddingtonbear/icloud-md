@@ -92,9 +92,25 @@ export async function appendDebugLog(entry: DebugLogEntry, debugLogPath: string 
 }
 
 /**
- * fetch() wrapper that logs the request and a cloned copy of the response
- * (status, headers, best-effort JSON body) to the debug log, then returns the
- * original, still-unconsumed Response for the caller to read normally.
+ * fetch() wrapper that logs the request and the response (status, headers,
+ * best-effort JSON body) to the debug log, then hands the caller a Response
+ * it can read normally.
+ *
+ * The body is read *once* here and a fresh `Response` is built around those
+ * bytes. The previous revision logged from `response.clone()` and returned
+ * the original for the caller to read, which broke against real CloudKit
+ * traffic: every `changes/zone` fetch for a zone of any size came back to the
+ * caller as `TypeError: Body is unusable: Body has already been read` from
+ * its own `response.json()`, making `object list` unable to complete at all
+ * (2026-08-02).
+ *
+ * What exactly upsets undici about that clone is *not* established: the
+ * failure reproduces reliably against the live endpoint and did not reproduce
+ * against a local server given the same response shape (gzip, chunked,
+ * ~1 MB of JSON, sequential paged requests on a keep-alive connection, a
+ * file-write await between the two reads). So the fix is the conservative
+ * one - never hold two readers of the same body - rather than a workaround
+ * aimed at a mechanism we would only be guessing at.
  */
 export async function loggedFetch(
   note: string,
@@ -103,11 +119,23 @@ export async function loggedFetch(
   debugLogPath: string = DEFAULT_DEBUG_LOG_PATH,
 ): Promise<Response> {
   const response = await fetch(url, init);
+  // Bytes, not text: `fetchAssetBytes` downloads real binary attachments
+  // through this same wrapper, and a decode/re-encode round trip would
+  // corrupt them.
+  const body = await response.arrayBuffer();
 
-  const responseBody: unknown = await response
-    .clone()
-    .json()
-    .catch(() => null);
+  let responseBody: unknown = null;
+  if ((response.headers.get("content-type") ?? "").includes("json")) {
+    try {
+      responseBody = JSON.parse(new TextDecoder().decode(body));
+    } catch {
+      // Malformed JSON: logged as null, exactly as the previous
+      // `.json().catch(() => null)` did. Non-JSON responses (attachment
+      // bytes, HTML error pages) took that same path before and still do -
+      // they are skipped by the content-type check rather than decoded,
+      // so a large download is no longer parsed just to be discarded.
+    }
+  }
 
   await appendDebugLog(
     {
@@ -122,7 +150,14 @@ export async function loggedFetch(
     debugLogPath,
   );
 
-  return response;
+  // 204/205/304 (and 101) may not carry a body at all - constructing one
+  // with bytes attached throws.
+  const bodylessStatus = response.status === 101 || response.status === 204 || response.status === 205 || response.status === 304;
+  return new Response(bodylessStatus ? null : body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
 }
 
 /**
