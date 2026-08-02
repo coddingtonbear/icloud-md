@@ -27,8 +27,11 @@ import { create } from "@bufbuild/protobuf";
 import {
   computeSplice,
   encodeTextRun,
+  insertRunAt,
   isSentinel,
   parseTextRun,
+  splitRunAt,
+  validateChildEdges,
   type AttributeRun,
   type RunCoord,
   type TextRun,
@@ -127,7 +130,6 @@ export function applyCellTextEdit(cell: TableCellDocument, newText: string, cloc
     insertVisibleText(cell, start, insertText, clock);
   }
   adjustAttributeRuns(cell, start, deleteLength, insertText.length);
-  renumberSequences(cell);
 
   cell.text = newText;
   validateCellInvariants(cell);
@@ -136,67 +138,50 @@ export function applyCellTextEdit(cell: TableCellDocument, newText: string, cloc
 
 /** Marks the visible range [start, start+length) as tombstoned, splitting
  * runs where the range boundaries fall inside one - identical algorithm to
- * `noteDocument.ts`'s `tombstoneVisibleRange`, operating on a cell instead.
- *
- * Every newly tombstoned piece is restamped `{us, takeTombstoneAnchor(its
- * old style clock)}`, which is what makes the deletion *visible to Apple's
- * merge*: `TTMergeableString.mergeWithString_mergeTimestamps` adopts a
- * remote run's tombstone flag only when the remote's style timestamp
- * compares strictly greater than the local one (last-writer-wins on
- * `(clock, replicaUUID)`), so a tombstone that keeps its original anchor is
- * silently ignored by every other client. Confirmed against the scripted
- * capture: Apple's own row deletion (`TABLE_EVOLUTION_REVISIONS` seq 8)
- * stamps the mirror tombstone `{1, 8}` = max(0 + 8, style clock 1) and
- * leaves the shared style clock at 9. Exported for `tableEdit.ts`'s mirror
- * maintenance - cells and mirrors take the same path, exactly as they do in
- * Apple's client; does not touch `text`/attribute runs (`applyCellTextEdit`
+ * `noteDocument.ts`'s `tombstoneVisibleRange`, operating on a cell instead
+ * (`splitRunAt` owns the child-edge surgery; tombstoning itself never
+ * touches edges). Every newly tombstoned piece is restamped
+ * `{us, takeTombstoneAnchor(old style clock)}` so Apple's merge path sees
+ * the deletion (it only adopts a remote tombstone when the remote style
+ * timestamp compares strictly greater). Exported for `tableEdit.ts`'s mirror
+ * maintenance; does not touch `text`/attribute runs (`applyCellTextEdit`
  * owns that for cells, the mirror helper owns it there). */
 export function tombstoneVisibleRange(cell: TableCellDocument, start: number, length: number, clock: TopotextClockSource): void {
   const end = start + length;
-  const out: TextRun[] = [];
+  if (end > visibleLength(cell.runs)) {
+    throw new Error("Cell tombstone range extends past the end of its visible text - CRDT model out of sync");
+  }
+  const runs = cell.runs;
   let visible = 0;
-
-  for (const run of cell.runs) {
+  for (let i = 0; i < runs.length && visible < end; i += 1) {
+    const run = runs[i]!;
     if (run.tombstone || run.length === 0 || isSentinel(run)) {
-      out.push(run);
       continue;
     }
     const runStart = visible;
-    const runEnd = visible + run.length;
-    visible = runEnd;
-
-    if (runEnd <= start || runStart >= end) {
-      out.push(run);
+    const runEnd = runStart + run.length;
+    if (runEnd <= start) {
+      visible = runEnd;
       continue;
     }
 
-    const overlapStart = Math.max(start, runStart);
-    const overlapEnd = Math.min(end, runEnd);
-    if (overlapStart > runStart) {
-      out.push(pieceOf(run, 0, overlapStart - runStart, false));
+    let target = run;
+    let targetIndex = i;
+    let targetStart = runStart;
+    if (start > runStart) {
+      target = splitRunAt(runs, i, start - runStart);
+      targetIndex = i + 1;
+      targetStart = start;
     }
-    const tombstoned = pieceOf(run, overlapStart - runStart, overlapEnd - overlapStart, true);
-    tombstoned.anchor = { replica: clock.replicaIndex, clock: clock.takeTombstoneAnchor(run.anchor.clock) };
-    out.push(tombstoned);
-    if (runEnd > overlapEnd) {
-      out.push(pieceOf(run, overlapEnd - runStart, runEnd - overlapEnd, false));
+    if (end < targetStart + target.length) {
+      splitRunAt(runs, targetIndex, end - targetStart);
     }
+    const previousClock = target.anchor.clock;
+    target.tombstone = true;
+    target.anchor = { replica: clock.replicaIndex, clock: clock.takeTombstoneAnchor(previousClock) };
+    visible = targetStart + target.length;
+    i = targetIndex;
   }
-
-  if (visible < end) {
-    throw new Error("Cell tombstone range extends past the end of its visible text - CRDT model out of sync");
-  }
-  cell.runs = out;
-}
-
-function pieceOf(run: TextRun, offset: number, length: number, tombstone: boolean): TextRun {
-  return {
-    coord: { replica: run.coord.replica, clock: run.coord.clock + offset },
-    length,
-    anchor: { replica: run.anchor.replica, clock: run.anchor.clock },
-    tombstone: tombstone || run.tombstone,
-    sequence: run.sequence,
-  };
 }
 
 /** Inserts `text` at visible position `start` as a new run under the
@@ -231,7 +216,7 @@ export function insertVisibleText(cell: TableCellDocument, start: number, text: 
       if (offset === 0) {
         insertIndex = i;
       } else {
-        cell.runs.splice(i, 1, pieceOf(run, 0, offset, false), pieceOf(run, offset, run.length - offset, false));
+        splitRunAt(cell.runs, i, offset);
         insertIndex = i + 1;
       }
       break;
@@ -241,7 +226,7 @@ export function insertVisibleText(cell: TableCellDocument, start: number, text: 
   }
 
   const coord: RunCoord = { replica: clock.replicaIndex, clock: clock.take(text.length) };
-  cell.runs.splice(insertIndex, 0, {
+  insertRunAt(cell.runs, insertIndex, {
     coord,
     length: text.length,
     anchor: { replica: clock.replicaIndex, clock: 0 },
@@ -305,20 +290,6 @@ function adjustAttributeRuns(cell: TableCellDocument, start: number, deleteLengt
   cell.attributeRuns = out;
 }
 
-/** Renumbers every non-sentinel run's `child` link 1..N in run order, the
- * pattern every captured save shows after any splice. Exported for
- * `tableEdit.ts`'s mirror maintenance. */
-export function renumberSequences(cell: TableCellDocument): void {
-  let sequence = 1;
-  for (const run of cell.runs) {
-    if (isSentinel(run)) {
-      continue;
-    }
-    run.sequence = [sequence];
-    sequence += 1;
-  }
-}
-
 export function validateCellInvariants(cell: TableCellDocument): void {
   const visible = cell.runs.filter((run) => !run.tombstone).reduce((sum, run) => sum + run.length, 0);
   if (visible !== cell.text.length) {
@@ -332,4 +303,5 @@ export function validateCellInvariants(cell: TableCellDocument): void {
       `Cell's attribute run lengths (${attributeLength}) do not match its text length (${cell.text.length}) - refusing to touch this cell`,
     );
   }
+  validateChildEdges(cell.runs, "cell");
 }

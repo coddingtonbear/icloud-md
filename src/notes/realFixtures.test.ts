@@ -1,7 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { decodeNoteBodyText, decompressNoteDocument } from "./noteText.js";
-import { noteDocumentRoundTrips, parseNoteDocument } from "./noteDocument.js";
+import {
+  applyTextEdit,
+  encodeNoteDocument,
+  noteDocumentRoundTrips,
+  parseNoteDocument,
+  validateDocumentInvariants,
+} from "./noteDocument.js";
 import { REAL_FIRST_SAVE_NOTE, REAL_FORMATTED_MULTI_EDIT_NOTE, REAL_PLAIN_NOTE, REAL_UNICODE_NOTE } from "./realFixtures.js";
 
 test("REAL_PLAIN_NOTE decodes and round-trips", () => {
@@ -39,6 +45,31 @@ test("REAL_FORMATTED_MULTI_EDIT_NOTE decodes and round-trips, including the repe
   assert.equal(multiSequenceRuns.length, 1);
   assert.deepEqual(multiSequenceRuns[0]?.sequence, [14, 16]);
   assert.equal(noteDocumentRoundTrips(raw), true);
+});
+
+test("editing REAL_FORMATTED_MULTI_EDIT_NOTE preserves its two-child branch run through a push edit", () => {
+  // The branch that motivated the edge-preserving surgery: this real
+  // capture carries a run with two child edges (concurrent inserts after
+  // the same run). The old code flattened it to a chain on every edit; an
+  // edit elsewhere in the document must now leave the branch intact.
+  const buf = Buffer.from(REAL_FORMATTED_MULTI_EDIT_NOTE, "base64");
+  const doc = parseNoteDocument(decompressNoteDocument(buf));
+  const replicaId = new Uint8Array(16).fill(0xcd);
+
+  assert.equal(applyTextEdit(doc, `${doc.text}appended line\n`, { replicaId }), true);
+  validateDocumentInvariants(doc);
+
+  // The append lands at the end of the run list, far past runs 14/16, so
+  // the branch survives with its edge values unshifted.
+  const multiSequenceRuns = doc.runs.filter((run) => run.sequence.length > 1);
+  assert.equal(multiSequenceRuns.length, 1);
+  assert.deepEqual(multiSequenceRuns[0]?.sequence, [14, 16]);
+
+  // The re-encoded document parses back to the edited text with the branch
+  // still in place - what the server (and every other replica) will see.
+  const reparsed = parseNoteDocument(encodeNoteDocument(doc));
+  assert.equal(reparsed.text, doc.text);
+  assert.deepEqual(reparsed.runs.filter((run) => run.sequence.length > 1)[0]?.sequence, [14, 16]);
 });
 
 test("REAL_FIRST_SAVE_NOTE (a brand-new note's first save) decodes and round-trips with no code changes", () => {

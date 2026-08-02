@@ -65,9 +65,13 @@ message Substring {
   // squashed to `true` and re-encoded differently.
   optional uint32 tombstone = 4;
   // Previously `sequence`, semantics unknown at the time - Apple's schema
-  // says it's an index into `String.substring` (a child-run link). Genuinely
-  // `repeated`: a real 2026-07-15 capture had two occurrences in one run; a
-  // proto2 `optional` would silently drop all but the last on decode.
+  // says it's an index into `String.substring` (a child-run link). These are
+  // real DAG edges (0-based, always forward: Apple serializes in topological
+  // order), preserved through push edits by `noteDocument.ts`'s edge
+  // surgery. Genuinely `repeated`: a branch node carries one edge per
+  // concurrent inserter - a real 2026-07-15 capture had two occurrences in
+  // one run; a proto2 `optional` would silently drop all but the last on
+  // decode.
   repeated uint32 child = 5;
 }
 

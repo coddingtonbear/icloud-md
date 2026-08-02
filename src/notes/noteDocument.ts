@@ -39,8 +39,20 @@
  *              5: child run index(es) - genuinely `repeated`: a real capture
  *                 (2026-07-15) had two occurrences in one run; see
  *                 `proto/topotext.proto`'s `Substring.child` comment. This
- *                 file's domain model calls it `sequence` (every real save
- *                 renumbers it 1..N in document order).
+ *                 file's domain model calls it `sequence`. These are real
+ *                 DAG edges (0-based indexes into the substring array, each
+ *                 pointing at a *child* run), not save-order sequence
+ *                 numbers: Apple's serializer writes each substring's
+ *                 in-memory `children` array as indexes, and its save order
+ *                 is a Kahn-style topological traversal, so every edge
+ *                 points forward in the array. Linear documents therefore
+ *                 look renumbered 1..N (run k points at run k+1) - the
+ *                 shape that previously misled this file into flattening
+ *                 the graph on every push. Edits now preserve the graph,
+ *                 doing the same edge surgery Apple's own client does
+ *                 (`splitTopoSubstring_atIndex` /
+ *                 `insertAttributedString_after_before`, recovered from the
+ *                 captured iCloud web bundle - dev log 2026-08-02).
  *
  * Invariants verified against every captured note:
  *  - run lengths and clocks count UTF-16 code units;
@@ -96,9 +108,13 @@ export interface TextRun {
   length: number;
   anchor: RunCoord;
   tombstone: boolean;
-  /** Almost always one entry; occasionally more in real captures - see
-   * `proto/topotext.proto`'s `Substring.child` comment. Empty for a
-   * brand-new run pending `applyTextEdit`'s renumbering pass. */
+  /** This run's outgoing child edges in the insertion-order DAG: 0-based
+   * indexes into the document's runs array, always pointing at a *later*
+   * index (Apple serializes in topological order). Usually one entry; more
+   * on a branch node, where concurrent replicas inserted after the same run
+   * (a real 2026-07-15 capture carries a two-child run) - see
+   * `proto/topotext.proto`'s `Substring.child` comment. Maintained through
+   * edits by `splitRunAt`/`insertRunAt`; the end sentinel has none. */
   sequence: number[];
 }
 
@@ -266,11 +282,10 @@ export function applyTextEdit(doc: NoteDocument, newText: string, options: Apply
     }
   }
 
-  // Sequence numbers are not stable identifiers: every captured save has
-  // them renumbered 1..N in list (= document) order, so do the same -
-  // collapsing any multi-value sequence (see TextRun.sequence) back down to
-  // one, matching what a real save always does.
-  renumberSequences(doc);
+  // Child edges were maintained in place by the split/insert surgery above
+  // (see TextRun.sequence): untouched runs keep the exact edges they were
+  // parsed with - only index-shifted for array splices - so a branched
+  // insertion graph survives our save the same way it survives Apple's.
 
   doc.text = newText;
   validateDocumentInvariants(doc);
@@ -302,8 +317,10 @@ export function buildInitialNoteDocument(text: string, replicaId: Uint8Array): N
     text: "",
     runs: [
       // The captured document leads with this zero-length replica-0 run
-      // (sequence 1) ahead of all real content.
-      { coord: { replica: 0, clock: 0 }, length: 0, anchor: { replica: 0, clock: 0 }, tombstone: false, sequence: [] },
+      // ahead of all real content, its one child edge pointing at the end
+      // sentinel - Apple's initWithReplicaID seeds exactly this two-node
+      // graph, and the first insert splices itself into that edge.
+      { coord: { replica: 0, clock: 0 }, length: 0, anchor: { replica: 0, clock: 0 }, tombstone: false, sequence: [1] },
       {
         coord: { replica: 0, clock: SENTINEL_CLOCK },
         length: 0,
@@ -319,15 +336,83 @@ export function buildInitialNoteDocument(text: string, replicaId: Uint8Array): N
   return doc;
 }
 
-function renumberSequences(doc: NoteDocument): void {
-  let sequence = 1;
-  for (const run of doc.runs) {
-    if (isSentinel(run)) {
-      continue;
+// --- child-edge surgery -----------------------------------------------------
+
+/** Adds `delta` to every child edge across `runs` that points at an array
+ * index >= `threshold` - the bookkeeping every runs-array splice owes the
+ * graph, since edges are stored as array indexes. */
+function shiftChildEdges(runs: readonly TextRun[], threshold: number, delta: number): void {
+  for (const run of runs) {
+    for (let i = 0; i < run.sequence.length; i += 1) {
+      if (run.sequence[i]! >= threshold) {
+        run.sequence[i]! += delta;
+      }
     }
-    run.sequence = [sequence];
-    sequence += 1;
   }
+}
+
+/**
+ * Splits `runs[index]` at `offset` (0 < offset < length) into head and tail
+ * in place, exactly the edge surgery of Apple's `splitTopoSubstring_atIndex`:
+ * the tail inherits the head's outgoing child edges, the head's only child
+ * becomes the tail, and every edge that pointed at the split run keeps
+ * pointing at the head (which keeps the run's coord, so edges by index stay
+ * correct). The tail lands at `index + 1`; returns it. Exported for
+ * `tableCellEdit.ts`, whose cell strings share the run discipline.
+ */
+export function splitRunAt(runs: TextRun[], index: number, offset: number): TextRun {
+  const run = runs[index];
+  if (!run || offset <= 0 || offset >= run.length) {
+    throw new Error(`Cannot split run ${index} at offset ${offset} - CRDT model out of sync`);
+  }
+  shiftChildEdges(runs, index + 1, 1);
+  const tail: TextRun = {
+    coord: { replica: run.coord.replica, clock: run.coord.clock + offset },
+    length: run.length - offset,
+    anchor: { replica: run.anchor.replica, clock: run.anchor.clock },
+    tombstone: run.tombstone,
+    // Ownership of the outgoing edges moves to the tail (values already
+    // shifted above; they all pointed past `index`, this array is not
+    // shared - every run's sequence array has one owner).
+    sequence: run.sequence,
+  };
+  run.length = offset;
+  run.sequence = [index + 1];
+  runs.splice(index + 1, 0, tail);
+  return tail;
+}
+
+/**
+ * Splices a freshly created `run` into the array at `index` and into the
+ * child graph between its new array neighbours, mirroring Apple's
+ * `insertAttributedString_after_before`: when the predecessor has an edge to
+ * the run being displaced, the new run takes that edge's place
+ * (predecessor -> new -> successor); when it doesn't (a branched graph where
+ * the array neighbours aren't graph-linked), the new run takes over ALL of
+ * the predecessor's children and becomes its only child. Exported for
+ * `tableCellEdit.ts`.
+ */
+export function insertRunAt(runs: TextRun[], index: number, run: TextRun): void {
+  shiftChildEdges(runs, index, 1);
+  const predecessor = index > 0 ? runs[index - 1] : undefined;
+  if (predecessor) {
+    // The displaced successor sat at `index`; after the shift, edges to it
+    // read `index + 1`.
+    const successorEdge = predecessor.sequence.indexOf(index + 1);
+    if (successorEdge !== -1) {
+      predecessor.sequence[successorEdge] = index;
+      run.sequence = [index + 1];
+    } else {
+      run.sequence = predecessor.sequence;
+      predecessor.sequence = [index];
+    }
+  } else {
+    // No predecessor: a document without the usual zero-length origin lead
+    // run (never observed in a capture). The new run becomes a start node
+    // pointing at the run it displaced.
+    run.sequence = [index + 1];
+  }
+  runs.splice(index, 0, run);
 }
 
 // --- parsing ---------------------------------------------------------------
@@ -504,9 +589,11 @@ function isLowSurrogate(code: number): boolean {
 }
 
 /** Marks the visible range [start, start+length) as tombstoned, splitting
- * runs where the range boundaries fall inside one, and restamps each newly
- * tombstoned piece's style timestamp with (replicaIndex, max(its old style
- * clock + 8, styleClockFloor)) - Apple's deletion-bias rule from
+ * runs where the range boundaries fall inside one (`splitRunAt`, which owns
+ * the child-edge surgery - tombstoning itself never touches edges, exactly
+ * like Apple's `deleteSubstrings_withCharacterRanges`), and restamps each
+ * newly tombstoned piece's style timestamp with (replicaIndex, max(its old
+ * style clock + 8, styleClockFloor)) - Apple's deletion-bias rule from
  * generateIdsForLocalChanges. Returns the highest clock stamped (or -1 when
  * the range covered nothing), so the caller can advance the replica's style
  * clock past it. Clock arithmetic follows the pattern in captured notes: a
@@ -519,43 +606,42 @@ function tombstoneVisibleRange(
   styleClockFloor: number,
 ): number {
   const end = start + length;
-  const out: TextRun[] = [];
+  if (end > visibleLengthFrom(doc.runs, 0)) {
+    throw new Error("Tombstone range extends past the end of the visible text - CRDT model out of sync");
+  }
+  const runs = doc.runs;
   let visible = 0;
   let maxAssigned = -1;
-
-  for (const run of doc.runs) {
+  for (let i = 0; i < runs.length && visible < end; i += 1) {
+    const run = runs[i]!;
     if (run.tombstone || run.length === 0 || isSentinel(run)) {
-      out.push(run);
       continue;
     }
     const runStart = visible;
-    const runEnd = visible + run.length;
-    visible = runEnd;
-
-    if (runEnd <= start || runStart >= end) {
-      out.push(run);
+    const runEnd = runStart + run.length;
+    if (runEnd <= start) {
+      visible = runEnd;
       continue;
     }
 
-    const overlapStart = Math.max(start, runStart);
-    const overlapEnd = Math.min(end, runEnd);
-    if (overlapStart > runStart) {
-      out.push(pieceOf(run, 0, overlapStart - runStart, false));
+    let target = run;
+    let targetIndex = i;
+    let targetStart = runStart;
+    if (start > runStart) {
+      target = splitRunAt(runs, i, start - runStart);
+      targetIndex = i + 1;
+      targetStart = start;
     }
-    const tombstoned = pieceOf(run, overlapStart - runStart, overlapEnd - overlapStart, true);
-    const assigned = Math.max(run.anchor.clock + 8, styleClockFloor);
-    tombstoned.anchor = { replica: replicaIndex, clock: assigned };
+    if (end < targetStart + target.length) {
+      splitRunAt(runs, targetIndex, end - targetStart);
+    }
+    const assigned = Math.max(target.anchor.clock + 8, styleClockFloor);
+    target.tombstone = true;
+    target.anchor = { replica: replicaIndex, clock: assigned };
     maxAssigned = Math.max(maxAssigned, assigned);
-    out.push(tombstoned);
-    if (runEnd > overlapEnd) {
-      out.push(pieceOf(run, overlapEnd - runStart, runEnd - overlapEnd, false));
-    }
+    visible = targetStart + target.length;
+    i = targetIndex;
   }
-
-  if (visible < end) {
-    throw new Error("Tombstone range extends past the end of the visible text - CRDT model out of sync");
-  }
-  doc.runs = out;
   return maxAssigned;
 }
 
@@ -577,13 +663,14 @@ export function applyFormattingOp(doc: NoteDocument, ranges: readonly { start: n
     maxAssigned = Math.max(maxAssigned, restampVisibleRange(doc, range.start, range.end, replicaIndex, styleClockFloor));
   }
   replica.counters[1] = Math.max(maxAssigned + 1, styleClockFloor);
-  renumberSequences(doc);
 }
 
 /** Restamps the style timestamp of every visible substring overlapping
- * [start, end), splitting runs at the boundaries; each restamped piece gets
- * (replicaIndex, max(its old style clock + 1, styleClockFloor)). Returns the
- * highest clock stamped, or -1 when nothing overlapped. */
+ * [start, end), splitting runs at the boundaries (`splitRunAt` owns the
+ * child-edge surgery; restamping itself never touches edges); each
+ * restamped piece gets (replicaIndex, max(its old style clock + 1,
+ * styleClockFloor)). Returns the highest clock stamped, or -1 when nothing
+ * overlapped. */
 function restampVisibleRange(
   doc: NoteDocument,
   start: number,
@@ -591,53 +678,39 @@ function restampVisibleRange(
   replicaIndex: number,
   styleClockFloor: number,
 ): number {
-  const out: TextRun[] = [];
+  const runs = doc.runs;
   let visible = 0;
   let maxAssigned = -1;
-
-  for (const run of doc.runs) {
+  for (let i = 0; i < runs.length && visible < end; i += 1) {
+    const run = runs[i]!;
     if (run.tombstone || run.length === 0 || isSentinel(run)) {
-      out.push(run);
       continue;
     }
     const runStart = visible;
-    const runEnd = visible + run.length;
-    visible = runEnd;
-
-    if (runEnd <= start || runStart >= end) {
-      out.push(run);
+    const runEnd = runStart + run.length;
+    if (runEnd <= start) {
+      visible = runEnd;
       continue;
     }
 
-    const overlapStart = Math.max(start, runStart);
-    const overlapEnd = Math.min(end, runEnd);
-    if (overlapStart > runStart) {
-      out.push(pieceOf(run, 0, overlapStart - runStart, false));
+    let target = run;
+    let targetIndex = i;
+    let targetStart = runStart;
+    if (start > runStart) {
+      target = splitRunAt(runs, i, start - runStart);
+      targetIndex = i + 1;
+      targetStart = start;
     }
-    const restamped = pieceOf(run, overlapStart - runStart, overlapEnd - overlapStart, false);
-    const assigned = Math.max(run.anchor.clock + 1, styleClockFloor);
-    restamped.anchor = { replica: replicaIndex, clock: assigned };
+    if (end < targetStart + target.length) {
+      splitRunAt(runs, targetIndex, end - targetStart);
+    }
+    const assigned = Math.max(target.anchor.clock + 1, styleClockFloor);
+    target.anchor = { replica: replicaIndex, clock: assigned };
     maxAssigned = Math.max(maxAssigned, assigned);
-    out.push(restamped);
-    if (runEnd > overlapEnd) {
-      out.push(pieceOf(run, overlapEnd - runStart, runEnd - overlapEnd, false));
-    }
+    visible = targetStart + target.length;
+    i = targetIndex;
   }
-  doc.runs = out;
   return maxAssigned;
-}
-
-/** A sub-range of `run` as its own run, with fresh coord/anchor objects.
- * `sequence` is copied by reference - harmless, since `applyTextEdit` always
- * finishes with `renumberSequences`, which replaces it outright. */
-function pieceOf(run: TextRun, offset: number, length: number, tombstone: boolean): TextRun {
-  return {
-    coord: { replica: run.coord.replica, clock: run.coord.clock + offset },
-    length,
-    anchor: { replica: run.anchor.replica, clock: run.anchor.clock },
-    tombstone: tombstone || run.tombstone,
-    sequence: run.sequence,
-  };
 }
 
 /** Inserts `text` at visible position `start`, extending our own trailing
@@ -675,7 +748,7 @@ function insertVisibleText(doc: NoteDocument, start: number, text: string, repli
       if (offset === 0) {
         insertIndex = i;
       } else {
-        doc.runs.splice(i, 1, pieceOf(run, 0, offset, false), pieceOf(run, offset, run.length - offset, false));
+        splitRunAt(doc.runs, i, offset);
         insertIndex = i + 1;
       }
       break;
@@ -701,14 +774,14 @@ function insertVisibleText(doc: NoteDocument, start: number, text: string, repli
     return false;
   }
 
-  doc.runs.splice(insertIndex, 0, {
+  insertRunAt(doc.runs, insertIndex, {
     coord: { replica: replicaIndex, clock },
     length: text.length,
     // The anchor is the run's style timestamp in the formatting-op clock
     // domain (`counters[1]`), not a position: (replica, 0) = "never
     // restyled", exactly what the iOS client writes for its own plain typed
     // runs (2026-07-29 device captures, vault dev log). Clients bulk-restamp
-    // it on style ops. Sequence is assigned by the caller's renumbering pass.
+    // it on style ops. Child edges are wired by `insertRunAt`.
     anchor: { replica: replicaIndex, clock: 0 },
     tombstone: false,
     sequence: [],
@@ -902,6 +975,32 @@ export function validateDocumentInvariants(doc: NoteDocument): void {
       }
     }
   }
+
+  validateChildEdges(doc.runs);
+}
+
+/**
+ * Sanity for the child-edge graph (see `TextRun.sequence`): every edge in
+ * range and strictly forward-pointing (Apple's save order is a topological
+ * traversal, so any document its clients wrote satisfies this - and forward
+ * edges can't form a cycle), and every non-sentinel run linked into the
+ * graph (only the end sentinel is an end node in a non-fragment document).
+ * Exported for `tableCellEdit.ts`'s cell/mirror variant of the discipline.
+ */
+export function validateChildEdges(runs: readonly TextRun[], what = "note"): void {
+  runs.forEach((run, index) => {
+    if (isSentinel(run)) {
+      return;
+    }
+    if (run.sequence.length === 0) {
+      throw new Error(`Run ${index} has no child edge - refusing to touch this ${what}`);
+    }
+    for (const child of run.sequence) {
+      if (!Number.isInteger(child) || child <= index || child >= runs.length) {
+        throw new Error(`Run ${index} has a child edge to ${child}, outside the forward range - refusing to touch this ${what}`);
+      }
+    }
+  });
 }
 
 /** Exported for `tableCellEdit.ts`; see `parseTextRun`. */

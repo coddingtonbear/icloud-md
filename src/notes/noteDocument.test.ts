@@ -305,7 +305,11 @@ test("invariant validation rejects clocks past the replica counter", () => {
   assert.throws(() => validateDocumentInvariants(doc), /exceed replica/);
 });
 
-test("sequence numbers are renumbered to list order after an edit, like every captured save", () => {
+test("editing a linear document keeps its child edges a 1..N chain - byte-identical to what captured saves show", () => {
+  // A linear chain in list order is what every single-writer capture looks
+  // like (run k's one child edge points at run k+1). The edge surgery must
+  // reproduce it exactly on chain inputs - this is the compatibility
+  // guarantee that all pre-existing behavior rides on.
   const doc = simpleDocument("Hello world");
   applyTextEdit(doc, "Hello brave world", { replicaId: REPLICA_B });
 
@@ -314,6 +318,104 @@ test("sequence numbers are renumbered to list order after an edit, like every ca
     sequences,
     sequences.map((_, i) => [i + 1]),
   );
+});
+
+/**
+ * A branched document like the real 2026-07-15 capture's two-child run: two
+ * replicas inserted concurrently after run A, so A carries two child edges
+ * and the array neighbours B/C aren't graph-linked (both point at the
+ * sentinel). Layout: 0 origin[1], 1 A"aaa"[2,3], 2 B"bbb"[4], 3 C"ccc"[4],
+ * 4 sentinel[].
+ */
+function branchedDocument(): NoteDocument {
+  return makeDocument(
+    "aaabbbccc",
+    [
+      { coord: { replica: 1, clock: 0 }, length: 3, anchor: { replica: 1, clock: 0 }, tombstone: false, sequence: [2, 3] },
+      { coord: { replica: 2, clock: 0 }, length: 3, anchor: { replica: 2, clock: 0 }, tombstone: false, sequence: [4] },
+      { coord: { replica: 1, clock: 3 }, length: 3, anchor: { replica: 1, clock: 0 }, tombstone: false, sequence: [4] },
+    ],
+    [6, 3],
+  );
+}
+
+function sequencesOf(doc: NoteDocument): number[][] {
+  return doc.runs.map((run) => run.sequence);
+}
+
+test("a deletion inside one branch preserves the other branch's edges (no more flattening to a chain)", () => {
+  const doc = branchedDocument();
+
+  // Delete one "b" (the diff resolves it to the last one): splits B at
+  // offset 2 and tombstones the trailing one-unit piece.
+  assert.equal(applyTextEdit(doc, "aaabbccc", { replicaId: REPLICA_A }), true);
+
+  assert.equal(visibleText(doc), "aaabbccc");
+  assert.equal(reencodeAndDecode(doc), "aaabbccc");
+  validateDocumentInvariants(doc);
+  // Layout after the split: 0 origin, 1 A, 2 B-head, 3 B-tail(tombstone),
+  // 4 C, 5 sentinel. A's branch edges survive (index-shifted to B-head and
+  // C); B's tail keeps the sentinel-bound edge C also holds - untouched
+  // runs keep the exact edges they were parsed with.
+  assert.deepEqual(sequencesOf(doc), [[1], [2, 4], [3], [5], [5], []]);
+  assert.deepEqual(
+    doc.runs.map((run) => run.tombstone),
+    [false, false, false, true, false, false],
+  );
+  // The tombstone restamp carries our deletion's style stamp: Apple's
+  // deletion bias max(old style clock 0 + 8, style-clock floor 1) = 8.
+  assert.deepEqual(doc.runs[3]?.anchor, { replica: 1, clock: 8 });
+});
+
+test("an insert between branches follows Apple's edge-splice rule when the array neighbours aren't graph-linked", () => {
+  const doc = branchedDocument();
+
+  // Insert between B and C. B's one edge points at the sentinel (not at C),
+  // so Apple's insertAttributedString_after_before takes the else branch:
+  // the new run takes over B's children and becomes B's only child.
+  assert.equal(applyTextEdit(doc, "aaabbbXXccc", { replicaId: REPLICA_A }), true);
+
+  assert.equal(visibleText(doc), "aaabbbXXccc");
+  assert.equal(reencodeAndDecode(doc), "aaabbbXXccc");
+  validateDocumentInvariants(doc);
+  // Layout: 0 origin, 1 A, 2 B, 3 new"XX", 4 C, 5 sentinel. A still
+  // branches to B and C; B -> new -> sentinel; C -> sentinel.
+  assert.deepEqual(sequencesOf(doc), [[1], [2, 4], [3], [5], [5], []]);
+  const inserted = doc.runs[3];
+  assert.deepEqual(inserted?.coord, { replica: 1, clock: 6 });
+  assert.equal(inserted?.length, 2);
+});
+
+test("a formatting op that splits a branch node keeps both branch edges on the tail piece", () => {
+  const doc = branchedDocument();
+
+  applyFormattingOp(doc, [{ start: 1, end: 2 }], REPLICA_A);
+
+  validateDocumentInvariants(doc);
+  // A ("aaa", the branch node) splits into three one-unit pieces; its two
+  // branch edges stay together on the LAST piece (Apple's
+  // splitTopoSubstring_atIndex hands the head's children to the tail), and
+  // the middle piece carries the restamp.
+  assert.deepEqual(sequencesOf(doc), [[1], [2], [3], [4, 5], [6], [6], []]);
+  assert.deepEqual(doc.runs[2]?.anchor, { replica: 1, clock: 1 });
+  assert.equal(reencodeAndDecode(doc), "aaabbbccc");
+});
+
+test("validateDocumentInvariants rejects graphs the surgery could never produce", () => {
+  // A backward child edge (cycle territory).
+  const backward = simpleDocument("hello");
+  backward.runs[1]!.sequence = [0];
+  assert.throws(() => validateDocumentInvariants(backward), /child edge to 0/);
+
+  // An out-of-range child edge.
+  const outOfRange = simpleDocument("hello");
+  outOfRange.runs[1]!.sequence = [9];
+  assert.throws(() => validateDocumentInvariants(outOfRange), /child edge to 9/);
+
+  // A non-sentinel run with no edge at all (a dangling end node).
+  const dangling = simpleDocument("hello");
+  dangling.runs[1]!.sequence = [];
+  assert.throws(() => validateDocumentInvariants(dangling), /no child edge/);
 });
 
 test("structural edits advance the event counter; the sentinel run never gets a sequence", () => {
