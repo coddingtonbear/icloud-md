@@ -38,7 +38,7 @@
     "typecheck:integration": "tsc -p tsconfig.integration.json",
     "toc": "markdown-toc -i README.md",
     "import-har": "tsx src/scripts/importHar.ts",
-    "test": "tsx --test $(find src -name '*.test.ts')",
+    "test": "tsx --test $(find src integration -name '*.test.ts' ! -name 'live.test.ts')",
     "test:integration": "npm run build && tsx --test integration/live.test.ts",
     "itest:setup": "tsx integration/setupFolder.ts",
     "itest:sweep": "tsx integration/sweep.ts",

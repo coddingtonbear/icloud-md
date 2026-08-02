@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { RunContext } from "./harness.js";
+import { plantTiedAnchorDeletion } from "./tiedAnchorDeletion.js";
 import { readFrontmatterField, stripFrontmatter, type Vault } from "./vault.js";
 
 const enabled = process.env.ICLOUD_MD_ITEST === "1";
@@ -195,6 +196,96 @@ describe("live sync against a real iCloud account", { concurrency: 1, skip: enab
       witness.after.replace(/\\n/g, " "),
       /"string":"[^"]*bravo charlie[^"]*"/,
       "the merge result's visible text should not contain the deleted words",
+    );
+  });
+
+  it("pushes a tied-anchor deletion that an open web client discards - the negative control", async () => {
+    // The other half of the proof above. That test shows a *correctly*
+    // restamped deletion surviving the merge; on its own it only shows that
+    // some deletion merges. This one pushes the same edit with one thing
+    // changed - the tombstones keep their original style timestamp instead
+    // of being restamped - and the client must throw it away. Same edit,
+    // opposite outcome, the difference being the clock discipline alone.
+    //
+    // The stamp is a *tie*, not a loss: our tombstone claims exactly the
+    // timestamp the client's own copy of that run carries, which is the
+    // closest a wrong deletion can come to winning Apple's last-writer-wins
+    // comparison without winning it. See tiedAnchorDeletion.ts.
+    //
+    // This note is deliberately divergent from what the account holds, so it
+    // is never reused for another assertion; teardown removes it with the
+    // rest of the run's fixtures.
+    const title = run.title("tied anchor canary");
+    const fileName = "tied-anchor-canary.md";
+    await vault.writeNote(fileName, [`# ${title}`, "", "epsilon zeta eta theta", ""].join("\n"));
+    assert.equal((await vault.push()).exitCode, 0);
+    const noteId = await vault.noteId(fileName);
+
+    // Open the note; the client now holds its document in memory.
+    const oracle = await run.oracle();
+    const before = await oracle.readNote(noteId);
+    assert.match(before.plainText, /epsilon zeta eta theta/);
+
+    // Plant the wrong deletion behind the open client's back, through the
+    // same records/modify call push uses.
+    const planted = await plantTiedAnchorDeletion({ vaultDir: vault.dir, noteId, deleteText: "zeta eta " });
+    assert.equal(planted.result.ok, true, `planting should be accepted by CloudKit: ${JSON.stringify(planted.result)}`);
+    assert.ok(planted.tiedRuns > 0, "the planted document should carry at least one tombstone");
+    assert.doesNotMatch(planted.newText, /zeta eta/, "the planted document should claim the deletion happened");
+    // Prove the plant is the weaker of the two shapes, not just a different
+    // one: every tombstone kept a stamp a correct push would have raised.
+    for (const [index, tied] of planted.tiedAnchors.entries()) {
+      const correct = planted.correctAnchors[index];
+      assert.ok(correct !== undefined && correct.clock > tied.clock, `tombstone ${index} should carry the losing stamp`);
+    }
+
+    // Drive the same forced reload the positive test uses, so the client
+    // takes its merge path against the copy it already holds.
+    const reloaded = await oracle.forceReloadNote(noteId);
+    assert.ok(reloaded !== undefined, "the open client should know the note it is displaying");
+
+    // Waiting on a clock would only ever prove "nothing had happened yet".
+    // Wait on the client's own testimony instead: poll until CRDTManager
+    // records a merge naming this note, which is the client saying it
+    // received our document and ran it through the held-copy branch. Only
+    // then is "the text is still there" evidence of a *rejected* deletion
+    // rather than of a push still in flight.
+    const deadline = Date.now() + 30_000;
+    let witness: { ours: string; theirs: string; after: string } | undefined;
+    while (Date.now() < deadline && witness === undefined) {
+      const traces = await oracle.mergeTraces();
+      assert.ok(traces !== undefined, "Apple's diagnose hook should be reachable");
+      // `mergeTraces` only reads the client's rolling buffer (and cleans up
+      // the download link it made), so polling it is safe; pace it anyway
+      // rather than spinning on `diagnose()`.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      witness = traces.topoTextMergeTraces
+        .filter((trace) => trace !== null)
+        .map((trace) => ({
+          ours: JSON.stringify(trace.oursBefore ?? ""),
+          theirs: JSON.stringify(trace.theirsBefore ?? ""),
+          after: JSON.stringify(trace.oursAfter ?? ""),
+        }))
+        .find((trace) => trace.ours.includes("epsilon zeta eta theta") && trace.theirs.includes(title));
+    }
+    assert.ok(witness, "the client should have recorded a merge whose 'ours' side is the pre-deletion text");
+
+    // Our side really did carry the deletion...
+    assert.match(witness.theirs, /"tombstone":\s*true/, "our planted document should have carried the deletion as a tombstone");
+    // ...and the merge threw it away: the result still holds the words.
+    assert.match(
+      witness.after.replace(/\\n/g, " "),
+      /"string":"[^"]*zeta eta[^"]*"/,
+      "the merge result should have kept the text our losing tombstone tried to delete",
+    );
+
+    // The same conclusion from the outside, through the editor rather than
+    // the debug hook: the open tab still shows the words.
+    const after = await oracle.rereadOpenNote(noteId);
+    assert.match(
+      after.plainText,
+      /epsilon zeta eta theta/,
+      "the open client should have discarded the tied-anchor deletion, but the words vanished",
     );
   });
 

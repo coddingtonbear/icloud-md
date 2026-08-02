@@ -39,6 +39,25 @@ It decodes the style enum with its own copy of the mapping rather than
 importing `noteFormat.ts`'s — if it shared ours, a wrong mapping would cancel
 itself out and the test would pass anyway.
 
+## Negative controls
+
+Two of the merge tests are a matched pair. One pushes a correctly restamped
+deletion and proves an open client *adopts* it; the other pushes the same
+deletion with the tombstones left at their original style timestamp and proves
+the client *discards* it. Same edit, opposite outcomes, the clock discipline
+being the only difference — which is what makes the first test evidence about
+our restamping rather than about deletions in general.
+
+The wrong shape cannot be produced through the normal write path (`applyTextEdit`
+always restamps), so `tiedAnchorDeletion.ts` builds it by letting the production
+codec do the correct edit and then reverting only the stamps, and writes it back
+through the ordinary `records/modify` call. That file is test-only on purpose:
+nothing in `src/` should be able to author a document that loses a merge.
+
+`tiedAnchorDeletion.test.ts` covers it offline, on captured bytes, and runs under
+plain `npm test` — a helper that silently emitted a *correct* deletion, or a
+malformed one, would make the live test pass for the wrong reason.
+
 ## Containment
 
 Fixtures are confined to a dedicated Notes folder, and two independent keys
