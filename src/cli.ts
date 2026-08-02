@@ -292,14 +292,26 @@ program
     "clone as an account already signed in on this machine (an Apple ID, or its dsid), reusing its saved " +
       "sign-in instead of opening a browser window to ask which account to use",
   )
-  .action(async (directory: string, opts: { filenameAsTitle?: boolean; account?: string }, command: Command) => {
-    const context = contextFor(command);
-    const summary = await runClone(directory, makeSyncProgress(context), makeStatusSink(context), {
-      filenameAsTitle: opts.filenameAsTitle === true,
-      ...(opts.account !== undefined ? { account: opts.account } : {}),
-    });
-    emitResult(context, summary, (result) => printCloneSummary(directory, result));
-  });
+  .option(
+    "--non-interactive",
+    "never open a sign-in window; fail instead. For unattended runs (CI, cron, test harnesses), where a window has " +
+      "nobody to complete it - a saved session or a silent profile relaunch is still tried first",
+  )
+  .action(
+    async (
+      directory: string,
+      opts: { filenameAsTitle?: boolean; account?: string; nonInteractive?: boolean },
+      command: Command,
+    ) => {
+      const context = contextFor(command);
+      const summary = await runClone(directory, makeSyncProgress(context), makeStatusSink(context), {
+        filenameAsTitle: opts.filenameAsTitle === true,
+        nonInteractive: opts.nonInteractive === true,
+        ...(opts.account !== undefined ? { account: opts.account } : {}),
+      });
+      emitResult(context, summary, (result) => printCloneSummary(directory, result));
+    },
+  );
 
 program
   .command("pull [directory]")

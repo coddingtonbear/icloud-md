@@ -105,8 +105,23 @@ A full run takes roughly three minutes and prints the account, folder and run
 id before touching anything.
 
 Clones happen unattended thanks to `clone --account <appleId|dsid>`, which
-reuses that account's already-trusted browser profile. If the saved sign-in
-has lapsed, it falls back to a visible browser window so you can complete it.
+reuses that account's stored session — the same one `push`/`pull` use — and
+so needs no browser at all in the ordinary case.
+
+That matters because relaunching the account's browser profile is what has
+actually been seen to fail here. On 2026-08-02 a mid-run clone could not
+complete a silent sign-in, fell back to a visible window with nobody there to
+close it, and cost 5.5 minutes for every remaining cloning test — while the
+stored session it never tried was serving every push and pull in the same run.
+That lapse was never explained: the obvious suspect, the web oracle holding
+the same profile for the whole run, does not reproduce it (a second Chromium
+opens a held profile fine, and a silent sign-in still succeeds after 17
+minutes of contention).
+
+Every clone the suite makes also passes `--non-interactive`, so if both the
+stored session and a silent profile relaunch fail, the run fails immediately
+and says so rather than waiting on a window. Re-authenticate
+(`icloud-md reauthenticate <a clone>`) and run again.
 
 ## Environment variables
 
