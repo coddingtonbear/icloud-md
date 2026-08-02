@@ -102,7 +102,6 @@ import {
   insertVisibleText,
   newCellDocument,
   parseCellDocument,
-  renumberSequences,
   tombstoneVisibleRange,
   validateCellInvariants,
   type TableCellDocument,
@@ -866,12 +865,12 @@ function renumberAttachments(orderedSet: OrderedSet): void {
 /** Runs one splice against the FFFC mirror (the same `topotext.String`
  * shape as a cell), then restores the mirror's own invariant shape: text =
  * one U+FFFC per live entry, one `{length: 1}` attribute run per visible
- * character (the exact captured shape), and freshly renumbered child links. */
+ * character (the exact captured shape). Child links are maintained by the
+ * splice primitives themselves (`tableCellEdit.ts`). */
 function editMirror(orderedSet: OrderedSet, splice: (mirror: TableCellDocument) => void): void {
   const stringArray = orderedSet.array!.array!;
   const mirror = parseCellDocument(stringArray.contents!);
   splice(mirror);
-  renumberSequences(mirror);
   const visible = mirror.runs.filter((run) => !run.tombstone).reduce((sum, run) => sum + run.length, 0);
   mirror.text = OBJECT_REPLACEMENT_CHARACTER.repeat(visible);
   mirror.attributeRuns = Array.from({ length: visible }, () => create(AttributeRunSchema, { length: 1 }));
