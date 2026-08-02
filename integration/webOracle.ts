@@ -74,6 +74,26 @@ export interface WebNote {
   paragraphs: WebParagraph[];
 }
 
+/**
+ * One entry of `CRDTManager.mergeTraces`: the client's own copy before the
+ * merge, the copy it received, and the result. Each is whatever that
+ * manager's `snapshot()` produces - for text, `saveToArchive()` - serialised
+ * through `JSON.stringify`, so the shape is Apple's, not ours; deliberately
+ * left `unknown` rather than modelled, since nothing here should be asserting
+ * on a shape we don't control.
+ */
+export interface MergeTrace {
+  oursBefore?: unknown;
+  theirsBefore?: unknown;
+  oursAfter?: unknown;
+}
+
+export interface MergeTraceReport {
+  date: string;
+  topoTextMergeTraces: MergeTrace[];
+  tableMergeTraces: MergeTrace[];
+}
+
 export interface WebNoteListRow {
   title: string;
   snippet: string;
@@ -133,12 +153,34 @@ export class NotesWebOracle {
   }
 
   /**
-   * Reads one note by record id. Retries the select-all/copy cycle: right
-   * after navigation the editor can be mounted but still empty, and a copy
-   * landing in that window returns "" rather than failing loudly.
+   * Reads one note by record id, navigating to it first - a *cold* load: the
+   * client has no in-memory copy of a note it has just been sent to, so what
+   * comes back is a decode of the stored bytes.
    */
   async readNote(noteId: string): Promise<WebNote> {
     await this.page.goto(noteUrl(noteId), { waitUntil: "domcontentloaded" });
+    return this.copyOpenNote(noteId);
+  }
+
+  /**
+   * Reads the note the client *already has open*, without navigating.
+   *
+   * This is the only way to observe a merge rather than a decode. Apple's
+   * `CRDTManager.load` merges an incoming document into the copy it already
+   * holds (`if (!existing) store; else merge(existing, incoming)`), so a note
+   * that is open when our push lands takes the merge path - the one every
+   * claim about clocks, tombstone anchors and child edges is really about.
+   * Navigating here would silently turn the observation back into a cold
+   * load, which agrees with whatever we wrote by construction.
+   */
+  async rereadOpenNote(noteId: string): Promise<WebNote> {
+    return this.copyOpenNote(noteId);
+  }
+
+  /** Retries the select-all/copy cycle: the editor can be mounted but still
+   * empty, and a copy landing in that window returns "" rather than failing
+   * loudly. */
+  private async copyOpenNote(noteId: string): Promise<WebNote> {
     const frame = await this.appFrame();
     const editor = frame.locator(".editor-container").first();
     await editor.waitFor({ state: "visible", timeout: this.timeoutMs });
@@ -253,6 +295,115 @@ export class NotesWebOracle {
       seen.add(key);
       return true;
     });
+  }
+
+  /**
+   * The client's own record of its last few merges, read out of Apple's
+   * built-in diagnostic hook.
+   *
+   * `installDiagnose` puts `NotesApp.Debug.diagnose()` on the app window; it
+   * packages `topoTextManager.mergeTraces` and `icTableManager.mergeTraces`
+   * into JSON and appends a download link (a blob URL - it never
+   * auto-clicks), which we then fetch back inside the page. Each trace is
+   * `{oursBefore, theirsBefore, oursAfter}`, the archives of the client's own
+   * copy, the copy it received, and the merge result: the client telling us
+   * directly what it did with what we pushed.
+   *
+   * `CRDTManager` keeps only `maxMergeTraceCount` (3) of these, newest first,
+   * and records one *per merge* - a note loaded cold produces none at all,
+   * which is itself the signal that no merge happened.
+   *
+   * Returns undefined when the hook isn't present (an Apple build without it,
+   * or a page that hasn't finished launching), so a caller can report that
+   * honestly instead of reading silence as "no merge".
+   */
+  async mergeTraces(): Promise<MergeTraceReport | undefined> {
+    const frame = await this.appFrame();
+    return (await frame.evaluate(async () => {
+      const debug = (window as unknown as { NotesApp?: { Debug?: { diagnose?: () => void } } }).NotesApp?.Debug;
+      if (typeof debug?.diagnose !== "function") {
+        return undefined;
+      }
+      debug.diagnose();
+      const links = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[download$=".json"]'));
+      const newest = links[links.length - 1];
+      if (!newest) {
+        return undefined;
+      }
+      const text = await (await fetch(newest.href)).text();
+      newest.remove();
+      return JSON.parse(text) as unknown;
+    })) as MergeTraceReport | undefined;
+  }
+
+  /**
+   * Selects a note from the sidebar *inside* the running app - no page load.
+   *
+   * This is the move that gets a merge to happen at all. A reload throws the
+   * client's in-memory copy away, so the note comes back as a plain decode;
+   * an idle client does not appear to pick up a change on its own. Switching
+   * away and back re-fetches the record while `CRDTManager` still holds the
+   * old copy (its LRU keeps ~10), which is the branch that merges rather than
+   * stores.
+   *
+   * Matches on the row's visible title text, since a sidebar row carries no
+   * record id. The list is virtualised and renders off-screen copies of the
+   * same row (see `listNotes`), so this clicks the first match that is
+   * actually within the viewport - clicking an off-screen twin just times out
+   * against "element is outside of the viewport".
+   */
+  async selectNoteByTitle(titleFragment: string): Promise<void> {
+    const frame = await this.appFrame();
+    const rows = frame.locator(".note-list-item-container", { hasText: titleFragment });
+    await rows.first().waitFor({ state: "attached", timeout: this.timeoutMs });
+
+    const viewport = this.page.viewportSize();
+    const count = await rows.count();
+    for (let i = 0; i < count; i += 1) {
+      const row = rows.nth(i);
+      const box = await row.boundingBox();
+      if (!box || box.y < 0 || box.x < 0) {
+        continue;
+      }
+      if (viewport && (box.y > viewport.height || box.x > viewport.width)) {
+        continue;
+      }
+      await row.click();
+      await this.page.waitForTimeout(1500);
+      return;
+    }
+    throw new Error(`No on-screen note row matching ${JSON.stringify(titleFragment)}`);
+  }
+
+  /**
+   * Drives the client's own sync, and reports whether it ran.
+   *
+   * Needed because an open client will not otherwise notice our push. It
+   * subscribes to CloudKit database changes and relies on a *push*
+   * notification delivered through the iCloud shell; our page is opened
+   * straight at the note route, so that notification never arrives, and the
+   * 30s `ckPollInterval` fallback only starts when creating the subscription
+   * *fails* (`_shouldPollForChanges`). Left alone, the tab sits on its cached
+   * copy indefinitely - confirmed live: no update and no merge traces after
+   * ~55s of waiting, nor after switching notes and back.
+   *
+   * `dataManager.sync()` resumes the app's real `_changesProcessor`, so what
+   * follows is the production ingest path (fetch changed records ->
+   * `CRDTManager.load` -> merge into the copy already held), just triggered
+   * on demand instead of by a notification we can't receive.
+   */
+  async syncNow(): Promise<boolean> {
+    const frame = await this.appFrame();
+    return (await frame.evaluate(async () => {
+      const notesApp = ((window as unknown as Record<string, unknown>).NotesApp ?? {}) as Record<string, unknown>;
+      const debug = (notesApp.Debug ?? {}) as Record<string, unknown>;
+      const dataManager = (notesApp.dataManager ?? debug.dataManager) as { sync?: () => Promise<void> } | undefined;
+      if (typeof dataManager?.sync !== "function") {
+        return false;
+      }
+      await dataManager.sync();
+      return true;
+    })) as boolean;
   }
 
   async screenshot(file: string): Promise<void> {
