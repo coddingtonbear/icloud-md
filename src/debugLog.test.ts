@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { appendDebugLog, readDebugLogSince } from "./debugLog.js";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { appendDebugLog, loggedFetch, readDebugLogSince } from "./debugLog.js";
 
 interface LoggedRecord {
   note: string;
@@ -142,3 +143,79 @@ test("readDebugLogSince skips malformed lines instead of throwing", () =>
       ["good"],
     );
   }));
+
+// --- loggedFetch hands back a readable, byte-exact response ------------------
+//
+// Guards for a real failure: the wrapper used to log from `response.clone()`
+// and hand the original back, and against live CloudKit traffic the caller's
+// own read then threw "Body is unusable: Body has already been read" - every
+// `changes/zone` fetch of any size, making `object list` unable to complete
+// (2026-08-02). These tests pin the properties the fix guarantees - one read,
+// bytes preserved, status and headers passed through - rather than the live
+// failure itself, which does not reproduce against a local server.
+
+async function withServer(
+  handler: (request: IncomingMessage, response: ServerResponse) => void,
+  run: (url: string, logPath: string) => Promise<void>,
+): Promise<void> {
+  const server = createServer(handler);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  try {
+    await withTempLogPath((logPath) => run(`http://127.0.0.1:${port}/`, logPath));
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+test("loggedFetch returns a large JSON response the caller can still read", () =>
+  withServer(
+    (_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ records: Array.from({ length: 4000 }, (_, i) => ({ i, pad: "x".repeat(16) })) }));
+    },
+    async (url, logPath) => {
+      const response = await loggedFetch("bigJson", url, { method: "GET", headers: {} }, logPath);
+      const parsed = (await response.json()) as { records: { i: number }[] };
+      assert.equal(parsed.records.length, 4000);
+
+      const logged = (await readDebugLogSince(new Date(0), logPath)) as unknown as LoggedRecord[];
+      assert.equal(logged.length, 1);
+      assert.equal(((logged[0]?.response?.body as { records?: unknown[] })?.records ?? []).length, 4000);
+    },
+  ));
+
+test("loggedFetch preserves binary bytes exactly, and doesn't try to log them as JSON", () =>
+  withServer(
+    (_request, response) => {
+      response.setHeader("content-type", "image/png");
+      // Bytes that are not valid UTF-8: a decode/re-encode round trip mangles
+      // them, which would silently corrupt every downloaded attachment.
+      response.end(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28]));
+    },
+    async (url, logPath) => {
+      const response = await loggedFetch("binary", url, { method: "GET", headers: {} }, logPath);
+      assert.deepEqual(
+        [...Buffer.from(await response.arrayBuffer())],
+        [0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28],
+      );
+
+      const logged = (await readDebugLogSince(new Date(0), logPath)) as unknown as LoggedRecord[];
+      assert.equal(logged[0]?.response?.body, null);
+    },
+  ));
+
+test("loggedFetch passes through status and headers, including a bodiless 304", () =>
+  withServer(
+    (_request, response) => {
+      response.statusCode = 304;
+      response.setHeader("x-marker", "kept");
+      response.end();
+    },
+    async (url, logPath) => {
+      const response = await loggedFetch("notModified", url, { method: "GET", headers: {} }, logPath);
+      assert.equal(response.status, 304);
+      assert.equal(response.headers.get("x-marker"), "kept");
+    },
+  ));

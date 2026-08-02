@@ -74,6 +74,26 @@ export interface WebNote {
   paragraphs: WebParagraph[];
 }
 
+/**
+ * One entry of `CRDTManager.mergeTraces`: the client's own copy before the
+ * merge, the copy it received, and the result. Each is whatever that
+ * manager's `snapshot()` produces - for text, `saveToArchive()` - serialised
+ * through `JSON.stringify`, so the shape is Apple's, not ours; deliberately
+ * left `unknown` rather than modelled, since nothing here should be asserting
+ * on a shape we don't control.
+ */
+export interface MergeTrace {
+  oursBefore?: unknown;
+  theirsBefore?: unknown;
+  oursAfter?: unknown;
+}
+
+export interface MergeTraceReport {
+  date: string;
+  topoTextMergeTraces: MergeTrace[];
+  tableMergeTraces: MergeTrace[];
+}
+
 export interface WebNoteListRow {
   title: string;
   snippet: string;
@@ -133,12 +153,34 @@ export class NotesWebOracle {
   }
 
   /**
-   * Reads one note by record id. Retries the select-all/copy cycle: right
-   * after navigation the editor can be mounted but still empty, and a copy
-   * landing in that window returns "" rather than failing loudly.
+   * Reads one note by record id, navigating to it first - a *cold* load: the
+   * client has no in-memory copy of a note it has just been sent to, so what
+   * comes back is a decode of the stored bytes.
    */
   async readNote(noteId: string): Promise<WebNote> {
     await this.page.goto(noteUrl(noteId), { waitUntil: "domcontentloaded" });
+    return this.copyOpenNote(noteId);
+  }
+
+  /**
+   * Reads the note the client *already has open*, without navigating.
+   *
+   * This is the only way to observe a merge rather than a decode. Apple's
+   * `CRDTManager.load` merges an incoming document into the copy it already
+   * holds (`if (!existing) store; else merge(existing, incoming)`), so a note
+   * that is open when our push lands takes the merge path - the one every
+   * claim about clocks, tombstone anchors and child edges is really about.
+   * Navigating here would silently turn the observation back into a cold
+   * load, which agrees with whatever we wrote by construction.
+   */
+  async rereadOpenNote(noteId: string): Promise<WebNote> {
+    return this.copyOpenNote(noteId);
+  }
+
+  /** Retries the select-all/copy cycle: the editor can be mounted but still
+   * empty, and a copy landing in that window returns "" rather than failing
+   * loudly. */
+  private async copyOpenNote(noteId: string): Promise<WebNote> {
     const frame = await this.appFrame();
     const editor = frame.locator(".editor-container").first();
     await editor.waitFor({ state: "visible", timeout: this.timeoutMs });
@@ -253,6 +295,45 @@ export class NotesWebOracle {
       seen.add(key);
       return true;
     });
+  }
+
+  /**
+   * The client's own record of its last few merges, read out of Apple's
+   * built-in diagnostic hook.
+   *
+   * `installDiagnose` puts `NotesApp.Debug.diagnose()` on the app window; it
+   * packages `topoTextManager.mergeTraces` and `icTableManager.mergeTraces`
+   * into JSON and appends a download link (a blob URL - it never
+   * auto-clicks), which we then fetch back inside the page. Each trace is
+   * `{oursBefore, theirsBefore, oursAfter}`, the archives of the client's own
+   * copy, the copy it received, and the merge result: the client telling us
+   * directly what it did with what we pushed.
+   *
+   * `CRDTManager` keeps only `maxMergeTraceCount` (3) of these, newest first,
+   * and records one *per merge* - a note loaded cold produces none at all,
+   * which is itself the signal that no merge happened.
+   *
+   * Returns undefined when the hook isn't present (an Apple build without it,
+   * or a page that hasn't finished launching), so a caller can report that
+   * honestly instead of reading silence as "no merge".
+   */
+  async mergeTraces(): Promise<MergeTraceReport | undefined> {
+    const frame = await this.appFrame();
+    return (await frame.evaluate(async () => {
+      const debug = (window as unknown as { NotesApp?: { Debug?: { diagnose?: () => void } } }).NotesApp?.Debug;
+      if (typeof debug?.diagnose !== "function") {
+        return undefined;
+      }
+      debug.diagnose();
+      const links = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[download$=".json"]'));
+      const newest = links[links.length - 1];
+      if (!newest) {
+        return undefined;
+      }
+      const text = await (await fetch(newest.href)).text();
+      newest.remove();
+      return JSON.parse(text) as unknown;
+    })) as MergeTraceReport | undefined;
   }
 
   async screenshot(file: string): Promise<void> {
