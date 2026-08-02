@@ -306,8 +306,61 @@ test("bracket runs that aren't safe to emit raw stay escaped but still round-tri
       ],
     },
   ]);
-  // A plain bracketed word is not a wikilink and keeps its escape.
-  assert.equal(assertRoundTrips([p("body", "[Shinkansen]")]), "\\[Shinkansen]");
+  // A bracket run that would become a link if written bare.
+  assert.equal(assertRoundTrips([p("body", "[a](b)")]), "\\[a]\\(b)");
+  assert.equal(assertRoundTrips([p("body", "[a][b]")]), "\\[a][b]");
+  assert.equal(assertRoundTrips([p("body", "[a]: https://example.com")]), "\\[a]: https://example.com");
+});
+
+test("Obsidian callouts, tags, highlights and footnotes keep their notation too", () => {
+  // Callouts: the `[!TYPE]` head of a blockquote line, foldable or not.
+  assert.equal(assertRoundTrips([p("body", "[!NOTE] Worth knowing", { blockQuoteLevel: 1 })]), "> [!NOTE] Worth knowing");
+  assert.equal(assertRoundTrips([p("body", "[!TIP]- Folded", { blockQuoteLevel: 1 })]), "> [!TIP]- Folded");
+  assert.equal(
+    assertRoundTrips([p("body", "[!WARNING]", { blockQuoteLevel: 1 }), p("body", "body line", { blockQuoteLevel: 1 })]),
+    "> [!WARNING]\n> body line",
+  );
+
+  // Tags: an ATX heading needs whitespace (or end of line) after its `#`s,
+  // so a line-leading tag is not ambiguous with one.
+  assert.equal(assertRoundTrips([p("body", "#project")]), "#project");
+  assert.equal(assertRoundTrips([p("body", "#work/urgent and #done")]), "#work/urgent and #done");
+  assert.equal(assertRoundTrips([p("body", "intro"), p("body", "#project")]), "intro\n#project");
+  assert.equal(assertRoundTrips([p("bulletList", "#project")]), "- #project");
+
+  // Highlights: a setext underline is a line of *nothing but* `=`.
+  assert.equal(assertRoundTrips([p("body", "==highlight== and more")]), "==highlight== and more");
+  assert.equal(assertRoundTrips([p("body", "intro"), p("body", "==highlight==")]), "intro\n==highlight==");
+
+  // Footnotes, both spellings, and plain bracketed prose.
+  assert.equal(assertRoundTrips([p("body", "See [^1] for the details")]), "See [^1] for the details");
+  assert.equal(assertRoundTrips([p("body", "See ^[an inline note] there")]), "See ^[an inline note] there");
+  assert.equal(assertRoundTrips([p("body", "[Shinkansen]")]), "[Shinkansen]");
+});
+
+test("markup that really is markdown stays escaped", () => {
+  // A real heading, and the two shapes that are still headings.
+  assert.equal(assertRoundTrips([p("body", "# Real heading")]), "\\# Real heading");
+  assert.equal(assertRoundTrips([p("body", "#")]), "\\#");
+  assert.equal(assertRoundTrips([p("body", "#\tTabbed")]), "\\#\tTabbed");
+  // A line of nothing but `=` is a setext underline; `---` a thematic break.
+  assert.equal(assertRoundTrips([p("body", "intro"), p("body", "===")]), "intro\n\\===");
+  assert.equal(assertRoundTrips([p("body", "---")]), "\\---");
+  // Character references and raw html are not Obsidian notation.
+  assert.equal(assertRoundTrips([p("body", "&amp;")]), "\\&amp;");
+  assert.equal(assertRoundTrips([p("body", "<div>x</div>")]), "\\<div>x\\</div>");
+});
+
+test("the Obsidian spelling is dropped whole when it would change the document", () => {
+  // `[ ]` is an inert bracket run by every rule above - but writing it bare
+  // in a bullet makes GFM read a checkbox, so the reparse check rejects the
+  // Obsidian spelling for this note and the escaped one is emitted instead.
+  const rendered = assertRoundTrips([p("bulletList", "[ ]")]);
+  assert.notEqual(rendered, "- [ ]");
+
+  // The fallback is per *note*, not per run: this note's wikilink loses its
+  // bare brackets because of the checkbox-shaped bullet sharing the file.
+  assert.equal(assertRoundTrips([p("bulletList", "[ ]"), p("body", "[[Note]]")]), "- \\[ ]\n\\[\\[Note]]");
 });
 
 test("URLs that could open inline constructs fall back to escaped text but still round-trip", () => {
