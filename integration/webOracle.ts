@@ -347,13 +347,13 @@ export class NotesWebOracle {
    * record, and the loader then feeds the body to `topoTextManager.load`,
    * whose held-copy branch is the merge.
    *
-   * The Note model class isn't a global; it's reached through the
-   * materialized model instance the open note already has
-   * (`dataManager._materializedModels`, keyed by store id containing the
-   * record UUID) - `instance.constructor` is the class.
+   * The Note model class isn't a global; it's reached through the app's
+   * all-notes collection (`dataManager.__CW__allNotes`) - any instance's
+   * `constructor` is the class, and the instance whose `id` contains the
+   * record UUID names the primary key to load.
    *
-   * Returns how the note was found, or undefined if no materialized model
-   * matches (note never opened in this session).
+   * Returns the matched primary key, or undefined when the collection is
+   * unreachable or no note matches.
    */
   async forceReloadNote(noteId: string): Promise<string | undefined> {
     const frame = await this.appFrame();
