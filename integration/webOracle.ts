@@ -90,8 +90,10 @@ export interface MergeTrace {
 
 export interface MergeTraceReport {
   date: string;
-  topoTextMergeTraces: MergeTrace[];
-  tableMergeTraces: MergeTrace[];
+  /** Newest first. `CRDTManager` pads the array to its cap of 3 by assigning
+   * `.length`, so unfilled slots arrive as null - filter before use. */
+  topoTextMergeTraces: (MergeTrace | null)[];
+  tableMergeTraces: (MergeTrace | null)[];
 }
 
 export interface WebNoteListRow {
@@ -337,73 +339,51 @@ export class NotesWebOracle {
   }
 
   /**
-   * Selects a note from the sidebar *inside* the running app - no page load.
+   * Forces the app's own full reload of one note - `Note.load(id, true)` -
+   * which is Apple's own code path for "this record changed under you":
+   * `NoteLoader.loadDataIntoDataManager` calls exactly this when a synced
+   * Note arrives with a new `ModificationDate` but no body (the zone-sync
+   * `desiredKeys` omit `TextDataEncrypted`). The forced load fetches the full
+   * record, and the loader then feeds the body to `topoTextManager.load`,
+   * whose held-copy branch is the merge.
    *
-   * This is the move that gets a merge to happen at all. A reload throws the
-   * client's in-memory copy away, so the note comes back as a plain decode;
-   * an idle client does not appear to pick up a change on its own. Switching
-   * away and back re-fetches the record while `CRDTManager` still holds the
-   * old copy (its LRU keeps ~10), which is the branch that merges rather than
-   * stores.
+   * The Note model class isn't a global; it's reached through the
+   * materialized model instance the open note already has
+   * (`dataManager._materializedModels`, keyed by store id containing the
+   * record UUID) - `instance.constructor` is the class.
    *
-   * Matches on the row's visible title text, since a sidebar row carries no
-   * record id. The list is virtualised and renders off-screen copies of the
-   * same row (see `listNotes`), so this clicks the first match that is
-   * actually within the viewport - clicking an off-screen twin just times out
-   * against "element is outside of the viewport".
+   * Returns how the note was found, or undefined if no materialized model
+   * matches (note never opened in this session).
    */
-  async selectNoteByTitle(titleFragment: string): Promise<void> {
+  async forceReloadNote(noteId: string): Promise<string | undefined> {
     const frame = await this.appFrame();
-    const rows = frame.locator(".note-list-item-container", { hasText: titleFragment });
-    await rows.first().waitFor({ state: "attached", timeout: this.timeoutMs });
-
-    const viewport = this.page.viewportSize();
-    const count = await rows.count();
-    for (let i = 0; i < count; i += 1) {
-      const row = rows.nth(i);
-      const box = await row.boundingBox();
-      if (!box || box.y < 0 || box.x < 0) {
-        continue;
-      }
-      if (viewport && (box.y > viewport.height || box.x > viewport.width)) {
-        continue;
-      }
-      await row.click();
-      await this.page.waitForTimeout(1500);
-      return;
-    }
-    throw new Error(`No on-screen note row matching ${JSON.stringify(titleFragment)}`);
-  }
-
-  /**
-   * Drives the client's own sync, and reports whether it ran.
-   *
-   * Needed because an open client will not otherwise notice our push. It
-   * subscribes to CloudKit database changes and relies on a *push*
-   * notification delivered through the iCloud shell; our page is opened
-   * straight at the note route, so that notification never arrives, and the
-   * 30s `ckPollInterval` fallback only starts when creating the subscription
-   * *fails* (`_shouldPollForChanges`). Left alone, the tab sits on its cached
-   * copy indefinitely - confirmed live: no update and no merge traces after
-   * ~55s of waiting, nor after switching notes and back.
-   *
-   * `dataManager.sync()` resumes the app's real `_changesProcessor`, so what
-   * follows is the production ingest path (fetch changed records ->
-   * `CRDTManager.load` -> merge into the copy already held), just triggered
-   * on demand instead of by a notification we can't receive.
-   */
-  async syncNow(): Promise<boolean> {
-    const frame = await this.appFrame();
-    return (await frame.evaluate(async () => {
-      const notesApp = ((window as unknown as Record<string, unknown>).NotesApp ?? {}) as Record<string, unknown>;
+    return (await frame.evaluate(async (id: string) => {
+      const win = window as unknown as Record<string, unknown>;
+      const notesApp = (win.NotesApp ?? {}) as Record<string, unknown>;
       const debug = (notesApp.Debug ?? {}) as Record<string, unknown>;
-      const dataManager = (notesApp.dataManager ?? debug.dataManager) as { sync?: () => Promise<void> } | undefined;
-      if (typeof dataManager?.sync !== "function") {
-        return false;
+      const dataManager = (notesApp.dataManager ?? debug.dataManager) as Record<string, unknown> | undefined;
+      const raw = (dataManager?.__CW__allNotes ?? dataManager?._allNotesSet) as
+        | { forEach?: (cb: (x: unknown) => void) => void }
+        | undefined;
+      if (!raw || typeof raw.forEach !== "function") {
+        return undefined;
       }
-      await dataManager.sync();
-      return true;
-    })) as boolean;
+      const items: unknown[] = [];
+      raw.forEach((x: unknown) => items.push(x));
+      for (const item of items) {
+        const model = item as { id?: unknown; constructor?: { load?: (k: unknown, force: boolean) => Promise<unknown> } };
+        const primaryKey = String(model?.id ?? "");
+        if (!primaryKey.toLowerCase().includes(id.toLowerCase())) {
+          continue;
+        }
+        if (typeof model.constructor?.load !== "function") {
+          return undefined;
+        }
+        await model.constructor.load(model.id, true);
+        return primaryKey;
+      }
+      return undefined;
+    }, noteId)) as string | undefined;
   }
 
   async screenshot(file: string): Promise<void> {
