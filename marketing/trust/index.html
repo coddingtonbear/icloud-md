@@ -1,0 +1,229 @@
+<title>icloud-md — sync that would rather stop than guess</title>
+<style>
+  :root {
+    --ground: #FCFCFA;
+    --ink: #24312E;
+    --ink-soft: #5C6B67;
+    --accent: #2E6E63;
+    --accent-soft: #E7F0EE;
+    --refuse: #A4552E;
+    --refuse-soft: #F7EDE6;
+    --line: #DDE3E0;
+    --code-ground: #F2F5F3;
+    --serif: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
+    --sans: system-ui, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #171D1B; --ink: #E2E8E5; --ink-soft: #93A29D;
+      --accent: #6FB3A5; --accent-soft: #21322E;
+      --refuse: #D89468; --refuse-soft: #33261D;
+      --line: #2A3532; --code-ground: #1E2624;
+    }
+  }
+  :root[data-theme="light"] {
+    --ground: #FCFCFA; --ink: #24312E; --ink-soft: #5C6B67;
+    --accent: #2E6E63; --accent-soft: #E7F0EE;
+    --refuse: #A4552E; --refuse-soft: #F7EDE6;
+    --line: #DDE3E0; --code-ground: #F2F5F3;
+  }
+  :root[data-theme="dark"] {
+    --ground: #171D1B; --ink: #E2E8E5; --ink-soft: #93A29D;
+    --accent: #6FB3A5; --accent-soft: #21322E;
+    --refuse: #D89468; --refuse-soft: #33261D;
+    --line: #2A3532; --code-ground: #1E2624;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--ink); font-family: var(--serif); font-size: 1.08rem; line-height: 1.7; }
+  a { color: var(--accent); }
+  .wrap { max-width: 46rem; margin: 0 auto; padding: 0 1.25rem; }
+  .wide { max-width: 58rem; margin: 0 auto; padding: 0 1.25rem; }
+
+  header.site { display: flex; justify-content: space-between; align-items: baseline; padding: 1.5rem 0 0; }
+  .brand { font-family: var(--mono); font-size: .95rem; font-weight: 600; }
+  nav.site a { font-family: var(--sans); font-size: .85rem; color: var(--ink-soft); text-decoration: none; margin-left: 1.2rem; }
+  nav.site a:hover, nav.site a:focus-visible { color: var(--accent); }
+
+  .hero { padding: 3.5rem 0 1rem; }
+  .hero h1 {
+    font-size: clamp(1.9rem, 4.5vw, 2.9rem); line-height: 1.18; font-weight: 700;
+    letter-spacing: -0.015em; margin: 0 0 1.1rem; text-wrap: balance;
+  }
+  .hero p.sub { color: var(--ink-soft); font-size: 1.15rem; margin: 0 0 2rem; text-wrap: balance; }
+  .hero p.sub strong { color: var(--ink); font-weight: 600; }
+
+  /* Annotated refusal transcript — the hero exhibit */
+  .exhibit { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 1.25rem; align-items: start; margin: 0 0 .75rem; }
+  @media (max-width: 48rem) { .exhibit { grid-template-columns: 1fr; } }
+  .transcript {
+    background: var(--code-ground); border: 1px solid var(--line); border-radius: 8px;
+    font-family: var(--mono); font-size: .85rem; line-height: 1.7; padding: 1.1rem 1.2rem; overflow-x: auto; white-space: pre;
+  }
+  .transcript .p { color: var(--accent); }
+  .transcript .dim { color: var(--ink-soft); }
+  .transcript .refused { color: var(--refuse); font-weight: 700; }
+  .transcript .marker { background: var(--refuse-soft); display: inline-block; width: 100%; }
+  .annos { display: grid; gap: 1rem; font-family: var(--sans); font-size: .9rem; color: var(--ink-soft); }
+  .anno { border-left: 2px solid var(--accent); padding-left: .9rem; }
+  .anno.refusal { border-left-color: var(--refuse); }
+  .anno b { display: block; color: var(--ink); font-weight: 600; margin-bottom: .15rem; }
+  .exhibit-caption { font-family: var(--sans); font-size: .85rem; color: var(--ink-soft); margin: 0 0 2rem; }
+
+  .cta-row { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin-bottom: 3rem; }
+  .cta {
+    font-family: var(--sans); font-weight: 600; font-size: .95rem; text-decoration: none;
+    padding: .6rem 1.2rem; border-radius: 6px; background: var(--accent); color: var(--ground);
+  }
+  .cta:hover { filter: brightness(1.1); }
+  .install-inline { font-family: var(--mono); font-size: .9rem; background: var(--code-ground); border: 1px solid var(--line); border-radius: 6px; padding: .55rem .9rem; }
+
+  section { padding: 2.5rem 0 0; }
+  section:last-of-type { padding-bottom: 4rem; }
+  h2 { font-size: 1.45rem; font-weight: 700; letter-spacing: -0.01em; margin: 0 0 .9rem; text-wrap: balance; }
+  section p { margin: 0 0 1rem; }
+  .lede { font-size: 1.05em; }
+
+  .rule-list { list-style: none; margin: 1.25rem 0 0; padding: 0; display: grid; gap: 1.1rem; }
+  .rule-list li { display: grid; grid-template-columns: auto 1fr; gap: .9rem; align-items: baseline; }
+  .rule-list .no { font-family: var(--mono); font-size: .8rem; color: var(--accent); background: var(--accent-soft); border-radius: 4px; padding: .15rem .5rem; white-space: nowrap; }
+  .rule-list b { font-weight: 600; }
+
+  .quiet-features { font-family: var(--sans); font-size: .95rem; color: var(--ink-soft); columns: 2; column-gap: 2.5rem; margin-top: .5rem; }
+  @media (max-width: 40rem) { .quiet-features { columns: 1; } }
+  .quiet-features p { break-inside: avoid; margin: 0 0 .8rem; }
+  .quiet-features b { color: var(--ink); font-weight: 600; }
+
+  pre.block {
+    background: var(--code-ground); border: 1px solid var(--line); border-radius: 8px;
+    font-family: var(--mono); font-size: .9rem; padding: 1rem 1.2rem; overflow-x: auto; margin: 1rem 0 0;
+  }
+  pre.block .c { color: var(--ink-soft); }
+
+  .faq dt { font-weight: 700; margin-top: 1.4rem; }
+  .faq dd { margin: .4rem 0 0; color: var(--ink-soft); }
+  .faq dd code { font-size: .9em; }
+
+  .plainly {
+    margin-top: 2.5rem; background: var(--accent-soft); border-radius: 8px; padding: 1.3rem 1.5rem;
+    font-size: .98rem;
+  }
+  .plainly p { margin: 0 0 .8rem; } .plainly p:last-child { margin: 0; }
+
+  footer.site { border-top: 1px solid var(--line); margin-top: 3rem; padding: 1.4rem 0 2.5rem; font-family: var(--sans); font-size: .85rem; color: var(--ink-soft); display: flex; gap: 1.5rem; }
+</style>
+
+<div class="wide">
+  <header class="site">
+    <div class="brand">icloud-md</div>
+    <nav class="site">
+      <a href="#model">Safety model</a>
+      <a href="#history">History</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/coddingtonbear/icloud-md">GitHub</a>
+    </nav>
+  </header>
+</div>
+
+<div class="wrap">
+  <div class="hero">
+    <h1>The sync tool that would rather stop than guess.</h1>
+    <p class="sub">icloud-md keeps a folder of Markdown files and your Apple&nbsp;Notes in two-way sync. Before any write, it proves it can rebuild the note <strong>byte-for-byte</strong>. When it can’t be certain a change is safe, it refuses and tells you why — <strong>it never overwrites silently.</strong></p>
+  </div>
+</div>
+
+<div class="wide">
+  <div class="exhibit">
+    <div class="transcript" aria-label="Terminal transcript showing icloud-md catching a conflict and refusing an unsafe write"><span class="p">$</span> icloud-md status
+<span class="dim">Comparing against iCloud…</span>
+M  Trip planning.md         <span class="dim">will push edit</span>
+<span class="refused">!  Reading list.md          refused: changed remotely since
+                            the last pull — run "pull" first</span>
+<span class="p">$</span> icloud-md pull
+<span class="dim">merged: Reading list.md (2 remote edits, 1 local edit)</span>
+<span class="marker">conflict: Trip planning.md — both sides edited line 12</span>
+<span class="dim">wrote standard conflict markers; resolve, then push</span></div>
+    <div class="annos" aria-hidden="false">
+      <div class="anno refusal"><b>A refusal, not a failure.</b> The note changed on another device since your last sync. Rather than pick a side, push declines and points at the safe next step.</div>
+      <div class="anno"><b>Real three-way merge.</b> Non-overlapping edits from both sides merge automatically. Only a genuine collision — same lines, both sides — asks a human.</div>
+      <div class="anno refusal"><b>Conflicts look like git.</b> Standard <code>&lt;&lt;&lt;&lt;&lt;&lt;&lt;</code> markers, in the file, in your editor. No proprietary resolution UI.</div>
+    </div>
+  </div>
+  <p class="exhibit-caption">Above: the failure modes, on purpose. A sync tool is defined by what it does when it isn’t sure.</p>
+</div>
+
+<div class="wrap">
+  <div class="cta-row">
+    <a class="cta" href="#install">Install</a>
+    <span class="install-inline">npm install -g icloud-md</span>
+  </div>
+
+  <section>
+    <h2>Convenience is the wrong thing to optimize</h2>
+    <p class="lede">Most sync tools treat a silent overwrite as an acceptable cost of feeling seamless. For notes, that trade is backwards: a failed sync costs you a retry, but a wrong overwrite costs you the sentence you can’t get back — and you may not notice for weeks.</p>
+    <p>icloud-md is built on the opposite premise. Every ambiguous situation is an error with a name and a next step, never a guess. Slightly more friction, in exchange for never wondering what happened to a note.</p>
+  </section>
+
+  <section id="model">
+    <h2>The safety model, concretely</h2>
+    <ul class="rule-list">
+      <li><span class="no">rule 1</span><span><b>Prove the round trip before writing.</b> Push fetches the note’s current server version and verifies it can rebuild it byte-for-byte from its own understanding. Only then is your edit applied and re-verified. A note the tool can’t fully parse stays read-only.</span></li>
+      <li><span class="no">rule 2</span><span><b>Writes are optimistically locked.</b> Every push carries the change tag from your last sync. If the note moved on since then, the server rejects the write and it's reported as a conflict — the remote copy is never clobbered.</span></li>
+      <li><span class="no">rule 3</span><span><b>Merge only what can’t collide.</b> Pull runs a real diff3 across base, local, and remote. Overlapping edits become explicit conflict markers for you to resolve; the tool never picks a winner.</span></li>
+      <li><span class="no">rule 4</span><span><b>Refuse the rest, loudly.</b> Attachment-bearing notes, table reorders, formatting the tool can’t faithfully reproduce — all named refusals in <code>status</code> output, not silent skips and not risky writes.</span></li>
+    </ul>
+  </section>
+
+  <section id="history">
+    <h2>Your undo button for the last six months</h2>
+    <p>Every pull or push that changes a note snapshots it first, and whole-note epochs tie a note and its tables together in time. <code>history</code> lists the timeline, <code>diff</code> compares any two points, and <code>revert</code> writes a known-good version back to the server — the escape hatch if a bad edit ever does land, whoever's fault it was.</p>
+    <pre class="block">icloud-md history "Trip planning.md"
+icloud-md diff "Trip planning.md" a1b2c3..d4e5f6
+icloud-md revert "Trip planning.md" a1b2c3   <span class="c"># asks before writing</span></pre>
+  </section>
+
+  <section>
+    <h2>It also does the normal things</h2>
+    <p class="lede" style="color: var(--ink-soft); font-size: 1rem;">Kept deliberately secondary — table stakes, listed for completeness.</p>
+    <div class="quiet-features">
+      <p><b>Two-way sync</b> across Linux, Windows, and macOS — a plain Node CLI, no Mac required.</p>
+      <p><b>Notes shared with you</b>, read and write, organized under a folder per sharer.</p>
+      <p><b>Rich text round-trips</b>: headings, nested lists, checklists, quotes, code blocks, links, tables.</p>
+      <p><b>Folders mirror as directories</b>, both directions, nesting included.</p>
+      <p><b>Obsidian-shaped vaults</b> via <code>--filename-as-title</code>.</p>
+      <p><b>git-flavored commands</b>: clone, pull, push, status, diff — knowledge you already have.</p>
+    </div>
+  </section>
+
+  <section id="install">
+    <h2>Install</h2>
+    <pre class="block"><span class="c"># Node.js 20+</span>
+npm install -g icloud-md
+icloud-md clone ./notes   <span class="c"># signs in through Apple's own login page</span></pre>
+  </section>
+
+  <section class="faq">
+    <h2>Built to fail loudly — the details</h2>
+    <dl>
+      <dt>What happens on a genuine conflict?</dt>
+      <dd>Pull writes standard diff3 conflict markers into the file. Until you resolve them, that note won’t push and won’t be re-merged — the tool won’t compound a conflict.</dd>
+      <dt>What if Apple changes the service?</dt>
+      <dd>Then things fail — visibly. This tool speaks the private API iCloud.com itself uses, and every response is parsed strictly: unexpected shapes become errors and refusals, not corrupted writes.</dd>
+      <dt>What does “refused” actually look like?</dt>
+      <dd>A named reason on the <code>status</code>/<code>push</code> line for that note: <em>changed remotely since the last pull</em>, <em>has a file attachment</em>, <em>still contains conflict markers</em>. Every refusal states its remedy.</dd>
+      <dt>Is my account safe to point this at?</dt>
+      <dd>Treat it as powerful and unofficial: keep the clone in a git repo, try a disposable note before notes you care about, and read the honest print below.</dd>
+    </dl>
+  </section>
+
+  <div class="plainly">
+    <p><strong>Said plainly:</strong> this is not an Apple product. It reverse-engineers the private CloudKit web service that iCloud.com’s own Notes page uses, cross-checked against Apple’s own client code — but Apple can change any of it without notice, and accounts with Advanced Data Protection aren’t supported.</p>
+    <p>The entire design exists because that risk is real: byte-for-byte verification, optimistic locks, named refusals, and local version history are what “safe enough to use anyway” looks like. Keep backups regardless. Free and open source, MIT.</p>
+  </div>
+
+  <footer class="site">
+    <span>icloud-md · MIT</span>
+    <a href="https://github.com/coddingtonbear/icloud-md">GitHub</a>
+    <a href="https://www.npmjs.com/package/icloud-md">npm</a>
+  </footer>
+</div>
