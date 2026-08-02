@@ -58,6 +58,34 @@ nothing in `src/` should be able to author a document that loses a merge.
 plain `npm test` — a helper that silently emitted a *correct* deletion, or a
 malformed one, would make the live test pass for the wrong reason.
 
+## Tables
+
+`push` can only *edit* a table that already exists, and the oracle never
+types, so for a long time nothing in the harness could put a table in front of
+a test — leaving the one write path with two live corruption incidents behind
+it with no live coverage at all.
+
+`plantTable.ts` closes that by planting one. The obvious objection is that a
+fixture we author with our own codec and read back with our own codec proves
+nothing, so none of it is ours:
+
+- the table document is a **real captured `MergeableDataEncrypted` payload**
+  (`realFixtures.ts`'s `TABLE_REV_BASELINE`), copied through untouched;
+- the `Attachment` record's field set is **Apple's own create**, from entry 39
+  of the 2026-07-16 note-lifecycle capture;
+- the only part this project authors is the U+FFFC wiring in the note body, and
+  the suite asserts nothing about any *edit* until Apple's client has rendered
+  the planted table with the cells it should have.
+
+Apple serialises a table as ordinary `<table>` markup on copy, so the oracle
+can read a table as a grid even though it cannot read the canvas-rendered body
+around it — which is what makes a real second opinion on every table edit
+possible.
+
+`plantTable.test.ts` covers the planter offline, on captured bytes, under plain
+`npm test`: a planter that quietly produced a malformed body would make the
+live tests fail for a reason unrelated to the write path.
+
 ## Containment
 
 Fixtures are confined to a dedicated Notes folder, and two independent keys
@@ -75,6 +103,12 @@ without a fixture prefix.
 The suite never creates or deletes the folder itself. `push` cannot create
 folders at all, which is a useful accident: the suite is structurally unable
 to invent a container outside the sanctioned one.
+
+Those two keys turn on notes and folders — everything `push` can make. A test
+that reaches CloudKit directly can create records the walk doesn't see (the
+table fixture's `Attachment` record is the only one today), so it registers
+them with `RunContext.disposeAfterTeardown`, which removes them once teardown
+has taken the notes referencing them.
 
 Note the prefix uses parentheses, not square brackets: `[` and `]` are
 homoglyph-substituted on the way into a file name, so a bracketed prefix would

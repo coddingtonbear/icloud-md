@@ -246,6 +246,64 @@ export function readFrontmatterField(contents: string, field: string): string | 
   return undefined;
 }
 
+/**
+ * The first pipe-table in a markdown file, as rows of cell text, or undefined
+ * when there isn't one.
+ *
+ * Like `readFrontmatterField`, deliberately an independent parser rather than
+ * `markdownTable.ts`'s: the tests using this are checking what the table write
+ * path produced, and reading it back with the same code that wrote it would
+ * let a symmetrical bug pass unnoticed.
+ *
+ * GFM's alignment row (`| --- | --- |`) is dropped - it carries no content.
+ */
+export function parseMarkdownTable(contents: string): string[][] | undefined {
+  const lines = contents.split("\n");
+  const first = lines.findIndex((line) => line.trimStart().startsWith("|"));
+  if (first === -1) {
+    return undefined;
+  }
+  const rows: string[][] = [];
+  for (let i = first; i < lines.length && (lines[i] ?? "").trimStart().startsWith("|"); i += 1) {
+    const cells = (lines[i] ?? "")
+      .trim()
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((cell) => cell.trim());
+    if (cells.every((cell) => /^:?-+:?$/.test(cell))) {
+      continue;
+    }
+    rows.push(cells);
+  }
+  return rows.length === 0 ? undefined : rows;
+}
+
+/**
+ * Rewrites the first pipe-table in a markdown file to hold `grid`, leaving
+ * every other line alone - how a test makes the edits a user would make in
+ * their editor.
+ */
+export function replaceMarkdownTable(contents: string, grid: readonly (readonly string[])[]): string {
+  const lines = contents.split("\n");
+  const first = lines.findIndex((line) => line.trimStart().startsWith("|"));
+  if (first === -1) {
+    throw new Error(`no markdown table to replace in:\n${contents}`);
+  }
+  let last = first;
+  while (last + 1 < lines.length && (lines[last + 1] ?? "").trimStart().startsWith("|")) {
+    last += 1;
+  }
+
+  const columns = grid[0]?.length ?? 0;
+  const rendered = [
+    `| ${(grid[0] ?? []).join(" | ")} |`,
+    `| ${Array.from({ length: columns }, () => "-").join(" | ")} |`,
+    ...grid.slice(1).map((row) => `| ${row.join(" | ")} |`),
+  ];
+  return [...lines.slice(0, first), ...rendered, ...lines.slice(last + 1)].join("\n");
+}
+
 /** The document body with any frontmatter block removed. */
 export function stripFrontmatter(contents: string): string {
   if (!contents.startsWith("---\n")) {

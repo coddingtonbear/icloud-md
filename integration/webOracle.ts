@@ -72,6 +72,16 @@ export interface WebNote {
   /** The raw `text/html` clipboard flavor, kept for diagnosing surprises. */
   html: string;
   paragraphs: WebParagraph[];
+  /**
+   * Every table in the note, in document order, as rows of cell text - taken
+   * from the `<table>` markup Apple's own client puts on the clipboard.
+   *
+   * Deliberately read from Apple's serialization rather than compared against
+   * this project's `decodeTableRecord.ts`: a table this tool encoded wrongly
+   * and then decoded back to what it meant is the exact failure mode a second
+   * oracle exists to catch.
+   */
+  tables: string[][][];
 }
 
 /**
@@ -230,6 +240,7 @@ export class NotesWebOracle {
       plainText: lastPlain,
       html: lastHtml,
       paragraphs: lastHtml === "" ? [] : await this.parseClipboardHtml(lastHtml),
+      tables: lastHtml === "" ? [] : await this.parseClipboardTables(lastHtml),
     };
   }
 
@@ -270,6 +281,32 @@ export class NotesWebOracle {
       },
       { html, styleMap: WEB_STYLE_TO_KIND as Record<number, string> },
     ) as Promise<WebParagraph[]>;
+  }
+
+  /**
+   * Pulls every table out of the clipboard `text/html`, as rows of cell text.
+   *
+   * Apple serialises a note's table as ordinary `<table>` markup on copy, so
+   * unlike the note body (which is canvas-rendered and unscrapable) a table
+   * really can be read as a grid. Parsed in-page for the same reason
+   * `parseClipboardHtml` is: the browser already has a correct HTML parser,
+   * and test-only code shouldn't add one to this project's dependencies.
+   *
+   * Cell text is whitespace-normalised - Apple's markup carries layout
+   * newlines and non-breaking spaces inside cells that no assertion should
+   * have to know about.
+   */
+  private parseClipboardTables(html: string): Promise<string[][][]> {
+    return this.page.evaluate((source: string) => {
+      const doc = new DOMParser().parseFromString(source, "text/html");
+      return Array.from(doc.querySelectorAll("table")).map((table) =>
+        Array.from(table.querySelectorAll("tr")).map((row) =>
+          Array.from(row.querySelectorAll("td, th")).map((cell) =>
+            (cell.textContent ?? "").replace(/ /g, " ").replace(/\s+/g, " ").trim(),
+          ),
+        ),
+      );
+    }, html) as Promise<string[][][]>;
   }
 
   /**
