@@ -39,15 +39,27 @@ const SENTINEL_CLOCK = 0xffffffff;
 
 /**
  * A table document's shared topotext clock, scoped to one replica: the
- * writing replica's 1-based `CharID.replicaID` and its next-available-clock
- * counter (total UTF-16 units this replica has ever inserted anywhere in
- * the document). `take` returns the first clock of a fresh `units`-unit run
- * and advances the counter - `tableEdit.ts` backs this with the document's
- * own `ttTimestamp` entry so the advance persists into the encoded document.
+ * writing replica's 1-based `CharID.replicaID` and its two counters (the
+ * text clock - total UTF-16 units this replica has ever inserted anywhere in
+ * the document - and the style clock). `take` returns the first clock of a
+ * fresh `units`-unit run and advances the text counter;
+ * `takeTombstoneAnchor` returns the style timestamp to stamp on a run being
+ * tombstoned and advances the style counter past it. `tableEdit.ts` backs
+ * both with the document's own `ttTimestamp` entry so the advances persist
+ * into the encoded document.
  */
 export interface TopotextClockSource {
   readonly replicaIndex: number;
   take(units: number): number;
+  /**
+   * Apple's deletion-bias rule from `generateIdsForLocalChanges`:
+   * `max(previousClock + 8, styleClockFloor)`, where the floor is this
+   * replica's style clock as of the start of the save. The same rule
+   * `noteDocument.ts` applies to note bodies (PR #9) - it is one shared
+   * code path in Apple's client (`TTMergeableAttributedString`), so cells
+   * and ordering mirrors obey it too.
+   */
+  takeTombstoneAnchor(previousClock: number): number;
 }
 
 export interface TableCellDocument {
@@ -109,7 +121,7 @@ export function applyCellTextEdit(cell: TableCellDocument, newText: string, cloc
   const { start, deleteLength, insertText } = computeSplice(oldText, newText);
 
   if (deleteLength > 0) {
-    tombstoneVisibleRange(cell, start, deleteLength);
+    tombstoneVisibleRange(cell, start, deleteLength, clock);
   }
   if (insertText.length > 0) {
     insertVisibleText(cell, start, insertText, clock);
@@ -125,14 +137,21 @@ export function applyCellTextEdit(cell: TableCellDocument, newText: string, cloc
 /** Marks the visible range [start, start+length) as tombstoned, splitting
  * runs where the range boundaries fall inside one - identical algorithm to
  * `noteDocument.ts`'s `tombstoneVisibleRange`, operating on a cell instead.
- * `anchorOverride`, when given, is written as each newly tombstoned piece's
- * anchor (`Substring.timestamp`): real captures rewrite an ordering
- * mirror's deletion tombstones to `{replica, deletion-counter}`
- * (2026-07-16T16:31) - cell-text tombstones keep their original anchor, so
- * cell callers just omit it. Exported for `tableEdit.ts`'s mirror
- * maintenance; does not touch `text`/attribute runs (`applyCellTextEdit`
+ *
+ * Every newly tombstoned piece is restamped `{us, takeTombstoneAnchor(its
+ * old style clock)}`, which is what makes the deletion *visible to Apple's
+ * merge*: `TTMergeableString.mergeWithString_mergeTimestamps` adopts a
+ * remote run's tombstone flag only when the remote's style timestamp
+ * compares strictly greater than the local one (last-writer-wins on
+ * `(clock, replicaUUID)`), so a tombstone that keeps its original anchor is
+ * silently ignored by every other client. Confirmed against the scripted
+ * capture: Apple's own row deletion (`TABLE_EVOLUTION_REVISIONS` seq 8)
+ * stamps the mirror tombstone `{1, 8}` = max(0 + 8, style clock 1) and
+ * leaves the shared style clock at 9. Exported for `tableEdit.ts`'s mirror
+ * maintenance - cells and mirrors take the same path, exactly as they do in
+ * Apple's client; does not touch `text`/attribute runs (`applyCellTextEdit`
  * owns that for cells, the mirror helper owns it there). */
-export function tombstoneVisibleRange(cell: TableCellDocument, start: number, length: number, anchorOverride?: RunCoord): void {
+export function tombstoneVisibleRange(cell: TableCellDocument, start: number, length: number, clock: TopotextClockSource): void {
   const end = start + length;
   const out: TextRun[] = [];
   let visible = 0;
@@ -157,9 +176,7 @@ export function tombstoneVisibleRange(cell: TableCellDocument, start: number, le
       out.push(pieceOf(run, 0, overlapStart - runStart, false));
     }
     const tombstoned = pieceOf(run, overlapStart - runStart, overlapEnd - overlapStart, true);
-    if (anchorOverride) {
-      tombstoned.anchor = { replica: anchorOverride.replica, clock: anchorOverride.clock };
-    }
+    tombstoned.anchor = { replica: clock.replicaIndex, clock: clock.takeTombstoneAnchor(run.anchor.clock) };
     out.push(tombstoned);
     if (runEnd > overlapEnd) {
       out.push(pieceOf(run, overlapEnd - runStart, runEnd - overlapEnd, false));

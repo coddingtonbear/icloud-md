@@ -40,10 +40,17 @@
  *  - **The FFFC mirror is maintained by topotext splice**: one U+FFFC per
  *    live entry, inserted at the entry's visual position under our own
  *    clocks; deletion tombstones the exact character, with the tombstone's
- *    anchor (the run's *style timestamp*) rewritten to our style clock
+ *    anchor (the run's *style timestamp*) rewritten under our style clock
  *    (`ttTimestamp`'s second `ReplicaClock`, `TTMergeableStringTimestampTypeStyle`
- *    in Apple's source - the 3/4 rulebook's "deletion counter" reading,
- *    refined), which advances by one per deletion.
+ *    in Apple's source). Both that mirror splice and every *cell-text*
+ *    deletion restamp their tombstones by Apple's one shared rule -
+ *    `max(old style clock + 8, this save's style-clock floor)`, then the
+ *    counter ends past it (`generateIdsForLocalChanges`; the same rule
+ *    `noteDocument.ts` applies to note bodies). This is not cosmetic:
+ *    `mergeWithString_mergeTimestamps` adopts a remote tombstone only when
+ *    its style timestamp compares *strictly greater*, so a tombstone left
+ *    at its original anchor is discarded by every other client (audit,
+ *    2026-08-02).
  *  - **Deletes physically remove** dictionary elements and cell-text
  *    objects (pool compaction remaps every reference), while **retaining
  *    forever** the redirect entry, both identity objects, and the UUIDs.
@@ -128,12 +135,16 @@ import {
   AttributeRunSchema,
   VectorTimestamp_ClockSchema as TtClockSchema,
   VectorTimestamp_Clock_ReplicaClockSchema as TtReplicaClockSchema,
-  type VectorTimestamp_Clock as TtClock,
 } from "./gen/topotext_pb.js";
 
 /** The identity objects' `typeItem` entry; index 2 in every capture, but
  * looked up by name rather than assumed. */
 const IDENTITY_TYPE_NAME = "com.apple.CRDT.NSUUID";
+
+/** Apple's deletion bias when restamping a tombstoned run's style timestamp
+ * (`generateIdsForLocalChanges`: `timestamp.clock + (isTombstone ? 8 : 1)`),
+ * the same constant `noteDocument.ts` uses for note bodies. */
+const TOMBSTONE_STYLE_CLOCK_BIAS = 8;
 
 // --- grid diffing ------------------------------------------------------
 
@@ -305,10 +316,9 @@ interface TableWriteSession {
   /** Highest tick used this save so far (as an offset is always 1 or 2). */
   highestTick: number;
   /** Document-global topotext clock scoped to our replica (see
-   * `TopotextClockSource`) - backed by our live `ttTimestamp` entry. */
+   * `TopotextClockSource`) - backed by our live `ttTimestamp` entry, both
+   * counters (text and style). */
   textClock: TopotextClockSource;
-  /** Our `ttTimestamp` entry, for the deletion counter (second clock). */
-  ttClock: TtClock;
 }
 
 /** The stamp for `Dictionary.Element`s created in this save (base+2, shared
@@ -318,20 +328,12 @@ function elementStamp(session: TableWriteSession): VersionStamp {
   return { replicaIndex: session.replicaIndex, clock: session.baseClock + 2 };
 }
 
-/** The anchor for a mirror deletion tombstone: our style clock's current
- * value (`ttTimestamp`'s second `ReplicaClock` - Apple's
- * `TTMergeableStringTimestampTypeStyle`), advancing it by one - and, like
- * Apple's own deletion saves, landing the save on base+2. */
-function takeDeletionAnchor(session: TableWriteSession): { replica: number; clock: number } {
+/** Marks this save as a structural one (base+2), the tick a deletion-bearing
+ * save lands on in every capture. The tombstone stamping itself lives in the
+ * session's `TopotextClockSource` (`takeTombstoneAnchor`), shared with cell
+ * text - as it is in Apple's client. */
+function markStructuralSave(session: TableWriteSession): void {
   session.highestTick = Math.max(session.highestTick, session.baseClock + 2);
-  const counters = session.ttClock.replicaClock;
-  const style = counters[1];
-  if (!style) {
-    throw new Error("Table's topotext clock entry is missing its style clock - refusing to guess");
-  }
-  const value = Number(style.clock);
-  style.clock = value + 1;
-  return { replica: session.textClock.replicaIndex, clock: value };
 }
 
 function compareUuidBytes(a: Uint8Array, b: Uint8Array): number {
@@ -479,6 +481,13 @@ function beginWriteSession(doc: TableDocument, replicaUuid: Uint8Array): TableWr
   if (!textCounter) {
     throw new Error("Table's topotext clock entry has no text counter - refusing to guess");
   }
+  // Apple's `generateIdsForLocalChanges` captures the replica's style clock
+  // once per save (its local `r`) and uses that value as the floor for every
+  // run it restamps in that pass, while the counter itself accumulates - so
+  // two runs tombstoned in one save can share an anchor. Captured here for
+  // the same reason.
+  const styleCounter = ttClock.replicaClock[1];
+  const styleFloor = styleCounter ? Number(styleCounter.clock) : 0;
 
   return {
     doc,
@@ -486,7 +495,6 @@ function beginWriteSession(doc: TableDocument, replicaUuid: Uint8Array): TableWr
     versionElement,
     baseClock,
     highestTick: 0,
-    ttClock,
     textClock: {
       // CharID.replicaID is a 1-based index into ttTimestamp.clock (0 is
       // the origin/sentinel pseudo-replica).
@@ -496,18 +504,37 @@ function beginWriteSession(doc: TableDocument, replicaUuid: Uint8Array): TableWr
         textCounter.clock = value + units;
         return value;
       },
+      takeTombstoneAnchor(previousClock: number): number {
+        if (!styleCounter) {
+          throw new Error("Table's topotext clock entry is missing its style clock - refusing to guess");
+        }
+        const assigned = Math.max(previousClock + TOMBSTONE_STYLE_CLOCK_BIAS, styleFloor);
+        styleCounter.clock = Math.max(Number(styleCounter.clock), assigned + 1);
+        return assigned;
+      },
     },
   };
 }
 
 function finalizeWriteSession(session: TableWriteSession): void {
   // Our version element always advances so foreign vector comparisons see
-  // this save (text-only saves land on base+1, structural on base+2). The
-  // direction marker's registerLatest is deliberately NOT re-stamped: the
-  // scripted capture's same-device saves always did, but the real
-  // multi-device 2AV->2AX save shows a foreign device leaving it alone -
-  // and a foreign restamp is worse than none, since our young counter would
-  // compare *lower* than the device's own in last-writer-wins terms.
+  // this save (text-only saves land on base+1, structural on base+2). This
+  // is what makes the save visible at all: Apple's
+  // `mergeResultForMergingWithDocument` returns NoChange - discarding the
+  // whole document - unless the incoming version vector is *ascending*
+  // somewhere against the receiver's.
+  //
+  // The direction marker's registerLatest is deliberately NOT re-stamped:
+  // the scripted capture's same-device saves always did, but the real
+  // multi-device 2AV->2AX save shows a foreign device leaving it alone.
+  // Leaving it alone is also the safe side of `CRRegisterLatest.mergeWith`,
+  // which is last-writer-wins on `(counter, replicaUUID)`: not touching the
+  // register means we never contend for a value we aren't changing. (Apple's
+  // own restamp, in the `contents` setter, would take
+  // `max(document clock, existing counter) + 1` and so would *win* - the
+  // earlier reading of this comment, that a foreign restamp would compare
+  // lower, was wrong; the decision stands on the observed foreign-device
+  // behaviour.)
   session.versionElement.clock = BigInt(Math.max(session.highestTick, session.baseClock + 1));
 }
 
@@ -826,18 +853,22 @@ function deleteColumnAt(session: TableWriteSession, position: number): void {
 }
 
 /** The ordering-side deletion recipe: drop the attachments entry and the
- * set self-pair, tombstone the mirror character (anchored to our deletion
- * counter), and retain the redirect entry and both identity objects
- * forever (dev log 2026-07-16T16:31). */
+ * set self-pair, tombstone the mirror character (restamped under our style
+ * clock, `tombstoneVisibleRange`), and retain the redirect entry and both
+ * identity objects forever (dev log 2026-07-16T16:31; Apple's own
+ * `CRTombstoneOrderedSet.delete` deletes from `elements` and calls
+ * `TTArray.delete` - which tombstones the character - while leaving
+ * `ordering.contents`, the redirect dictionary, alone). */
 function removeFromOrderedSet(session: TableWriteSession, orderedSetRef: number, position: number): void {
   const doc = session.doc;
   const orderedSet = requireOrderedSet(doc, orderedSetRef);
   const positions = computePositions(doc, parseOrderedSet(doc, orderedSetRef));
 
+  markStructuralSave(session);
   orderedSet.array!.array!.attachments.splice(position, 1);
   renumberAttachments(orderedSet);
 
-  editMirror(orderedSet, (mirror) => tombstoneVisibleRange(mirror, position, 1, takeDeletionAnchor(session)));
+  editMirror(orderedSet, (mirror) => tombstoneVisibleRange(mirror, position, 1, session.textClock));
 
   const setDict = orderedSet.set!;
   setDict.element = setDict.element.filter(
