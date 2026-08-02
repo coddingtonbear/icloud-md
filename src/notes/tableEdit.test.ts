@@ -2,21 +2,25 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { applyTableEdit, diffTableGrid, validateTableDocumentInvariants } from "./tableEdit.js";
 import {
+  cellKey,
   encodeTableDocument,
   gridFromTableDocument,
   parseOrderedSet,
   parseTableDocument,
+  resolveTable,
   tableDocumentRoundTrips,
   uuidIndexOfRef,
   resolveRef,
   type TableDocument,
 } from "./decodeTableRecord.js";
+import type { String as GenString } from "./gen/topotext_pb.js";
 import { OBJECT_REPLACEMENT_CHARACTER } from "./noteAttachments.js";
 import {
   TABLE_EVOLUTION_REVISIONS,
   TABLE_FIRST_REVISION,
   TABLE_FINAL_REVISION,
   TABLE_LONG_LIVED_SNAPSHOTS,
+  TABLE_RESTYLE_REVISIONS,
   TABLE_UNSORTED_TT_REGRESSION,
   TABLE_WRITE_PATH_REVISIONS,
 } from "./realFixtures.js";
@@ -52,6 +56,7 @@ const ALL_FIXTURES: readonly { tag: string; base64: string }[] = [
   ...TABLE_WRITE_PATH_REVISIONS,
   ...TABLE_LONG_LIVED_SNAPSHOTS,
   ...TABLE_EVOLUTION_REVISIONS.map((rev) => ({ tag: `evolution-${rev.seq}`, base64: rev.base64 })),
+  ...TABLE_RESTYLE_REVISIONS.map((rev) => ({ tag: `restyle-${rev.seq}`, base64: rev.base64 })),
 ];
 
 for (const fixture of ALL_FIXTURES) {
@@ -437,6 +442,236 @@ test("a cell-text deletion restamps its tombstone and advances the shared style 
   assert.equal(tombstoned[0]!.timestamp!.replicaID, ttCount); // ours, 1-based
   assert.equal(tombstoned[0]!.timestamp!.clock, 8); // max(0 + 8, floor 1)
   assert.equal(Number(ourTt.replicaClock[1]!.clock), 9);
+});
+
+// --- Apple's own restyle sequence: both style-clock branches, from real bytes -
+//
+// Until this capture, every table deletion we held was of a run whose style
+// anchor was still 0, so `max(old style clock + 8, this save's floor)` had only
+// ever been checked on its `floor` side, and Apple's *other* branch (a run
+// created and deleted inside one save) had no bytes behind it at all. The
+// 2026-08-02 restyle capture bolts both down: it bolds a cell - raising that
+// cell's anchor - and then deletes the same text a save later.
+
+function restyle(seq: number): TableDocument {
+  return parse(TABLE_RESTYLE_REVISIONS[seq]!.base64);
+}
+
+function cellString(doc: TableDocument, row: number, column: number): GenString {
+  const cell = resolveTable(doc).cells.get(cellKey(row, column));
+  if (!cell) {
+    throw new Error(`no cell at ${row},${column}`);
+  }
+  const str = doc.objects[cell.textRef]?.string;
+  if (!str) {
+    throw new Error(`cell ${row},${column} has no text object`);
+  }
+  return str;
+}
+
+/** Every mergeable string in the document: the cell texts plus both FFFC
+ * ordering mirrors, which obey the same run discipline. */
+function everyMergeableString(doc: TableDocument): GenString[] {
+  const strings: GenString[] = [];
+  for (const entry of doc.objects) {
+    if (entry.string) {
+      strings.push(entry.string);
+    }
+  }
+  for (const ref of [doc.crRowsRef, doc.crColumnsRef]) {
+    const contents = doc.objects[ref]?.tsOrderedSet?.array?.array?.contents;
+    if (contents) {
+      strings.push(contents);
+    }
+  }
+  return strings;
+}
+
+/** The capture has exactly one replica, so its clocks are `ttTimestamp`
+ * entry #1's pair: [text units written, style/formatting-op clock]. */
+function appleClocks(doc: TableDocument): { text: number; style: number } {
+  const entry = doc.document.ttTimestamp!.clock[0]!;
+  return { text: Number(entry.replicaClock[0]!.clock), style: Number(entry.replicaClock[1]!.clock) };
+}
+
+function liveTextRuns(str: GenString): GenString["substring"] {
+  return str.substring.filter((run) => run.tombstone !== 1 && run.length > 0);
+}
+
+function deadTextRuns(str: GenString): GenString["substring"] {
+  return str.substring.filter((run) => run.tombstone === 1);
+}
+
+test("Apple restyling a cell stamps its live run by the +1 rule - so table cells do carry style anchors", () => {
+  const before = restyle(2); // "alpha", typed and never restyled
+  const after = restyle(3); // the same cell, now bold
+
+  const beforeRun = liveTextRuns(cellString(before, 0, 0))[0]!;
+  assert.equal(beforeRun.length, 5);
+  assert.equal(beforeRun.timestamp!.clock, 0); // freshly inserted text anchors at 0
+  assert.equal(cellString(before, 0, 0).attributeRun.length, 1);
+  assert.equal(cellString(before, 0, 0).attributeRun[0]!.font, undefined);
+  assert.deepEqual(appleClocks(before), { text: 9, style: 9 });
+
+  const afterRun = liveTextRuns(cellString(after, 0, 0))[0]!;
+  // Same run - same charID - restamped in place, not replaced.
+  assert.deepEqual(
+    { replica: afterRun.charID!.replicaID, clock: afterRun.charID!.clock },
+    { replica: beforeRun.charID!.replicaID, clock: beforeRun.charID!.clock },
+  );
+  assert.equal(afterRun.timestamp!.replicaID, 1);
+  assert.equal(afterRun.timestamp!.clock, 9); // max(old anchor 0 + 1, floor 9)
+  assert.deepEqual(appleClocks(after), { text: 9, style: 10 }); // one past the stamp
+  // ...and it really is the bold that did it.
+  assert.equal(cellString(after, 0, 0).attributeRun[0]!.fontHints, 1);
+  assert.equal(cellString(after, 0, 0).attributeRun[0]!.font!.name, "SFUIText-Bold");
+});
+
+test("Apple deleting a *restyled* cell stamps max(old + 8, floor) on its old-anchor side", () => {
+  const before = restyle(3); // "alpha" is bold: anchor 9, style clock 10
+  const after = restyle(4); // the same text, deleted
+
+  assert.equal(liveTextRuns(cellString(before, 0, 0))[0]!.timestamp!.clock, 9);
+  assert.deepEqual(appleClocks(before), { text: 9, style: 10 });
+
+  const tombstones = deadTextRuns(cellString(after, 0, 0));
+  assert.equal(tombstones.length, 1);
+  assert.equal(tombstones[0]!.length, 5);
+  // 17 = max(9 + 8, 10). The floor (10) loses outright, which is exactly the
+  // side of the `max` no capture had ever exercised.
+  assert.equal(tombstones[0]!.timestamp!.clock, 17);
+  assert.equal(tombstones[0]!.timestamp!.replicaID, 1);
+  assert.deepEqual(appleClocks(after), { text: 9, style: 18 });
+});
+
+test("Apple deleting a never-restyled cell stamps the same rule on its floor side", () => {
+  const before = restyle(1); // "bravo": anchor 0, style clock 1
+  const after = restyle(2);
+
+  assert.equal(liveTextRuns(cellString(before, 0, 1))[0]!.timestamp!.clock, 0);
+  assert.deepEqual(appleClocks(before), { text: 9, style: 1 });
+
+  const tombstones = deadTextRuns(cellString(after, 0, 1));
+  assert.equal(tombstones.length, 1);
+  assert.equal(tombstones[0]!.timestamp!.clock, 8); // max(0 + 8, 1)
+  assert.deepEqual(appleClocks(after), { text: 9, style: 9 });
+});
+
+test("Apple deleting a run it created in the same save takes the other branch: {us, 0}, style clock untouched", () => {
+  const before = restyle(4);
+  const after = restyle(5); // "echo" typed into r2c2 and deleted before the save fired
+
+  assert.equal(deadTextRuns(cellString(before, 1, 1)).length, 0);
+  const tombstones = deadTextRuns(cellString(after, 1, 1));
+  assert.equal(tombstones.length, 1);
+  assert.equal(tombstones[0]!.length, 4);
+  // Not max(0 + 8, floor 18) = 26, and not the floor either: a charID this
+  // replica minted in this same pass is stamped at the minimum data clock,
+  // and the style counter does not move at all. Only the text clock does.
+  assert.equal(tombstones[0]!.timestamp!.clock, 0);
+  assert.equal(tombstones[0]!.timestamp!.replicaID, 1);
+  assert.deepEqual(appleClocks(before), { text: 9, style: 18 });
+  assert.deepEqual(appleClocks(after), { text: 13, style: 18 });
+});
+
+test("our engine deleting the restyled cell reproduces Apple's own 17, on real bytes", () => {
+  const doc = restyle(3);
+  editAndVerify(doc, [
+    ["", ""],
+    ["charlie", ""],
+  ]);
+
+  // We write as our own replica, so the UUIDs and the version vector differ
+  // from Apple's seq 4 - but the arithmetic is the same rule on the same
+  // inputs, and the `old + 8` side dominates our floor (a freshly registered
+  // replica starts its style clock at 1) exactly as it dominated Apple's 10.
+  const ourTt = doc.document.ttTimestamp!.clock.findIndex((clock) => [...clock.replicaUUID].every((b, i) => b === OUR_REPLICA[i]));
+  assert.notEqual(ourTt, -1);
+  const tombstones = deadTextRuns(cellString(doc, 0, 0));
+  assert.equal(tombstones.length, 1);
+  assert.equal(tombstones[0]!.timestamp!.replicaID, ourTt + 1);
+  assert.equal(tombstones[0]!.timestamp!.clock, 17); // max(9 + 8, 1)
+  assert.equal(Number(doc.document.ttTimestamp!.clock[ourTt]!.replicaClock[1]!.clock), 18);
+  assert.equal(deadTextRuns(cellString(restyle(4), 0, 0))[0]!.timestamp!.clock, 17);
+  // Deleting the text takes its formatting with it, the way Apple's own save did.
+  assert.equal(cellString(doc, 0, 0).attributeRun.length, 0);
+  assert.equal(cellString(restyle(4), 0, 0).attributeRun.length, 0);
+});
+
+test("our engine deleting the never-restyled cell reproduces Apple's own 8, on the same document", () => {
+  const doc = restyle(1);
+  editAndVerify(doc, [
+    ["alpha", ""],
+    ["charlie", ""],
+  ]);
+  const ourTt = doc.document.ttTimestamp!.clock.findIndex((clock) => [...clock.replicaUUID].every((b, i) => b === OUR_REPLICA[i]));
+  const tombstones = deadTextRuns(cellString(doc, 0, 1));
+  assert.equal(tombstones.length, 1);
+  assert.equal(tombstones[0]!.timestamp!.clock, 8); // max(0 + 8, our floor 1)
+  assert.equal(Number(doc.document.ttTimestamp!.clock[ourTt]!.replicaClock[1]!.clock), 9);
+  assert.equal(deadTextRuns(cellString(restyle(2), 0, 1))[0]!.timestamp!.clock, 8);
+});
+
+/** Our replica's 1-based `CharID.replicaID` and its text clock, or the values
+ * a first edit will start from when we aren't registered yet. */
+function ourTopotextState(doc: TableDocument): { replicaId: number; textClock: number } {
+  const index = doc.document.ttTimestamp?.clock.findIndex((clock) => [...clock.replicaUUID].every((b, i) => b === OUR_REPLICA[i]));
+  if (index === undefined || index === -1) {
+    return { replicaId: (doc.document.ttTimestamp?.clock.length ?? 0) + 1, textClock: 0 };
+  }
+  return { replicaId: index + 1, textClock: Number(doc.document.ttTimestamp!.clock[index]!.replicaClock[0]!.clock) };
+}
+
+/** Nothing tombstoned in this save may be a run this save also created -
+ * that is the shape Apple stamps `{us, 0}` for, and our engine must never
+ * need it. */
+function assertNoSameSaveTombstone(doc: TableDocument, before: { replicaId: number; textClock: number }): void {
+  for (const str of everyMergeableString(doc)) {
+    for (const run of deadTextRuns(str)) {
+      const charId = run.charID!;
+      assert.ok(
+        !(charId.replicaID === before.replicaId && charId.clock >= before.textClock),
+        `run ${charId.replicaID}:${charId.clock} was both created and tombstoned by one save`,
+      );
+    }
+  }
+}
+
+test("no edit our engine supports creates and tombstones a run in one save, so Apple's {us, 0} branch stays unreachable", () => {
+  const edits: [string, string[][]][] = [
+    ["cell text replaced outright", [["zulu", "berry-r1c2"], ["cedar-r2c1", "delta-r2c2"], ["echo-r3c1", ""]]],
+    ["row inserted", [["apple-r1c1-edit1", "berry-r1c2"], ["cedar-r2c1", "delta-r2c2"], ["echo-r3c1", ""], ["new", "row"]]],
+    ["row deleted", [["apple-r1c1-edit1", "berry-r1c2"], ["echo-r3c1", ""]]],
+    ["column inserted", [["apple-r1c1-edit1", "berry-r1c2", "new"], ["cedar-r2c1", "delta-r2c2", ""], ["echo-r3c1", "", ""]]],
+    ["column deleted", [["apple-r1c1-edit1"], ["cedar-r2c1"], ["echo-r3c1"]]],
+  ];
+  for (const [label, grid] of edits) {
+    const doc = parse(BASE_3X2.base64);
+    const before = ourTopotextState(doc);
+    editAndVerify(doc, grid);
+    assert.doesNotThrow(() => assertNoSameSaveTombstone(doc, before), label);
+  }
+
+  // The contrast that shows the check has teeth: across *two* saves we do
+  // tombstone our own run - it is only same-save creation that never happens.
+  const doc = parse(BASE_3X2.base64);
+  editAndVerify(doc, [
+    ["ours", "berry-r1c2"],
+    ["cedar-r2c1", "delta-r2c2"],
+    ["echo-r3c1", ""],
+  ]);
+  const between = ourTopotextState(doc);
+  editAndVerify(doc, [
+    ["", "berry-r1c2"],
+    ["cedar-r2c1", "delta-r2c2"],
+    ["echo-r3c1", ""],
+  ]);
+  assertNoSameSaveTombstone(doc, between);
+  const ourTombstones = everyMergeableString(doc)
+    .flatMap((str) => deadTextRuns(str))
+    .filter((run) => run.charID!.replicaID === between.replicaId);
+  assert.equal(ourTombstones.length, 1);
+  assert.ok(ourTombstones[0]!.charID!.clock < between.textClock);
 });
 
 test("column delete physically removes the row-map and its cells from the pool, retaining redirects and identities", () => {
