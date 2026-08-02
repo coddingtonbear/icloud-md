@@ -222,7 +222,21 @@ export async function plantTiedAnchorDeletion(options: PlantTiedAnchorDeletionOp
   }
   const replicaId = new Uint8Array(Buffer.from(state.replicaId, "base64"));
 
-  const auth = await resolveFolderAccount(options.vaultDir, state.account);
+  // Resolve the account the way push does, with one deliberate difference:
+  // this helper may never open a sign-in window. It runs inside the test
+  // runner rather than in a CLI subprocess, and the web oracle is holding
+  // the account's browser profile open for the duration of the run - a
+  // login here would both block on a human and replace that profile
+  // directory underneath the running browser (see `accountStore.ts`'s
+  // promote step). A lapsed session should fail this test loudly instead.
+  const auth = await resolveFolderAccount(options.vaultDir, state.account, {
+    performBrowserLogin: () => {
+      throw new Error(
+        "The saved sign-in has lapsed. Re-authenticate before running the live suite " +
+          "(the integration harness must never open a sign-in window mid-run).",
+      );
+    },
+  });
   if (!auth.ckdatabasewsUrl) {
     throw new Error("The account resolved without a CloudKit database host");
   }
