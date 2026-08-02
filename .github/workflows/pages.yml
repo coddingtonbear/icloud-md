@@ -1,0 +1,48 @@
+name: Deploy site
+
+# Publishes the marketing landing page (marketing/terminal/) to GitHub Pages
+# at https://coddingtonbear.github.io/icloud-md/. Runs when the page (or this
+# workflow) changes on main; workflow_dispatch covers the first deploy and
+# manual re-runs.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "marketing/terminal/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # The site is a single self-contained page; "building" it is just
+      # laying the file out as the site root.
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp marketing/terminal/index.html _site/index.html
+
+      - uses: actions/configure-pages@v6
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+      - id: deployment
+        uses: actions/deploy-pages@v5

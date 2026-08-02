@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>icloud-md — your notes are files again</title>
+<meta name="description" content="Two-way sync between Apple iCloud Notes and a folder of plain Markdown files. Diffable, greppable, git-trackable, editor-agnostic — on Linux, Windows, or macOS.">
+<meta property="og:title" content="icloud-md — Apple Notes, checked out to ./notes. For good.">
+<meta property="og:description" content="Two-way sync between iCloud Notes and a folder of plain Markdown — diffable, greppable, git-trackable. No Mac required.">
+<meta property="og:type" content="website">
+<meta name="theme-color" content="#0D1320">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='18' fill='%230D1320'/%3E%3Ctext x='50' y='68' font-size='52' text-anchor='middle' font-family='monospace' fill='%23FFB454'%3E%E2%96%9A%3C/text%3E%3C/svg%3E">
+<style>
+  /* Committed dark world: a terminal at night. Deliberately single-theme. */
+  :root {
+    --ground: #0D1320;
+    --panel: #121A2B;
+    --panel-edge: #1F2A40;
+    --ink: #D8DEE9;
+    --ink-dim: #8792A8;
+    --amber: #FFB454;
+    --cyan: #7FD1CE;
+    --green: #9ECE6A;
+    --red: #F7768E;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--ink); font-family: var(--sans); line-height: 1.6; }
+  ::selection { background: #2B3A5C; }
+  a { color: var(--cyan); }
+  .wrap { max-width: 62rem; margin: 0 auto; padding: 0 1.25rem; }
+
+  header.site { display: flex; justify-content: space-between; align-items: center; padding: 1.2rem 0; }
+  .brand { font-family: var(--mono); font-weight: 700; }
+  .brand::before { content: "▚ "; color: var(--amber); }
+  nav.site { display: flex; gap: 1.4rem; }
+  nav.site a { font-family: var(--mono); font-size: .85rem; color: var(--ink-dim); text-decoration: none; }
+  nav.site a:hover, nav.site a:focus-visible { color: var(--amber); }
+
+  .hero { padding: 3rem 0 1rem; }
+  .hero h1 {
+    font-family: var(--mono); font-weight: 700; letter-spacing: -0.02em;
+    font-size: clamp(1.7rem, 4.2vw, 2.7rem); line-height: 1.2; margin: 0 0 1rem; max-width: 40rem; text-wrap: balance;
+  }
+  .hero h1 .path { color: var(--amber); }
+  .hero p.sub { color: var(--ink-dim); max-width: 40rem; font-size: 1.05rem; margin: 0 0 1.5rem; }
+
+  .install-line {
+    display: flex; align-items: center; gap: .75rem; max-width: 34rem;
+    background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 8px; padding: .7rem 1rem;
+    font-family: var(--mono); font-size: .95rem;
+  }
+  .install-line .p { color: var(--green); user-select: none; }
+  .install-line code { flex: 1; overflow-x: auto; white-space: nowrap; }
+  .install-line button {
+    font-family: var(--mono); font-size: .8rem; background: none; color: var(--amber);
+    border: 1px solid var(--panel-edge); border-radius: 6px; padding: .3rem .7rem; cursor: pointer;
+  }
+  .install-line button:hover, .install-line button:focus-visible { border-color: var(--amber); outline: none; }
+
+  /* Typed terminal transcript */
+  .term {
+    margin: 2.25rem 0 0; background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 10px;
+    overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.35);
+  }
+  .term .titlebar { display: flex; gap: .4rem; padding: .6rem .9rem; border-bottom: 1px solid var(--panel-edge); }
+  .term .dot { width: .7rem; height: .7rem; border-radius: 50%; background: var(--panel-edge); }
+  .term pre {
+    margin: 0; padding: 1.1rem 1.2rem 1.3rem; font-family: var(--mono); font-size: .88rem; line-height: 1.65;
+    overflow-x: auto; min-height: 19.5em;
+  }
+  .term .p { color: var(--green); }
+  .term .cmd { color: var(--ink); font-weight: 600; }
+  .term .out { color: var(--ink-dim); }
+  .term .add { color: var(--green); }
+  .term .del { color: var(--red); }
+  .term .ok { color: var(--cyan); }
+  .term .cursor { display: inline-block; width: .55em; height: 1.1em; background: var(--amber); vertical-align: text-bottom; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .term .cursor { animation: none; } }
+
+  section { padding: 3.5rem 0 0; }
+  section:last-of-type { padding-bottom: 4rem; }
+  h2 { font-family: var(--mono); font-size: 1.25rem; color: var(--amber); margin: 0 0 1.25rem; }
+  h2::before { content: "## "; color: var(--ink-dim); }
+
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+  @media (max-width: 48rem) { .grid { grid-template-columns: 1fr; } }
+  .cell { background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 10px; padding: 1.1rem 1.2rem; }
+  .cell h3 { font-family: var(--mono); font-size: .95rem; margin: 0 0 .4rem; color: var(--cyan); }
+  .cell p { margin: 0; font-size: .92rem; color: var(--ink-dim); }
+  .cell p code { color: var(--ink); }
+
+  .why { max-width: 44rem; }
+  .why p { margin: 0 0 1rem; }
+  .why .pull { border-left: 3px solid var(--amber); padding-left: 1rem; color: var(--ink); font-size: 1.05rem; }
+
+  table.compare { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  .table-scroll { overflow-x: auto; }
+  table.compare th, table.compare td { text-align: left; padding: .55rem .8rem; border-bottom: 1px solid var(--panel-edge); }
+  table.compare th { font-family: var(--mono); font-size: .8rem; color: var(--ink-dim); font-weight: 600; }
+  table.compare td:first-child { color: var(--ink-dim); }
+  table.compare .y { color: var(--green); font-family: var(--mono); }
+  table.compare .n { color: var(--ink-dim); font-family: var(--mono); }
+
+  .quickstart pre {
+    background: var(--panel); border: 1px solid var(--panel-edge); border-radius: 10px;
+    padding: 1.1rem 1.2rem; font-family: var(--mono); font-size: .9rem; overflow-x: auto; margin: 0;
+  }
+  .quickstart .c { color: var(--ink-dim); }
+
+  .warn {
+    margin-top: 3rem; background: var(--panel); border: 1px solid var(--amber); border-radius: 10px;
+    padding: 1.1rem 1.3rem; font-size: .92rem; color: var(--ink-dim); max-width: 46rem;
+  }
+  .warn strong { color: var(--amber); font-family: var(--mono); }
+
+  footer.site { border-top: 1px solid var(--panel-edge); margin-top: 4rem; padding: 1.4rem 0 2.5rem; display: flex; gap: 1.5rem; font-family: var(--mono); font-size: .85rem; color: var(--ink-dim); }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="site">
+    <div class="brand">icloud-md</div>
+    <nav class="site">
+      <a href="#features">features</a>
+      <a href="#quickstart">quickstart</a>
+      <a href="#compare">compare</a>
+      <a href="https://github.com/coddingtonbear/icloud-md">github</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <h1>Apple Notes, checked out to <span class="path">./notes</span>. For good.</h1>
+    <p class="sub">Two-way sync between iCloud Notes and a folder of plain Markdown — diffable, greppable, git-trackable, editor-agnostic. A git-flavored CLI, on Linux, Windows, or macOS. No Mac required.</p>
+    <div class="install-line">
+      <span class="p">$</span>
+      <code id="install-cmd">npm install -g icloud-md</code>
+      <button type="button" onclick="navigator.clipboard.writeText('npm install -g icloud-md').then(()=>{this.textContent='copied';setTimeout(()=>this.textContent='copy',1200)})">copy</button>
+    </div>
+
+    <div class="term" aria-label="Terminal session demonstrating clone, edit, and push">
+      <div class="titlebar" aria-hidden="true"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+      <pre id="term-pre"><span class="cursor"></span></pre>
+    </div>
+  </div>
+
+  <section class="why">
+    <h2>why files</h2>
+    <p class="pull">A note you can’t <code>grep</code> is a note you half-own.</p>
+    <p>Apple Notes lives in exactly one place: Notes.app and the iCloud web client. No export, no API, no way to bring your own tooling. icloud-md checks your notes out into the filesystem, where twenty-five years of text tooling already works — and pushes your edits back as if you'd typed them into Notes.app all along.</p>
+    <p>The working directory is the local state. Wrap it in git and you have history, blame, and off-site backup for every note you’ve ever taken — including the ones other people share with you.</p>
+  </section>
+
+  <section id="features">
+    <h2>features</h2>
+    <div class="grid">
+      <div class="cell"><h3>two-way, reconciling</h3><p><code>pull</code> merges remote edits into local ones (real diff3); <code>push</code> creates, edits, moves, and deletes. Optimistic locking — a note changed remotely is a conflict, never an overwrite.</p></div>
+      <div class="cell"><h3>shared notes</h3><p>Notes and folders shared with you clone under a directory per sharer. Creates and edits push back into shared folders you can write to.</p></div>
+      <div class="cell"><h3>rich text round-trips</h3><p>Headings, nested lists, checklists, blockquotes, code blocks, links, bold/italic — real Markdown down, real Apple formatting back up. Tables too.</p></div>
+      <div class="cell"><h3>history / diff / revert</h3><p>Every sync that changes a note snapshots it first. Inspect any past version, diff two, or write one back to the server.</p></div>
+      <div class="cell"><h3>folders are directories</h3><p><code>mkdir Recipes/Desserts</code>, drop a note in, push — both folders exist in Notes before the note lands. Moves sync in both directions.</p></div>
+      <div class="cell"><h3>refuses, not guesses</h3><p>Byte-for-byte round-trip verification before any write. What the tool can’t fully parse stays read-only. Ambiguity is an error, not a coin flip.</p></div>
+    </div>
+  </section>
+
+  <section id="quickstart" class="quickstart">
+    <h2>quickstart</h2>
+    <pre><span class="c"># requires Node.js 20+</span>
+npm install -g icloud-md
+
+<span class="c"># first clone opens Apple's real sign-in page (password, 2FA)</span>
+icloud-md clone ./notes
+
+<span class="c"># Obsidian-shaped vault instead: file name = note title</span>
+icloud-md clone ./vault --filename-as-title
+
+cd notes
+icloud-md status     <span class="c"># what would push do?</span>
+icloud-md pull       <span class="c"># merge down remote edits</span>
+icloud-md push       <span class="c"># send local edits up</span></pre>
+  </section>
+
+  <section id="compare">
+    <h2>versus everything else</h2>
+    <div class="table-scroll">
+      <table class="compare">
+        <tr><th></th><th>icloud-md</th><th>AppleScript / Notes.app tools</th><th>NoteStore.sqlite parsers</th></tr>
+        <tr><td>Runs off-Mac</td><td class="y">yes</td><td class="n">no</td><td class="n">needs a copied DB</td></tr>
+        <tr><td>Writes notes back</td><td class="y">yes</td><td class="y">some</td><td class="n">read-only</td></tr>
+        <tr><td>Reconciles both sides</td><td class="y">yes — merges, conflicts, locks</td><td class="n">no</td><td class="n">no</td></tr>
+        <tr><td>Native Markdown</td><td class="y">yes</td><td class="n">generic rich text</td><td class="n">varies</td></tr>
+        <tr><td>Shared notes</td><td class="y">read + write</td><td class="n">no</td><td class="n">read-only</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <div class="warn">
+    <strong>caveat emptor:</strong> not an official Apple API — this is a reverse-engineering of the private CloudKit service iCloud.com itself uses, and Apple can change it any time. Writes are verified byte-for-byte and refusals are the failure mode, but keep the clone in git, test on a disposable note first, and note that Advanced Data Protection accounts aren’t supported. MIT licensed.
+  </div>
+
+  <footer class="site">
+    <span>icloud-md</span>
+    <a href="https://github.com/coddingtonbear/icloud-md">github</a>
+    <a href="https://www.npmjs.com/package/icloud-md">npm</a>
+    <span>MIT</span>
+  </footer>
+</div>
+
+<script>
+  (function () {
+    const lines = [
+      { t: "$ ", cls: "p" }, { t: "icloud-md clone ./notes\n", cls: "cmd", type: true },
+      { t: "Cloned 214 notes (3 sharers, 12 folders, 41 attachments)\n\n", cls: "out" },
+      { t: "$ ", cls: "p" }, { t: "vim \"Grocery list.md\"\n\n", cls: "cmd", type: true },
+      { t: "$ ", cls: "p" }, { t: "git diff --stat\n", cls: "cmd", type: true },
+      { t: " Grocery list.md | 2 ", cls: "out" }, { t: "+", cls: "add" }, { t: "-\n\n", cls: "del" },
+      { t: "$ ", cls: "p" }, { t: "icloud-md push\n", cls: "cmd", type: true },
+      { t: "M Grocery list.md", cls: "ok" }, { t: "  → pushed\n", cls: "out" },
+      { t: "1 note updated, 0 conflicts, 0 refused\n\n", cls: "out" },
+      { t: "$ ", cls: "p" },
+    ];
+    const pre = document.getElementById("term-pre");
+    const cursor = pre.querySelector(".cursor");
+    const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let li = 0, ci = 0;
+    function step() {
+      if (li >= lines.length) return;
+      const line = lines[li];
+      let span = line._el;
+      if (!span) {
+        span = document.createElement("span");
+        span.className = line.cls;
+        pre.insertBefore(span, cursor);
+        line._el = span;
+      }
+      if (reduced || !line.type) {
+        span.textContent = line.t;
+        li += 1; ci = 0;
+        setTimeout(step, reduced ? 0 : 260);
+      } else {
+        ci += 1;
+        span.textContent = line.t.slice(0, ci);
+        if (ci >= line.t.length) { li += 1; ci = 0; setTimeout(step, 200); }
+        else setTimeout(step, 34);
+      }
+    }
+    setTimeout(step, 500);
+  })();
+</script>
+</body>
+</html>

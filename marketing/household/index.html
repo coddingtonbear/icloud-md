@@ -1,0 +1,286 @@
+<title>icloud-md — Apple Notes meets Markdown, peacefully</title>
+<style>
+  :root {
+    --ground: #FAF6EE;
+    --card: #FFFFFF;
+    --ink: #2B2622;
+    --ink-soft: #6B6259;
+    --amber: #D99A06;
+    --amber-soft: #FBEED0;
+    --green: #4A7C59;
+    --green-soft: #E4EFE7;
+    --line: #E8E0D2;
+    --mono-ground: #2B2622;
+    --mono-ink: #F5EFE4;
+    --serif: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
+    --round: ui-rounded, "SF Pro Rounded", "Hiragino Maru Gothic ProN", Quicksand, Comfortaa, system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #211D18;
+      --card: #2B2622;
+      --ink: #F0E9DD;
+      --ink-soft: #B0A697;
+      --amber: #E8B23C;
+      --amber-soft: #3B3220;
+      --green: #7FAE8E;
+      --green-soft: #27332B;
+      --line: #3B352D;
+      --mono-ground: #171411;
+      --mono-ink: #E8E0D2;
+    }
+  }
+  :root[data-theme="light"] {
+    --ground: #FAF6EE; --card: #FFFFFF; --ink: #2B2622; --ink-soft: #6B6259;
+    --amber: #D99A06; --amber-soft: #FBEED0; --green: #4A7C59; --green-soft: #E4EFE7;
+    --line: #E8E0D2; --mono-ground: #2B2622; --mono-ink: #F5EFE4;
+  }
+  :root[data-theme="dark"] {
+    --ground: #211D18; --card: #2B2622; --ink: #F0E9DD; --ink-soft: #B0A697;
+    --amber: #E8B23C; --amber-soft: #3B3220; --green: #7FAE8E; --green-soft: #27332B;
+    --line: #3B352D; --mono-ground: #171411; --mono-ink: #E8E0D2;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: var(--serif); font-size: 1.06rem; line-height: 1.65;
+  }
+  a { color: var(--green); }
+  .wrap { max-width: 60rem; margin: 0 auto; padding: 0 1.25rem; }
+  header.site { display: flex; align-items: center; justify-content: space-between; padding: 1.25rem 0; }
+  .brand { font-family: var(--mono); font-size: 1rem; font-weight: 600; letter-spacing: -0.01em; }
+  .brand .tilde { color: var(--amber); }
+  nav.site a { font-family: var(--round); font-size: .9rem; text-decoration: none; color: var(--ink-soft); margin-left: 1.25rem; }
+  nav.site a:hover, nav.site a:focus-visible { color: var(--ink); }
+
+  .hero { padding: 2.5rem 0 3rem; text-align: center; }
+  .hero h1 {
+    font-family: var(--round); font-weight: 700; font-size: clamp(1.9rem, 4.5vw, 3rem);
+    line-height: 1.15; margin: 0 auto .9rem; max-width: 46rem; text-wrap: balance;
+  }
+  .hero h1 em { font-style: normal; color: var(--amber); }
+  .hero p.sub { max-width: 40rem; margin: 0 auto 1.5rem; color: var(--ink-soft); font-size: 1.12rem; text-wrap: balance; }
+  .cta-row { display: flex; gap: .75rem; justify-content: center; flex-wrap: wrap; }
+  .cta {
+    font-family: var(--round); font-weight: 600; text-decoration: none;
+    padding: .65rem 1.3rem; border-radius: 999px; font-size: .95rem;
+  }
+  .cta.primary { background: var(--green); color: #fff; }
+  .cta.primary:hover { filter: brightness(1.08); }
+  .cta.ghost { color: var(--ink); border: 1.5px solid var(--line); background: var(--card); }
+
+  /* Split-screen: the same note, two homes */
+  .split {
+    display: grid; grid-template-columns: 1fr auto 1fr; gap: 1rem; align-items: stretch;
+    margin: 3rem auto 0; max-width: 54rem; text-align: left;
+  }
+  @media (max-width: 44rem) { .split { grid-template-columns: 1fr; } .sync-glyph { transform: rotate(90deg); margin: 0 auto; } }
+  .pane { border-radius: 14px; overflow: hidden; border: 1px solid var(--line); background: var(--card); display: flex; flex-direction: column; }
+  .pane .bar {
+    font-family: var(--round); font-size: .78rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+    padding: .5rem .9rem; color: var(--ink-soft); border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center;
+  }
+  .pane .bar .who { color: var(--amber); }
+  .note-body { padding: 1rem 1.1rem 1.25rem; font-family: var(--round); font-size: .95rem; line-height: 1.55; flex: 1; }
+  .note-body h3 { margin: 0 0 .5rem; font-size: 1.15rem; }
+  .note-body ul { margin: 0; padding-left: 1.1rem; list-style: none; }
+  .note-body li { margin: .2rem 0; }
+  .note-body li::before { content: "◯ "; color: var(--amber); }
+  .note-body li.done::before { content: "◉ "; color: var(--green); }
+  .note-body li.done { color: var(--ink-soft); text-decoration: line-through; }
+  .md-body {
+    padding: 1rem 1.1rem 1.25rem; font-family: var(--mono); font-size: .84rem; line-height: 1.6;
+    background: var(--mono-ground); color: var(--mono-ink); flex: 1; white-space: pre; overflow-x: auto;
+  }
+  .md-body .h { color: var(--amber); } .md-body .done { opacity: .55; }
+  .sync-glyph { align-self: center; font-family: var(--mono); color: var(--green); font-size: 1.5rem; user-select: none; }
+  .caption { font-family: var(--round); font-size: .85rem; color: var(--ink-soft); text-align: center; margin-top: .9rem; }
+
+  section { padding: 3rem 0 0; }
+  section:last-of-type { padding-bottom: 4rem; }
+  h2 { font-family: var(--round); font-weight: 700; font-size: 1.6rem; margin: 0 0 1rem; text-wrap: balance; }
+  .prose { max-width: 42rem; }
+  .prose p { margin: 0 0 1rem; }
+
+  .callout {
+    display: grid; gap: 1rem; background: var(--amber-soft); border-radius: 16px;
+    padding: 1.75rem; margin-top: 1.25rem;
+  }
+  .callout h2 { margin-bottom: 0; }
+  .callout p { margin: 0; max-width: 44rem; }
+
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1.5rem; }
+  @media (max-width: 44rem) { .steps { grid-template-columns: 1fr; } }
+  .step { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1.2rem; }
+  .step .k { font-family: var(--mono); color: var(--green); font-size: .85rem; display: block; margin-bottom: .5rem; }
+  .step h3 { font-family: var(--round); font-size: 1.05rem; margin: 0 0 .4rem; }
+  .step p { margin: 0; font-size: .95rem; color: var(--ink-soft); }
+
+  .safety { display: grid; gap: .9rem; margin-top: 1.25rem; }
+  .safety .row { display: flex; gap: .8rem; align-items: baseline; }
+  .safety .tick { font-family: var(--mono); color: var(--green); flex: none; }
+  .safety p { margin: 0; max-width: 44rem; }
+
+  .editors { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: 1rem; }
+  .chip { font-family: var(--round); font-size: .9rem; font-weight: 600; background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: .4rem 1rem; }
+
+  .install-block {
+    background: var(--mono-ground); color: var(--mono-ink); font-family: var(--mono);
+    border-radius: 12px; padding: 1rem 1.2rem; font-size: .95rem; overflow-x: auto; margin-top: 1rem;
+  }
+  .install-block .c { opacity: .55; }
+
+  details { border-bottom: 1px solid var(--line); padding: .9rem 0; max-width: 46rem; }
+  details summary { font-family: var(--round); font-weight: 600; cursor: pointer; }
+  details summary:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
+  details p { color: var(--ink-soft); margin: .6rem 0 0; }
+
+  .honesty {
+    margin-top: 3rem; border: 1.5px dashed var(--amber); border-radius: 14px; padding: 1.25rem 1.4rem;
+    font-size: .95rem; color: var(--ink-soft); max-width: 46rem;
+  }
+  .honesty strong { color: var(--ink); }
+
+  footer.site { border-top: 1px solid var(--line); margin-top: 4rem; padding: 1.5rem 0 2.5rem; font-family: var(--round); font-size: .9rem; color: var(--ink-soft); display: flex; gap: 1.5rem; flex-wrap: wrap; }
+</style>
+
+<div class="wrap">
+  <header class="site">
+    <div class="brand">icloud<span class="tilde">-</span>md</div>
+    <nav class="site">
+      <a href="#how">How it works</a>
+      <a href="#install">Install</a>
+      <a href="#faq">FAQ</a>
+      <a href="https://github.com/coddingtonbear/icloud-md">GitHub</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <h1>Your partner plans in Apple&nbsp;Notes.<br>You live in <em>Markdown</em>.<br>Now you both win.</h1>
+    <p class="sub">icloud-md turns your iCloud notes — including the ones shared with you — into a folder of real Markdown files. Edit them in Obsidian, VS&nbsp;Code, or vim; push your changes back as if you'd typed them into Notes all along.</p>
+    <div class="cta-row">
+      <a class="cta primary" href="#install">Install in one command</a>
+      <a class="cta ghost" href="https://github.com/coddingtonbear/icloud-md">Read the source</a>
+    </div>
+
+    <div class="split" aria-label="The same shared note in Apple Notes and as a Markdown file">
+      <div class="pane">
+        <div class="bar"><span>Apple Notes · shared</span><span class="who">Sam’s iPhone</span></div>
+        <div class="note-body">
+          <h3>Kitchen renovation</h3>
+          <ul>
+            <li class="done">Get two contractor quotes</li>
+            <li class="done">Pick the counter material</li>
+            <li>Order the faucet</li>
+            <li>Schedule demo weekend</li>
+          </ul>
+        </div>
+      </div>
+      <div class="sync-glyph" aria-hidden="true">⇄</div>
+      <div class="pane">
+        <div class="bar"><span>Kitchen renovation.md</span><span class="who">your editor</span></div>
+        <div class="md-body"><span class="h"># Kitchen renovation</span>
+
+<span class="done">- [x] Get two contractor quotes</span>
+<span class="done">- [x] Pick the counter material</span>
+- [ ] Order the faucet
+- [ ] Schedule demo weekend</div>
+      </div>
+    </div>
+    <p class="caption">One note, two homes. Checklists, headings, lists, and tables round-trip both ways.</p>
+  </div>
+
+  <section class="prose">
+    <h2>The two-app household</h2>
+    <p>Someone you share your life with keeps everything in Apple Notes: the grocery list, the trip plan, the running list of movies. It works for them, and it isn’t going to change. Meanwhile you’ve got a vault, a favorite editor, keybindings you’ve tuned for a decade — and every shared plan lives in the one app where none of that helps you.</p>
+    <p>icloud-md is the peace treaty. Their notes stay exactly where they are. Yours become files.</p>
+  </section>
+
+  <section>
+    <div class="callout">
+      <h2>It works with notes shared <em>with</em> you</h2>
+      <p>This is the part most tools skip. Notes and folders other people share with you are cloned right alongside your own, each sharer under their own directory. You can edit a note in your partner’s shared folder from your editor, push it, and it shows up on their phone like any other edit. (Their notes never leave their account — you’re syncing your own legitimate access to them.)</p>
+    </div>
+  </section>
+
+  <section id="how">
+    <h2>How it works</h2>
+    <div class="steps">
+      <div class="step">
+        <span class="k">$ icloud-md clone ./notes</span>
+        <h3>Clone once</h3>
+        <p>Sign in through Apple’s own login page — password, 2FA and all. Every note becomes a Markdown file, in the same folders you see in Notes.</p>
+      </div>
+      <div class="step">
+        <span class="k">$EDITOR "Grocery list.md"</span>
+        <h3>Edit anywhere</h3>
+        <p>They’re ordinary files. Search them, grep them, keep them in git, open them in the editor you already love.</p>
+      </div>
+      <div class="step">
+        <span class="k">$ icloud-md push</span>
+        <h3>Sync both ways</h3>
+        <p><code>pull</code> brings down edits from phones and laptops; <code>push</code> sends yours up. Edits from both sides get merged, not clobbered.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>It will not eat the grocery list</h2>
+    <div class="safety">
+      <div class="row"><span class="tick">✓</span><p><strong>Real three-way merges.</strong> If a note changed on a phone <em>and</em> in your editor, the parts that don’t overlap merge automatically; only genuine collisions ask you to choose.</p></div>
+      <div class="row"><span class="tick">✓</span><p><strong>Verified before every write.</strong> Before pushing an edit, icloud-md proves it can rebuild the note byte-for-byte. If it can’t fully understand a note, it leaves it read-only instead of guessing.</p></div>
+      <div class="row"><span class="tick">✓</span><p><strong>Version history built in.</strong> Every sync that changes a note snapshots it first — <code>history</code>, <code>diff</code>, and <code>revert</code> can inspect or roll back any past version.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Bring your own editor</h2>
+    <div class="editors">
+      <span class="chip">Obsidian</span>
+      <span class="chip">VS Code</span>
+      <span class="chip">vim</span>
+      <span class="chip">Emacs</span>
+      <span class="chip">iA Writer</span>
+      <span class="chip">grep, honestly</span>
+    </div>
+    <p class="caption" style="text-align:left; max-width: 44rem;">Obsidian folks: clone with <code>--filename-as-title</code> and each file is named for its note’s title, the way your vault expects.</p>
+  </section>
+
+  <section id="install">
+    <h2>Install</h2>
+    <div class="install-block"><span class="c"># Requires Node.js 20+</span>
+npm install -g icloud-md
+icloud-md clone ./our-notes</div>
+  </section>
+
+  <section id="faq">
+    <h2>Questions a reasonable partner would ask</h2>
+    <details>
+      <summary>Will they notice anything changed?</summary>
+      <p>No. Your edits arrive in Notes exactly like edits from another of your devices. Nothing installs on their phone, and their setup doesn’t change at all.</p>
+    </details>
+    <details>
+      <summary>What happens if we both edit the same note at once?</summary>
+      <p>The next <code>pull</code> merges both sets of edits. If you both touched the very same lines, you get standard conflict markers to resolve — the tool never silently picks a winner.</p>
+    </details>
+    <details>
+      <summary>Does formatting survive the round trip?</summary>
+      <p>Headings, lists, checklists, blockquotes, code blocks, links, bold/italic — yes, both directions. Tables too, including cell edits. Notes with things it can’t faithfully round-trip (like photo attachments) stay read-only rather than risk mangling them.</p>
+    </details>
+    <details>
+      <summary>Is this an official Apple thing?</summary>
+      <p>No — see the honest print below. It speaks the same private API Apple’s own iCloud.com Notes page uses, which Apple could change at any time.</p>
+    </details>
+  </section>
+
+  <div class="honesty">
+    <strong>The honest print.</strong> icloud-md is not an official or supported Apple API — it’s a careful reverse-engineering of the service iCloud.com itself uses. It’s built to refuse rather than corrupt, and it keeps its own version history, but you should still keep your notes folder in git (or another backup), try it on a throwaway note first, and know that Advanced Data Protection accounts aren’t supported. Free and open source, MIT licensed.
+  </div>
+
+  <footer class="site">
+    <span>icloud-md · MIT</span>
+    <a href="https://github.com/coddingtonbear/icloud-md">GitHub</a>
+    <a href="https://www.npmjs.com/package/icloud-md">npm</a>
+  </footer>
+</div>
