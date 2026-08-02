@@ -133,6 +133,71 @@ describe("live sync against a real iCloud account", { concurrency: 1, skip: enab
     assert.equal((await vault.status()).exitCode, 0, "the vault should settle after pushing an edit");
   });
 
+  it("pushes a deletion that an open web client merges into its held copy - not just re-decodes", async () => {
+    // The other web-oracle tests read cold: the client decodes our stored
+    // bytes, so it agrees with whatever we wrote by construction. This one
+    // observes the *incremental merge* instead - the path every claim about
+    // clocks and tombstone anchors is actually about, and the one where the
+    // pre-#12 table bug hid (deletions that looked fine cold and were
+    // discarded by any client already holding the text).
+    const title = run.title("merge canary");
+    const fileName = "merge-canary.md";
+    await vault.writeNote(fileName, [`# ${title}`, "", "alpha bravo charlie delta", ""].join("\n"));
+    assert.equal((await vault.push()).exitCode, 0);
+    const noteId = await vault.noteId(fileName);
+
+    // Open the note; the client now holds its document in memory.
+    const oracle = await run.oracle();
+    const before = await oracle.readNote(noteId);
+    assert.match(before.plainText, /alpha bravo charlie delta/);
+
+    // Push a mid-text deletion from the clone, behind the open client's back.
+    await vault.writeNote(fileName, [`# ${title}`, "", "alpha delta", ""].join("\n"));
+    assert.equal((await vault.push()).exitCode, 0);
+
+    // Drive the client's own forced reload (`Note.load(id, true)` - the same
+    // call its sync path makes when a changed record arrives without a body).
+    // The reload fetches the full record and hands the body to
+    // `topoTextManager.load`, whose held-copy branch is Apple's merge.
+    const reloaded = await oracle.forceReloadNote(noteId);
+    assert.ok(reloaded !== undefined, "the open client should know the note it is displaying");
+
+    // The open client - no navigation, no page load - must now show the
+    // deletion: our tombstone's restamped style timestamp out-ranked the
+    // held run's, so the merge adopted it.
+    const deadline = Date.now() + 30_000;
+    let after = await oracle.rereadOpenNote(noteId);
+    while (Date.now() < deadline && !/alpha delta/.test(after.plainText)) {
+      after = await oracle.rereadOpenNote(noteId);
+    }
+    assert.match(after.plainText, /alpha delta/, "the merged copy should contain the deletion");
+    assert.doesNotMatch(after.plainText, /bravo charlie/, "the deleted words should be gone from the merged copy");
+
+    // And it must have got there by *merging*: Apple's CRDTManager records a
+    // trace only on its held-copy branch (`if (!existing) store; else merge`),
+    // so a trace naming both texts is the client's own testimony that it
+    // merged our document into the copy it already had. A reload-and-decode
+    // would leave no trace at all.
+    const traces = await oracle.mergeTraces();
+    assert.ok(traces !== undefined, "Apple's diagnose hook should be reachable");
+    const witness = traces.topoTextMergeTraces
+      .filter((trace) => trace !== null)
+      .map((trace) => ({
+        ours: JSON.stringify(trace.oursBefore ?? ""),
+        theirs: JSON.stringify(trace.theirsBefore ?? ""),
+        after: JSON.stringify(trace.oursAfter ?? ""),
+      }))
+      .find((trace) => trace.ours.includes("alpha bravo charlie delta") && trace.theirs.includes(title));
+    assert.ok(witness, "the client should have recorded a merge whose 'ours' side is the pre-deletion text");
+    assert.match(witness.theirs, /"tombstone":\s*true/, "our pushed document should carry the deletion as a tombstone");
+    assert.match(witness.after, /"tombstone":\s*true/, "the merge result should have adopted the tombstone");
+    assert.doesNotMatch(
+      witness.after.replace(/\\n/g, " "),
+      /"string":"[^"]*bravo charlie[^"]*"/,
+      "the merge result's visible text should not contain the deleted words",
+    );
+  });
+
   it("creates a Notes folder for a new directory, and the note inside it", async () => {
     const folderName = run.title("new folder");
     const title = run.title("note in a new folder");

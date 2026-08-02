@@ -90,8 +90,10 @@ export interface MergeTrace {
 
 export interface MergeTraceReport {
   date: string;
-  topoTextMergeTraces: MergeTrace[];
-  tableMergeTraces: MergeTrace[];
+  /** Newest first. `CRDTManager` pads the array to its cap of 3 by assigning
+   * `.length`, so unfilled slots arrive as null - filter before use. */
+  topoTextMergeTraces: (MergeTrace | null)[];
+  tableMergeTraces: (MergeTrace | null)[];
 }
 
 export interface WebNoteListRow {
@@ -334,6 +336,54 @@ export class NotesWebOracle {
       newest.remove();
       return JSON.parse(text) as unknown;
     })) as MergeTraceReport | undefined;
+  }
+
+  /**
+   * Forces the app's own full reload of one note - `Note.load(id, true)` -
+   * which is Apple's own code path for "this record changed under you":
+   * `NoteLoader.loadDataIntoDataManager` calls exactly this when a synced
+   * Note arrives with a new `ModificationDate` but no body (the zone-sync
+   * `desiredKeys` omit `TextDataEncrypted`). The forced load fetches the full
+   * record, and the loader then feeds the body to `topoTextManager.load`,
+   * whose held-copy branch is the merge.
+   *
+   * The Note model class isn't a global; it's reached through the app's
+   * all-notes collection (`dataManager.__CW__allNotes`) - any instance's
+   * `constructor` is the class, and the instance whose `id` contains the
+   * record UUID names the primary key to load.
+   *
+   * Returns the matched primary key, or undefined when the collection is
+   * unreachable or no note matches.
+   */
+  async forceReloadNote(noteId: string): Promise<string | undefined> {
+    const frame = await this.appFrame();
+    return (await frame.evaluate(async (id: string) => {
+      const win = window as unknown as Record<string, unknown>;
+      const notesApp = (win.NotesApp ?? {}) as Record<string, unknown>;
+      const debug = (notesApp.Debug ?? {}) as Record<string, unknown>;
+      const dataManager = (notesApp.dataManager ?? debug.dataManager) as Record<string, unknown> | undefined;
+      const raw = (dataManager?.__CW__allNotes ?? dataManager?._allNotesSet) as
+        | { forEach?: (cb: (x: unknown) => void) => void }
+        | undefined;
+      if (!raw || typeof raw.forEach !== "function") {
+        return undefined;
+      }
+      const items: unknown[] = [];
+      raw.forEach((x: unknown) => items.push(x));
+      for (const item of items) {
+        const model = item as { id?: unknown; constructor?: { load?: (k: unknown, force: boolean) => Promise<unknown> } };
+        const primaryKey = String(model?.id ?? "");
+        if (!primaryKey.toLowerCase().includes(id.toLowerCase())) {
+          continue;
+        }
+        if (typeof model.constructor?.load !== "function") {
+          return undefined;
+        }
+        await model.constructor.load(model.id, true);
+        return primaryKey;
+      }
+      return undefined;
+    }, noteId)) as string | undefined;
   }
 
   async screenshot(file: string): Promise<void> {
