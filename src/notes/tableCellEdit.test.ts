@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fromBinary, toBinary } from "@bufbuild/protobuf";
-import { StringSchema } from "./gen/topotext_pb.js";
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
+import { AttributeRunSchema, StringSchema } from "./gen/topotext_pb.js";
 import {
   applyCellTextEdit,
   encodeCellDocument,
@@ -164,7 +164,7 @@ test("applyCellTextEdit on the real multi-tombstone A1 cell: mid-text edit split
   assert.equal(cell.runs.filter((run) => run.tombstone).length, 3);
 });
 
-test("applyCellTextEdit renumbers sequences 1..N in list order after an edit, leaving sentinels alone", () => {
+test("editing a linear cell keeps its child edges a 1..N chain, leaving sentinels alone", () => {
   const clock = testClock();
   const cell = filledCell("ab", clock);
   applyCellTextEdit(cell, "abc", clock);
@@ -172,6 +172,47 @@ test("applyCellTextEdit renumbers sequences 1..N in list order after an edit, le
   assert.deepEqual(
     nonSentinelSequences,
     nonSentinelSequences.map((_, i) => i + 1),
+  );
+});
+
+test("editing a branched cell preserves the branch's child edges instead of flattening them", () => {
+  // Same branch shape as the note-body tests: run 1 ("aa") carries two
+  // child edges because two replicas inserted after it concurrently; the
+  // array neighbours 2/3 both point at the sentinel.
+  const cell: TableCellDocument = {
+    text: "aabbcc",
+    runs: [
+      { coord: { replica: 0, clock: 0 }, length: 0, anchor: { replica: 0, clock: 0 }, tombstone: false, sequence: [1] },
+      { coord: { replica: 1, clock: 0 }, length: 2, anchor: { replica: 1, clock: 0 }, tombstone: false, sequence: [2, 3] },
+      { coord: { replica: 2, clock: 0 }, length: 2, anchor: { replica: 2, clock: 0 }, tombstone: false, sequence: [4] },
+      { coord: { replica: 1, clock: 2 }, length: 2, anchor: { replica: 1, clock: 0 }, tombstone: false, sequence: [4] },
+      {
+        coord: { replica: 0, clock: 0xffffffff },
+        length: 0,
+        anchor: { replica: 0, clock: 0xffffffff },
+        tombstone: false,
+        sequence: [],
+      },
+    ],
+    attributeRuns: [create(AttributeRunSchema, { length: 6 })],
+  };
+
+  // Replace the whole text: tombstones all three visible runs (no splits
+  // needed - the range covers them exactly), then inserts the new run.
+  assert.equal(applyCellTextEdit(cell, "z", testClock(100)), true);
+  validateCellInvariants(cell);
+
+  // Tombstoning touches no edges, so the branch survives verbatim; the
+  // insert walk skips past the tombstones and splices the new run into the
+  // last tombstone's sentinel-bound edge.
+  assert.equal(cell.text, "z");
+  assert.deepEqual(
+    cell.runs.map((run) => run.sequence),
+    [[1], [2, 3], [5], [4], [5], []],
+  );
+  assert.deepEqual(
+    cell.runs.map((run) => run.tombstone),
+    [false, true, true, true, false, false],
   );
 });
 
