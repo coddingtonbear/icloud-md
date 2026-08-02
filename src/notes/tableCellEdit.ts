@@ -42,15 +42,27 @@ const SENTINEL_CLOCK = 0xffffffff;
 
 /**
  * A table document's shared topotext clock, scoped to one replica: the
- * writing replica's 1-based `CharID.replicaID` and its next-available-clock
- * counter (total UTF-16 units this replica has ever inserted anywhere in
- * the document). `take` returns the first clock of a fresh `units`-unit run
- * and advances the counter - `tableEdit.ts` backs this with the document's
- * own `ttTimestamp` entry so the advance persists into the encoded document.
+ * writing replica's 1-based `CharID.replicaID` and its two counters (the
+ * text clock - total UTF-16 units this replica has ever inserted anywhere in
+ * the document - and the style clock). `take` returns the first clock of a
+ * fresh `units`-unit run and advances the text counter;
+ * `takeTombstoneAnchor` returns the style timestamp to stamp on a run being
+ * tombstoned and advances the style counter past it. `tableEdit.ts` backs
+ * both with the document's own `ttTimestamp` entry so the advances persist
+ * into the encoded document.
  */
 export interface TopotextClockSource {
   readonly replicaIndex: number;
   take(units: number): number;
+  /**
+   * Apple's deletion-bias rule from `generateIdsForLocalChanges`:
+   * `max(previousClock + 8, styleClockFloor)`, where the floor is this
+   * replica's style clock as of the start of the save. The same rule
+   * `noteDocument.ts` applies to note bodies (PR #9) - it is one shared
+   * code path in Apple's client (`TTMergeableAttributedString`), so cells
+   * and ordering mirrors obey it too.
+   */
+  takeTombstoneAnchor(previousClock: number): number;
 }
 
 export interface TableCellDocument {
@@ -112,7 +124,7 @@ export function applyCellTextEdit(cell: TableCellDocument, newText: string, cloc
   const { start, deleteLength, insertText } = computeSplice(oldText, newText);
 
   if (deleteLength > 0) {
-    tombstoneVisibleRange(cell, start, deleteLength);
+    tombstoneVisibleRange(cell, start, deleteLength, clock);
   }
   if (insertText.length > 0) {
     insertVisibleText(cell, start, insertText, clock);
@@ -128,14 +140,13 @@ export function applyCellTextEdit(cell: TableCellDocument, newText: string, cloc
  * runs where the range boundaries fall inside one - identical algorithm to
  * `noteDocument.ts`'s `tombstoneVisibleRange`, operating on a cell instead
  * (`splitRunAt` owns the child-edge surgery; tombstoning itself never
- * touches edges). `anchorOverride`, when given, is written as each newly
- * tombstoned piece's anchor (`Substring.timestamp`): real captures rewrite
- * an ordering mirror's deletion tombstones to `{replica, deletion-counter}`
- * (2026-07-16T16:31) - cell-text tombstones keep their original anchor, so
- * cell callers just omit it. Exported for `tableEdit.ts`'s mirror
+ * touches edges). Every newly tombstoned piece is restamped
+ * `{us, takeTombstoneAnchor(old style clock)}` so Apple's merge path sees
+ * the deletion (it only adopts a remote tombstone when the remote style
+ * timestamp compares strictly greater). Exported for `tableEdit.ts`'s mirror
  * maintenance; does not touch `text`/attribute runs (`applyCellTextEdit`
  * owns that for cells, the mirror helper owns it there). */
-export function tombstoneVisibleRange(cell: TableCellDocument, start: number, length: number, anchorOverride?: RunCoord): void {
+export function tombstoneVisibleRange(cell: TableCellDocument, start: number, length: number, clock: TopotextClockSource): void {
   const end = start + length;
   if (end > visibleLength(cell.runs)) {
     throw new Error("Cell tombstone range extends past the end of its visible text - CRDT model out of sync");
@@ -165,10 +176,9 @@ export function tombstoneVisibleRange(cell: TableCellDocument, start: number, le
     if (end < targetStart + target.length) {
       splitRunAt(runs, targetIndex, end - targetStart);
     }
+    const previousClock = target.anchor.clock;
     target.tombstone = true;
-    if (anchorOverride) {
-      target.anchor = { replica: anchorOverride.replica, clock: anchorOverride.clock };
-    }
+    target.anchor = { replica: clock.replicaIndex, clock: clock.takeTombstoneAnchor(previousClock) };
     visible = targetStart + target.length;
     i = targetIndex;
   }

@@ -349,7 +349,7 @@ test("column insert mints an identity pair and a full content-keyed row-map", ()
   assert.deepEqual(redirectCounts(doc), { rows: before.rows, columns: before.columns + 1 });
 });
 
-test("row delete retains redirects and identity objects forever, removes the set self-pair, and tombstones the mirror at our deletion counter", () => {
+test("row delete retains redirects and identity objects forever, removes the set self-pair, and tombstones the mirror under Apple's own style-clock rule", () => {
   const doc = parse(BASE_3X2.base64);
   const before = redirectCounts(doc);
   const identityCountBefore = identityUuidIndexes(doc).length;
@@ -368,11 +368,75 @@ test("row delete retains redirects and identity objects forever, removes the set
   const tombstoned = mirror.substring.filter((s) => s.tombstone === 1);
   assert.equal(tombstoned.length, 1);
   assert.equal(tombstoned[0]!.length, 1);
-  // Anchored at our fresh deletion counter (starts at 1), which then advanced.
+  // This is the same logical edit Apple itself made between evolution
+  // revisions 7 and 8, so the numbers are checkable against Apple's own
+  // save: it stamped the mirror tombstone {replica 1, clock 8} =
+  // max(the run's old anchor 0 + 8, its style clock 1) and left the style
+  // clock at 9. Ours is a different replica, but the arithmetic is the same
+  // rule on the same inputs, so the clocks must match exactly.
+  const appleSeq8 = parse(TABLE_EVOLUTION_REVISIONS[8]!.base64);
+  const appleMirror = appleSeq8.objects[appleSeq8.crRowsRef]!.tsOrderedSet!.array!.array!.contents!;
+  const appleTombstone = appleMirror.substring.filter((s) => s.tombstone === 1);
+  assert.equal(appleTombstone.length, 1);
+  assert.equal(appleTombstone[0]!.timestamp!.clock, 8);
+  assert.equal(Number(appleSeq8.document.ttTimestamp!.clock[0]!.replicaClock[1]!.clock), 9);
+
   const ourTt = doc.document.ttTimestamp!.clock[doc.document.ttTimestamp!.clock.length - 1]!;
   assert.equal(tombstoned[0]!.timestamp!.replicaID, doc.document.ttTimestamp!.clock.length);
-  assert.equal(tombstoned[0]!.timestamp!.clock, 1);
-  assert.equal(Number(ourTt.replicaClock[1]!.clock), 2);
+  assert.equal(tombstoned[0]!.timestamp!.clock, 8);
+  assert.equal(Number(ourTt.replicaClock[1]!.clock), 9);
+});
+
+test("a later deletion floors on the already-advanced style clock, reproducing Apple's own 8 -> 9 progression", () => {
+  const doc = parse(BASE_3X2.base64);
+  editAndVerify(doc, [
+    ["apple-r1c1-edit1", "berry-r1c2"],
+    ["echo-r3c1", ""],
+  ]);
+  editAndVerify(doc, [["apple-r1c1-edit1", "berry-r1c2"]]);
+
+  // Apple's own second deletion (evolution seq 11 - a column, but the rule
+  // is axis-independent: both mirrors are the same string type) stamped 9 =
+  // max(the run's old anchor 0 + 8, its now-advanced style clock 9) and left
+  // the clock at 10. Two deletions, the same two numbers here.
+  const appleSeq11 = parse(TABLE_EVOLUTION_REVISIONS[11]!.base64);
+  const appleMirror = appleSeq11.objects[appleSeq11.crColumnsRef]!.tsOrderedSet!.array!.array!.contents!;
+  assert.deepEqual(
+    appleMirror.substring.filter((s) => s.tombstone === 1).map((s) => s.timestamp!.clock),
+    [9],
+  );
+  assert.equal(Number(appleSeq11.document.ttTimestamp!.clock[0]!.replicaClock[1]!.clock), 10);
+
+  const ourRowMirror = doc.objects[doc.crRowsRef]!.tsOrderedSet!.array!.array!.contents!;
+  assert.deepEqual(
+    ourRowMirror.substring.filter((s) => s.tombstone === 1).map((s) => s.timestamp!.clock),
+    [8, 9],
+  );
+  const ourTt = doc.document.ttTimestamp!.clock[doc.document.ttTimestamp!.clock.length - 1]!;
+  assert.equal(Number(ourTt.replicaClock[1]!.clock), 10);
+});
+
+test("a cell-text deletion restamps its tombstone and advances the shared style clock, so other clients can see the deletion at all", () => {
+  const doc = parse(BASE_3X2.base64);
+  editAndVerify(doc, [
+    ["apple-r1c1-edit1", "berry"],
+    ["cedar-r2c1", "delta-r2c2"],
+    ["echo-r3c1", ""],
+  ]);
+
+  // "berry-r1c2" -> "berry": the trailing "-r1c2" is tombstoned. Apple's
+  // merge adopts a remote tombstone only when its style timestamp compares
+  // strictly greater than the local one, so the piece must carry *our*
+  // replica at max(its old anchor + 8, our style-clock floor) - leaving the
+  // original anchor in place would make the deletion a no-op everywhere else.
+  const ttCount = doc.document.ttTimestamp!.clock.length;
+  const ourTt = doc.document.ttTimestamp!.clock[ttCount - 1]!;
+  const cell = doc.objects.find((entry) => entry.string?.string === "berry")!.string!;
+  const tombstoned = cell.substring.filter((s) => s.tombstone === 1);
+  assert.equal(tombstoned.length, 1);
+  assert.equal(tombstoned[0]!.timestamp!.replicaID, ttCount); // ours, 1-based
+  assert.equal(tombstoned[0]!.timestamp!.clock, 8); // max(0 + 8, floor 1)
+  assert.equal(Number(ourTt.replicaClock[1]!.clock), 9);
 });
 
 test("column delete physically removes the row-map and its cells from the pool, retaining redirects and identities", () => {

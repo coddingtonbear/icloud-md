@@ -29,9 +29,14 @@ function loadRealCell(): TableCellDocument {
 }
 
 /** A standalone document-global clock, the shape `tableEdit.ts`'s write
- * session provides in production - replica 1, counting from `start`. */
-function testClock(start = 0): TopotextClockSource & { readonly value: number } {
+ * session provides in production - replica 1, text clock counting from
+ * `start`, style clock from `styleStart` (1 on a freshly registered
+ * replica). `takeTombstoneAnchor` reproduces the session's own rule: a
+ * per-save floor with an accumulating counter. */
+function testClock(start = 0, styleStart = 1): TopotextClockSource & { readonly value: number; readonly styleValue: number } {
   let counter = start;
+  let style = styleStart;
+  const styleFloor = styleStart;
   return {
     replicaIndex: 1,
     take(units: number): number {
@@ -39,8 +44,16 @@ function testClock(start = 0): TopotextClockSource & { readonly value: number } 
       counter += units;
       return value;
     },
+    takeTombstoneAnchor(previousClock: number): number {
+      const assigned = Math.max(previousClock + 8, styleFloor);
+      style = Math.max(style, assigned + 1);
+      return assigned;
+    },
     get value() {
       return counter;
+    },
+    get styleValue() {
+      return style;
     },
   };
 }
@@ -214,6 +227,80 @@ test("editing a branched cell preserves the branch's child edges instead of flat
     cell.runs.map((run) => run.tombstone),
     [false, true, true, true, false, false],
   );
+});
+
+test("deleting cell text restamps the tombstone under our replica with Apple's +8 deletion bias", () => {
+  const clock = testClock(100, 1);
+  const cell = filledCell("hello world", clock);
+  applyCellTextEdit(cell, "hello", clock);
+
+  const tombstoned = cell.runs.filter((run) => run.tombstone);
+  assert.equal(tombstoned.length, 1);
+  // The deleted run was inserted at anchor {1, 0}, so max(0 + 8, floor 1) = 8.
+  assert.deepEqual(tombstoned[0]?.anchor, { replica: 1, clock: 8 });
+  assert.equal(clock.styleValue, 9);
+  validateCellInvariants(cell);
+});
+
+test("a deletion out-ranks a high pre-existing anchor rather than tying with it", () => {
+  const cell: TableCellDocument = {
+    text: "abc",
+    runs: [
+      { coord: { replica: 0, clock: 0 }, length: 0, anchor: { replica: 0, clock: 0 }, tombstone: false, sequence: [1] },
+      // A run some other replica restyled: its anchor already sits at 20.
+      { coord: { replica: 2, clock: 0 }, length: 3, anchor: { replica: 2, clock: 20 }, tombstone: false, sequence: [2] },
+      {
+        coord: { replica: 0, clock: 0xffffffff },
+        length: 0,
+        anchor: { replica: 0, clock: 0xffffffff },
+        tombstone: false,
+        sequence: [],
+      },
+    ],
+    attributeRuns: [create(AttributeRunSchema, { length: 3 })],
+  };
+
+  const clock = testClock(100, 1);
+  applyCellTextEdit(cell, "", clock);
+
+  // max(20 + 8, floor 1) = 28: strictly greater than the anchor it replaces,
+  // which is exactly what makes the deletion survive Apple's merge.
+  assert.deepEqual(cell.runs[1]?.anchor, { replica: 1, clock: 28 });
+  assert.equal(cell.runs[1]?.tombstone, true);
+  assert.equal(clock.styleValue, 29);
+});
+
+test("two runs tombstoned in one save share the save's style-clock floor, matching Apple's captured `r`", () => {
+  const cell: TableCellDocument = {
+    text: "aabb",
+    runs: [
+      { coord: { replica: 0, clock: 0 }, length: 0, anchor: { replica: 0, clock: 0 }, tombstone: false, sequence: [1] },
+      { coord: { replica: 2, clock: 0 }, length: 2, anchor: { replica: 2, clock: 0 }, tombstone: false, sequence: [2] },
+      { coord: { replica: 2, clock: 2 }, length: 2, anchor: { replica: 2, clock: 0 }, tombstone: false, sequence: [3] },
+      {
+        coord: { replica: 0, clock: 0xffffffff },
+        length: 0,
+        anchor: { replica: 0, clock: 0xffffffff },
+        tombstone: false,
+        sequence: [],
+      },
+    ],
+    attributeRuns: [create(AttributeRunSchema, { length: 4 })],
+  };
+
+  const clock = testClock(100, 1);
+  applyCellTextEdit(cell, "", clock);
+
+  // Apple captures the style clock once per save and floors every run in
+  // that pass against it, so both land on max(0 + 8, 1) = 8.
+  assert.deepEqual(
+    cell.runs.filter((run) => run.tombstone).map((run) => run.anchor),
+    [
+      { replica: 1, clock: 8 },
+      { replica: 1, clock: 8 },
+    ],
+  );
+  assert.equal(clock.styleValue, 9);
 });
 
 test("validateCellInvariants throws when visible run lengths don't match the text", () => {
