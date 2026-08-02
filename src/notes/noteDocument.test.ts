@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { create, toBinary } from "@bufbuild/protobuf";
 import {
+  applyFormattingOp,
   applyTextEdit,
   buildInitialNoteDocument,
   computeSplice,
@@ -138,9 +139,11 @@ test("appending as a new replica adds a replica entry and a new run", () => {
 
   assert.equal(doc.replicas.length, 2);
   // A joining replica initializes both clocks to the observed maxima (text
-  // clock 5 from replica A, op clock 1) - the 2026-07-17 formatting-evolution
-  // follow-up capture's behavior - then advances them with its own edit.
-  assert.deepEqual(doc.replicas[1]?.counters, [6, 2]);
+  // clock 5 from replica A, style clock 1) - the 2026-07-17
+  // formatting-evolution follow-up capture's behavior. A fresh run stamps at
+  // style clock 0, which only requires the style clock to be at least 1
+  // (Apple: `max(_replicaStyleClock, 1)`), so it stays 1.
+  assert.deepEqual(doc.replicas[1]?.counters, [6, 1]);
   const inserted = doc.runs[doc.runs.length - 2];
   assert.deepEqual(inserted?.coord, { replica: 2, clock: 5 });
   assert.equal(inserted?.length, 1);
@@ -183,14 +186,16 @@ test("deletion tombstones the removed range instead of dropping it", () => {
   assert.equal(tombstones.length, 1);
   assert.equal(tombstones[0]?.length, 6);
   assert.equal(tombstones[0]?.coord.clock, 6); // split from the middle of the original run
-  // A deletion is a formatting op: the tombstoned substring is restamped
-  // with the deleting replica's (index, op number) - here replica 2, whose
-  // op clock initialized to the observed maximum (1) and stamped that value.
-  assert.deepEqual(tombstones[0]?.anchor, { replica: 2, clock: 1 });
-  // Our replica is registered (the deletion consumed one of its op numbers)
-  // but inserted no text - its text clock stays at the joined maximum.
+  // A deletion is a formatting op with Apple's deletion bias: the tombstoned
+  // substring is restamped with (us, max(its old style clock + 8, the style
+  // clock floor)) - here max(0 + 8, 1) = 8 - so the deletion wins the
+  // merge-time LWW against up to 8 clock steps of concurrent restyling.
+  assert.deepEqual(tombstones[0]?.anchor, { replica: 2, clock: 8 });
+  // Our replica is registered and its style clock advanced past the stamp it
+  // assigned (Apple: `max(d + 1, _replicaStyleClock)`), but it inserted no
+  // text - its text clock stays at the joined maximum.
   assert.equal(doc.replicas.length, 2);
-  assert.deepEqual(doc.replicas[1]?.counters, [17, 2]);
+  assert.deepEqual(doc.replicas[1]?.counters, [17, 9]);
   assert.equal(reencodeAndDecode(doc), "Hello world");
   validateDocumentInvariants(doc);
 });
@@ -315,9 +320,10 @@ test("structural edits advance the event counter; the sentinel run never gets a 
   const doc = simpleDocument("Hello brave world");
   assert.equal(doc.replicas[0]?.counters[1], 1);
 
-  // Deletion by the existing replica: one push, one event.
+  // Deletion by the existing replica: the tombstone stamps at
+  // max(0 + 8, 1) = 8 and the style clock lands just past it.
   applyTextEdit(doc, "Hello world", { replicaId: REPLICA_A });
-  assert.equal(doc.replicas[0]?.counters[1], 2);
+  assert.equal(doc.replicas[0]?.counters[1], 9);
 
   assert.deepEqual(doc.runs[doc.runs.length - 1]?.sequence, []);
 });
@@ -389,11 +395,66 @@ test("multi-hunk deletions consume a single formatting op - every tombstone carr
   const tombstones = doc.runs.filter((run) => run.tombstone);
   assert.equal(tombstones.length, 2);
   for (const run of tombstones) {
-    assert.deepEqual(run.anchor, { replica: 1, clock: 1 });
+    // Both hunks' text carried the same old style clock (0), so both stamp
+    // at max(0 + 8, 1) = 8 - the style-clock floor is captured once per
+    // push, exactly like Apple's generateIdsForLocalChanges pass.
+    assert.deepEqual(run.anchor, { replica: 1, clock: 8 });
   }
-  // One push = one op, regardless of hunk count.
-  assert.equal(doc.replicas[0]?.counters[1], 2);
+  // The style clock ends one past the highest stamp assigned.
+  assert.equal(doc.replicas[0]?.counters[1], 9);
   assert.equal(visibleText(doc), "aa\nmid\ncc\n");
+});
+
+test("deleting text another replica restyled stamps past that replica's higher style clock", () => {
+  // The dropped-deletion scenario the style-clock floor exists to prevent:
+  // replica B restyled its text up to style clock 80 while our own style
+  // counter sat at 5. A deletion stamped from our stale counter would lose
+  // the merge-time LWW on every device that saw B's stamp, silently undoing
+  // the delete (Apple's mergeWithString keeps the higher stamp's tombstone
+  // state). The floor must clear B's stamp, and the +8 deletion bias rides
+  // on top of the run's own old clock.
+  const doc = makeDocument(
+    "Hellobrave ",
+    [
+      { coord: { replica: 1, clock: 0 }, length: 5, anchor: { replica: 1, clock: 0 }, tombstone: false, sequence: [2] },
+      { coord: { replica: 2, clock: 0 }, length: 6, anchor: { replica: 2, clock: 80 }, tombstone: false, sequence: [3] },
+    ],
+    [5, 6],
+  );
+  doc.replicas[0]!.counters[1] = 5;
+  doc.replicas[1]!.counters[1] = 81;
+
+  assert.equal(applyTextEdit(doc, "Hello", { replicaId: REPLICA_A }), true);
+
+  const tombstones = doc.runs.filter((run) => run.tombstone);
+  assert.equal(tombstones.length, 1);
+  // Floor: max stamp 80 held by B, whose UUID beats ours in the tie-break,
+  // so the floor is 81; the run's own old clock adds the bias: max(80+8, 81).
+  assert.deepEqual(tombstones[0]?.anchor, { replica: 1, clock: 88 });
+  assert.equal(doc.replicas[0]?.counters[1], 89);
+  assert.equal(visibleText(doc), "Hello");
+  validateDocumentInvariants(doc);
+});
+
+test("a formatting op restamps past another replica's higher style clock", () => {
+  const doc = makeDocument(
+    "Hellobrave ",
+    [
+      { coord: { replica: 1, clock: 0 }, length: 5, anchor: { replica: 1, clock: 0 }, tombstone: false, sequence: [2] },
+      { coord: { replica: 2, clock: 0 }, length: 6, anchor: { replica: 2, clock: 80 }, tombstone: false, sequence: [3] },
+    ],
+    [5, 6],
+  );
+  doc.replicas[0]!.counters[1] = 5;
+  doc.replicas[1]!.counters[1] = 81;
+
+  applyFormattingOp(doc, [{ start: 5, end: 11 }], REPLICA_A);
+
+  const restamped = doc.runs.find((run) => run.coord.replica === 2);
+  // max(old 80 + 1, floor 81) = 81 - never below what any device has seen.
+  assert.deepEqual(restamped?.anchor, { replica: 1, clock: 81 });
+  assert.equal(doc.replicas[0]?.counters[1], 82);
+  validateDocumentInvariants(doc);
 });
 
 test("buildInitialNoteDocument builds a first-save document whose encoding decodes back to the text", () => {
