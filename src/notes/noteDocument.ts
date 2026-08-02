@@ -215,43 +215,54 @@ export function applyTextEdit(doc: NoteDocument, newText: string, options: Apply
 
   const splices = computeSplices(oldText, newText);
   const replicaIndex = ensureReplica(doc, options.replicaId);
-  const opNumber = doc.replicas[replicaIndex - 1]?.counters[1] ?? 0;
+  // Apple's TTMergeableString captures its style clock once per save pass
+  // (generateIdsForLocalChanges reads `_replicaStyleClock` into a local
+  // before the loop), so every stamp in one push shares the same floor.
+  const styleClockFloor = styleClockSeed(doc, replicaIndex);
+  let maxAssignedStyleClock = -1;
 
   let structuralChange = false;
+  let insertedNewRun = false;
   // Splices carry oldText offsets, ascending and non-overlapping; applying
   // them in order shifts every later offset by the net length change so far.
   let delta = 0;
   for (const { start: oldStart, deleteLength, insertText } of splices) {
     const start = oldStart + delta;
     if (deleteLength > 0) {
-      // A deletion is a formatting op in Apple's model: the tombstoned
-      // substrings are restamped with (opReplica, opNumber) - confirmed on the
-      // 2026-07-17 formatting-evolution capture (see proto/topotext.proto's
-      // Substring.timestamp comment). One push = one op regardless of hunk
-      // count (the multi-range precedent is `applyFormattingOp`); the op
-      // number consumed here is the one the structural-change bump below
-      // advances past.
-      tombstoneVisibleRange(doc, start, deleteLength, { replica: replicaIndex, clock: opNumber });
+      // A deletion is a formatting op in Apple's model: each tombstoned
+      // substring is restamped with (us, max(its old style clock + 8, the
+      // pass's style-clock floor)) - the deletion bias straight from Apple's
+      // generateIdsForLocalChanges (`u.timestamp.clock + (isTombstone ? 8 :
+      // 1)`), which biases a deletion to win the merge-time LWW against up
+      // to 8 clock steps of concurrent restyling. The 2026-07-17
+      // formatting-evolution capture's op-clock sequence 1 -> 9 -> 10 is
+      // this exact rule observed live: max(0+8, 1) = 8 stamped, table 9.
+      maxAssignedStyleClock = Math.max(
+        maxAssignedStyleClock,
+        tombstoneVisibleRange(doc, start, deleteLength, replicaIndex, styleClockFloor),
+      );
       structuralChange = true;
     }
     if (insertText.length > 0) {
-      structuralChange = insertVisibleText(doc, start, insertText, replicaIndex) || structuralChange;
+      const newRun = insertVisibleText(doc, start, insertText, replicaIndex);
+      insertedNewRun = insertedNewRun || newRun;
+      structuralChange = newRun || structuralChange;
     }
     adjustAttributeRuns(doc, start, deleteLength, insertText.length);
     delta += insertText.length - deleteLength;
   }
 
-  // The second replica counter is the formatting-op clock (identified on the
-  // 2026-07-17 formatting-evolution capture; see proto/topotext.proto): a
-  // pure extension of the replica's own trailing run leaves it alone
-  // (observed across two consecutive web-client saves of an append), while
-  // saves containing splits/tombstones/new runs advance it (observed
-  // 1 -> 9 -> 10 across the "Test Note" capture). One push = one op, whose
-  // number stamped the tombstones above.
+  // The second replica counter is the style clock
+  // (TTMergeableStringTimestampTypeStyle in Apple's source): a pure
+  // extension of the replica's own trailing run leaves it alone (observed
+  // across two consecutive web-client saves of an append), a new run raises
+  // it to at least 1 (Apple: `max(_replicaStyleClock, 1)` when stamping
+  // fresh runs at clock 0), and restamped tombstones push it past the
+  // highest clock they consumed (Apple: `max(d + 1, _replicaStyleClock)`).
   if (structuralChange) {
     const replica = doc.replicas[replicaIndex - 1];
     if (replica) {
-      replica.counters[1] = opNumber + 1;
+      replica.counters[1] = Math.max(maxAssignedStyleClock + 1, styleClockFloor, insertedNewRun ? 1 : 0);
     }
   }
 
@@ -493,15 +504,24 @@ function isLowSurrogate(code: number): boolean {
 }
 
 /** Marks the visible range [start, start+length) as tombstoned, splitting
- * runs where the range boundaries fall inside one, and restamps the newly
- * tombstoned pieces' style timestamp with `stamp` - the deletion's
- * formatting-op coordinate, matching Apple's own client (dev log
- * 2026-07-17T10:16). Clock arithmetic follows the pattern in captured
- * notes: a run starting at clock c, split at offset k, continues at c+k. */
-function tombstoneVisibleRange(doc: NoteDocument, start: number, length: number, stamp: RunCoord): void {
+ * runs where the range boundaries fall inside one, and restamps each newly
+ * tombstoned piece's style timestamp with (replicaIndex, max(its old style
+ * clock + 8, styleClockFloor)) - Apple's deletion-bias rule from
+ * generateIdsForLocalChanges. Returns the highest clock stamped (or -1 when
+ * the range covered nothing), so the caller can advance the replica's style
+ * clock past it. Clock arithmetic follows the pattern in captured notes: a
+ * run starting at clock c, split at offset k, continues at c+k. */
+function tombstoneVisibleRange(
+  doc: NoteDocument,
+  start: number,
+  length: number,
+  replicaIndex: number,
+  styleClockFloor: number,
+): number {
   const end = start + length;
   const out: TextRun[] = [];
   let visible = 0;
+  let maxAssigned = -1;
 
   for (const run of doc.runs) {
     if (run.tombstone || run.length === 0 || isSentinel(run)) {
@@ -523,7 +543,9 @@ function tombstoneVisibleRange(doc: NoteDocument, start: number, length: number,
       out.push(pieceOf(run, 0, overlapStart - runStart, false));
     }
     const tombstoned = pieceOf(run, overlapStart - runStart, overlapEnd - overlapStart, true);
-    tombstoned.anchor = { replica: stamp.replica, clock: stamp.clock };
+    const assigned = Math.max(run.anchor.clock + 8, styleClockFloor);
+    tombstoned.anchor = { replica: replicaIndex, clock: assigned };
+    maxAssigned = Math.max(maxAssigned, assigned);
     out.push(tombstoned);
     if (runEnd > overlapEnd) {
       out.push(pieceOf(run, overlapEnd - runStart, runEnd - overlapEnd, false));
@@ -534,32 +556,44 @@ function tombstoneVisibleRange(doc: NoteDocument, start: number, length: number,
     throw new Error("Tombstone range extends past the end of the visible text - CRDT model out of sync");
   }
   doc.runs = out;
+  return maxAssigned;
 }
 
 /**
  * Applies one formatting operation covering the given visible ranges, the
- * way Apple's client does (dev log 2026-07-17T10:16): the replica's
- * formatting-op clock (second counter) advances by one, and every substring
+ * way Apple's client does (generateIdsForLocalChanges): every substring
  * overlapping a range - split at range boundaries - has its style timestamp
- * restamped with the consumed op number. The caller is responsible for the
- * attribute-run rewrite the op corresponds to (`formatReconcile.ts`).
+ * restamped with (us, max(its old style clock + 1, the pass's style-clock
+ * floor)), and the replica's style clock (second counter) ends past the
+ * highest stamp assigned. The caller is responsible for the attribute-run
+ * rewrite the op corresponds to (`formatReconcile.ts`).
  */
 export function applyFormattingOp(doc: NoteDocument, ranges: readonly { start: number; end: number }[], replicaId: Uint8Array): void {
   const replicaIndex = ensureReplica(doc, replicaId);
   const replica = doc.replicas[replicaIndex - 1]!;
-  const opNumber = replica.counters[1] ?? 0;
-  replica.counters[1] = opNumber + 1;
+  const styleClockFloor = styleClockSeed(doc, replicaIndex);
+  let maxAssigned = -1;
   for (const range of ranges) {
-    restampVisibleRange(doc, range.start, range.end, { replica: replicaIndex, clock: opNumber });
+    maxAssigned = Math.max(maxAssigned, restampVisibleRange(doc, range.start, range.end, replicaIndex, styleClockFloor));
   }
+  replica.counters[1] = Math.max(maxAssigned + 1, styleClockFloor);
   renumberSequences(doc);
 }
 
 /** Restamps the style timestamp of every visible substring overlapping
- * [start, end), splitting runs at the boundaries. */
-function restampVisibleRange(doc: NoteDocument, start: number, end: number, stamp: RunCoord): void {
+ * [start, end), splitting runs at the boundaries; each restamped piece gets
+ * (replicaIndex, max(its old style clock + 1, styleClockFloor)). Returns the
+ * highest clock stamped, or -1 when nothing overlapped. */
+function restampVisibleRange(
+  doc: NoteDocument,
+  start: number,
+  end: number,
+  replicaIndex: number,
+  styleClockFloor: number,
+): number {
   const out: TextRun[] = [];
   let visible = 0;
+  let maxAssigned = -1;
 
   for (const run of doc.runs) {
     if (run.tombstone || run.length === 0 || isSentinel(run)) {
@@ -581,13 +615,16 @@ function restampVisibleRange(doc: NoteDocument, start: number, end: number, stam
       out.push(pieceOf(run, 0, overlapStart - runStart, false));
     }
     const restamped = pieceOf(run, overlapStart - runStart, overlapEnd - overlapStart, false);
-    restamped.anchor = { replica: stamp.replica, clock: stamp.clock };
+    const assigned = Math.max(run.anchor.clock + 1, styleClockFloor);
+    restamped.anchor = { replica: replicaIndex, clock: assigned };
+    maxAssigned = Math.max(maxAssigned, assigned);
     out.push(restamped);
     if (runEnd > overlapEnd) {
       out.push(pieceOf(run, overlapEnd - runStart, runEnd - overlapEnd, false));
     }
   }
   doc.runs = out;
+  return maxAssigned;
 }
 
 /** A sub-range of `run` as its own run, with fresh coord/anchor objects.
@@ -709,6 +746,53 @@ function ensureReplica(doc: NoteDocument, replicaId: Uint8Array): number {
   const maxOpClock = Math.max(0, ...doc.replicas.map((replica) => replica.counters[1] ?? 0));
   doc.replicas.push({ id: replicaId, counters: [maxTextClock, maxOpClock] });
   return doc.replicas.length;
+}
+
+/**
+ * The style-clock floor for one editing pass, mirroring Apple's
+ * `updateClock`: the highest style timestamp any run in the document
+ * carries (compared clock-first, then by replica UUID bytes - the same
+ * TTIDComparator ordering the merge's LWW uses), plus one when that
+ * stamp's holder would beat us in the UUID tie-break, so our new stamps
+ * never lose to anything already in the document. Also floored at our own
+ * table counter so the clock never regresses. Replica 0 is the
+ * origin/sentinel pseudo-replica and carries no real stamps.
+ */
+function styleClockSeed(doc: NoteDocument, replicaIndex: number): number {
+  const ourId = doc.replicas[replicaIndex - 1]?.id;
+  if (!ourId) {
+    throw new Error("Replica entry is missing while seeding the style clock");
+  }
+  let maxClock = -1;
+  let maxHolder: Uint8Array | undefined;
+  for (const run of doc.runs) {
+    if (run.anchor.replica === 0) {
+      continue;
+    }
+    const holder = doc.replicas[run.anchor.replica - 1]?.id ?? new Uint8Array(16);
+    if (run.anchor.clock > maxClock || (run.anchor.clock === maxClock && maxHolder && compareBytes(holder, maxHolder) > 0)) {
+      maxClock = run.anchor.clock;
+      maxHolder = holder;
+    }
+  }
+  let seed = 0;
+  if (maxHolder !== undefined) {
+    seed = maxClock + (compareBytes(maxHolder, ourId) >= 0 ? 1 : 0);
+  }
+  return Math.max(seed, doc.replicas[replicaIndex - 1]?.counters[1] ?? 0);
+}
+
+/** Byte-lexicographic UUID comparison - Apple's NSUUID compare, the
+ * tie-break half of TTIDComparator's (clock, replicaID) ordering. */
+function compareBytes(a: Uint8Array, b: Uint8Array): number {
+  const length = Math.min(a.length, b.length);
+  for (let i = 0; i < length; i += 1) {
+    const delta = (a[i] ?? 0) - (b[i] ?? 0);
+    if (delta !== 0) {
+      return delta;
+    }
+  }
+  return a.length - b.length;
 }
 
 function adjustAttributeRuns(doc: NoteDocument, start: number, deleteLength: number, insertLength: number): void {
