@@ -22,6 +22,20 @@ test("renderMarkdownTable escapes markdown punctuation in cell text so it round-
   assert.deepEqual(parseMarkdownTable(rendered), [["*bold*", "plain"]]);
 });
 
+test("renderMarkdownTable keeps wikilink brackets bare, escaping only an alias pipe", () => {
+  // A raw `|` would end the cell, so a piped wikilink renders `[[a\|b]]` -
+  // which is the form Obsidian itself requires inside a table.
+  assert.equal(
+    renderMarkdownTable([
+      ["[[Note]]", "![[img.png]]"],
+      ["[[Note|Alias]]", "plain"],
+    ]),
+    ["| [[Note]] | ![[img.png]] |", "| - | - |", "| [[Note\\|Alias]] | plain |"].join("\n"),
+  );
+  const grid = [["[[Note]]"], ["[[Note|Alias]]"], ["[[a]]\nsecond line"]];
+  assert.deepEqual(parseMarkdownTable(renderMarkdownTable(grid)), grid);
+});
+
 test("renderMarkdownTable throws on an empty grid", () => {
   assert.throws(() => renderMarkdownTable([]), /no rows/);
 });

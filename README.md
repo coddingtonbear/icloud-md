@@ -235,6 +235,16 @@ resolution live.
   edit that adds/removes rows and columns in the same save, are refused
   rather than risking a bad write — split a reorder into a delete push
   followed by an insert push instead.
+- **Obsidian notation survives the trip.** Wikilinks and embeds
+  (`[[Note]]`, `[[Note|alias]]`, `![[img.png|300]]`), callouts
+  (`> [!NOTE] Title`), tags (`#project`), highlights (`==like this==`), and
+  footnotes (`[^1]`) keep their notation in the local file instead of
+  picking up the backslashes plain CommonMark would want
+  (`\[\[Note]]`, `\#project`). Markup that really *is* markdown — a `#`
+  heading, `[a](b)`, a `---` rule — still gets escaped, and every note is
+  re-parsed before the friendlier spelling is kept, so it can never cost
+  fidelity. Inside a table cell an alias pipe is written `[[Note\|alias]]`,
+  the form Obsidian itself requires there.
 - **Local-only YAML frontmatter.** A leading `---` frontmatter block (for
   Obsidian tags, aliases, and the like) is treated as local metadata: it's
   skipped when deriving the note's title (the title is the first line *after*
