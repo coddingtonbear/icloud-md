@@ -19,11 +19,7 @@
       "Bash(node harness/dump-doc.mjs notes cac720fc-9850-4900-a344-8525f1885596 -1)",
       "Bash(node harness/dump-doc.mjs notes cac720fc-9850-4900-a344-8525f1885596 9 10)",
       "Read(//home/acoddington/.local/bin/**)",
-      "Bash(pipx list *)",
-      "Bash(ICLOUD_MD_ITEST=1 npm run test:integration)",
-      "Read(//home/acoddington/.claude/skills/dev-log/**)",
-      "Bash(gh pr *)",
-      "Bash(git -C /home/acoddington/Documents/Projects/icloud-md remote get-url origin)"
+      "Bash(pipx list *)"
     ]
   }
 }
