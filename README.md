@@ -235,6 +235,11 @@ resolution live.
   edit that adds/removes rows and columns in the same save, are refused
   rather than risking a bad write — split a reorder into a delete push
   followed by an insert push instead.
+- **Obsidian `[[wikilinks]]` stay links.** A note that mentions
+  `[[Note]]`, `[[Note|alias]]`, or `![[embed.png]]` keeps its brackets bare
+  in the local file rather than picking up the backslashes CommonMark would
+  otherwise want (`\[\[Note]]`). Inside a table cell an alias pipe is still
+  written `[[Note\|alias]]` — the form Obsidian itself requires there.
 - **Local-only YAML frontmatter.** A leading `---` frontmatter block (for
   Obsidian tags, aliases, and the like) is treated as local metadata: it's
   skipped when deriving the note's title (the title is the first line *after*

@@ -238,13 +238,13 @@ interface StyledText {
 const RAW_URL_PATTERN = /https?:\/\/[A-Za-z0-9./?=&%#+:,;@!$'()-]+/g;
 const ENTITY_SHAPED = /&(?:#|[A-Za-z][A-Za-z0-9]*;)/;
 
-interface RawUrlRange {
+interface RawRange {
   start: number;
   end: number;
 }
 
-function findRawUrlRanges(text: string): RawUrlRange[] {
-  const out: RawUrlRange[] = [];
+function findRawUrlRanges(text: string): RawRange[] {
+  const out: RawRange[] = [];
   for (const match of text.matchAll(RAW_URL_PATTERN)) {
     const end = match.index + match[0].length;
     const before = match.index === 0 ? "" : text[match.index - 1]!;
@@ -263,11 +263,68 @@ function findRawUrlRanges(text: string): RawUrlRange[] {
   return out;
 }
 
+/**
+ * Wikilinks (`[[Note]]`, `[[Note|alias]]`, `![[embed.png]]`) are Obsidian
+ * notation, not markdown - to Apple they are just text, and to CommonMark
+ * they are just text too, since a bracket run only becomes a link when a
+ * matching `[label]: url` definition exists. But `remark-stringify` escapes
+ * every `[` regardless (one *could* pair with a later `](`), so a note that
+ * mentions a wikilink comes back as `\[\[Note]]`: still the same characters,
+ * still round-trip clean, but no longer a link in the reader's vault and a
+ * gratuitous diff on every pull. Emitting the run raw is the same
+ * escape-dodging device the bare-URL rule uses (and `<u>`, and the empty-todo
+ * checkbox): reparsing turns it straight back into the same plain text.
+ *
+ * The run is emitted *verbatim*, so the character set is deliberately narrow
+ * - anything that could open an inline construct, decode as a character
+ * reference, or swallow a character on reparse (`[` `]` `\` `<` `>` `&` `*`
+ * `_` `~` `` ` ``) disqualifies the whole run, which then falls back to
+ * escaped text. A `(` directly after the closing brackets disqualifies it as
+ * well, because `[[a]](b)` reparses as a real link.
+ */
+const RAW_WIKILINK_PATTERN = /!?\[\[[^[\]\n\\<>&*_~`]*\]\]/g;
+
+function findRawWikilinkRanges(text: string): RawRange[] {
+  const out: RawRange[] = [];
+  for (const match of text.matchAll(RAW_WIKILINK_PATTERN)) {
+    const end = match.index + match[0].length;
+    if (text[end] === "(") {
+      continue;
+    }
+    out.push({ start: match.index, end });
+  }
+  return out;
+}
+
+/** Every range in the line that may be written raw, in source order and
+ * non-overlapping (a URL inside a wikilink target, say, is already covered by
+ * the wikilink's own run). */
+function findRawRanges(text: string): RawRange[] {
+  const all = [...findRawUrlRanges(text), ...findRawWikilinkRanges(text)].sort((a, b) => a.start - b.start);
+  const out: RawRange[] = [];
+  for (const range of all) {
+    const previous = out[out.length - 1];
+    if (previous === undefined || range.start >= previous.end) {
+      out.push(range);
+    }
+  }
+  return out;
+}
+
 /** Splits one piece of plain text (starting at `absoluteStart` within its
- * line) into text nodes and raw-html URL nodes, honoring only the ranges
- * that fall entirely inside this piece - a range split across a style
- * boundary renders escaped instead. */
-function textPieces(value: string, absoluteStart: number, rawRanges: readonly RawUrlRange[]): PhrasingContent[] {
+ * line) into text nodes and raw-html nodes, honoring only the ranges that
+ * fall entirely inside this piece - a range split across a style boundary
+ * renders escaped instead. In a table cell (`escapePipes`) a `|` can't ride
+ * along in a raw node - it would end the cell - so the run is broken around
+ * its pipes and they render as text, which `remark-stringify` escapes to
+ * `\|`: exactly the form Obsidian itself requires for a piped wikilink
+ * inside a table. */
+function textPieces(
+  value: string,
+  absoluteStart: number,
+  rawRanges: readonly RawRange[],
+  escapePipes = false,
+): PhrasingContent[] {
   const out: PhrasingContent[] = [];
   let at = 0;
   for (const range of rawRanges) {
@@ -279,7 +336,19 @@ function textPieces(value: string, absoluteStart: number, rawRanges: readonly Ra
     if (start > at) {
       out.push({ type: "text", value: value.slice(at, start) });
     }
-    out.push({ type: "html", value: value.slice(start, end) });
+    const raw = value.slice(start, end);
+    if (escapePipes && raw.includes("|")) {
+      raw.split("|").forEach((part, index) => {
+        if (index > 0) {
+          out.push({ type: "text", value: "|" });
+        }
+        if (part.length > 0) {
+          out.push({ type: "html", value: part });
+        }
+      });
+    } else {
+      out.push({ type: "html", value: raw });
+    }
     at = end;
   }
   if (at === 0) {
@@ -291,11 +360,11 @@ function textPieces(value: string, absoluteStart: number, rawRanges: readonly Ra
   return out;
 }
 
-/** URL-aware plain-text phrasing for single-line contexts where end-of-string
- * is a safe boundary (table cells: what follows is `<br>`, `|` notation, or
- * nothing - none of which an autolink literal can swallow). */
+/** URL- and wikilink-aware plain-text phrasing for single-line contexts where
+ * end-of-string is a safe boundary (table cells: what follows is `<br>`, `|`
+ * notation, or nothing - none of which an autolink literal can swallow). */
 export function textPhrasing(value: string): PhrasingContent[] {
-  return textPieces(value, 0, findRawUrlRanges(value));
+  return textPieces(value, 0, findRawRanges(value), true);
 }
 
 function phrasingFromParagraph(paragraph: FormatParagraph): PhrasingContent[] {
@@ -308,7 +377,7 @@ function phrasingFromParagraph(paragraph: FormatParagraph): PhrasingContent[] {
     }
     at += span.length;
   }
-  return buildPhrasing(pieces, ["link", "bold", "italic", "strikethrough", "underline"], findRawUrlRanges(paragraph.text));
+  return buildPhrasing(pieces, ["link", "bold", "italic", "strikethrough", "underline"], findRawRanges(paragraph.text));
 }
 
 type InlineDimension = "link" | "bold" | "italic" | "strikethrough" | "underline";
@@ -341,7 +410,7 @@ function dimensionValue(span: InlineSpan, dimension: InlineDimension): string | 
 function buildPhrasing(
   pieces: readonly StyledText[],
   dimensions: readonly InlineDimension[],
-  rawRanges: readonly RawUrlRange[],
+  rawRanges: readonly RawRange[],
 ): PhrasingContent[] {
   let dimension: InlineDimension | undefined;
   let fewestGroups = Number.POSITIVE_INFINITY;
