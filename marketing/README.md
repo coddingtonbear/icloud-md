@@ -1,5 +1,7 @@
 # Marketing site starting points
 
+> **Status:** `terminal/` was chosen as the project's site. `.github/workflows/pages.yml` deploys it to GitHub Pages (https://coddingtonbear.github.io/icloud-md/) on pushes to main that touch it. `household/` and `trust/` remain as reference prototypes.
+
 Three prototype landing pages for icloud-md — **inspiration/example material, not production sites**. Each explores a genuinely different positioning, grounded in a survey of landing pages for comparable nerd-oriented tools (obsidian.md, syncthing.net, rclone.org, jrnl.sh, zettlr.com, bear.app, atuin.sh, charm.sh, fzf). Every page is a single self-contained HTML file (no external assets, system font stacks) — open it in a browser, or serve the directory with anything.
 
 Live previews (private Claude artifacts, shareable from each page's menu):
