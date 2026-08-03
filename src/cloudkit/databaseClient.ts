@@ -703,7 +703,7 @@ export async function createNoteRecord(
   fields: Record<string, { value: unknown }>,
   extras: CreateNoteExtras = {},
 ): Promise<NoteUpdateResult> {
-  return createRecord("createNoteRecord", "Note", session, ckDatabaseHost, dsid, database, zoneID, recordName, fields, extras);
+  return createZoneRecord("Note", session, ckDatabaseHost, dsid, database, zoneID, recordName, fields, extras);
 }
 
 /**
@@ -724,12 +724,19 @@ export async function createFolderRecord(
   fields: Record<string, { value: unknown }>,
   extras: CreateNoteExtras = {},
 ): Promise<NoteUpdateResult> {
-  return createRecord("createFolderRecord", "Folder", session, ckDatabaseHost, dsid, database, zoneID, recordName, fields, extras);
+  return createZoneRecord("Folder", session, ckDatabaseHost, dsid, database, zoneID, recordName, fields, extras);
 }
 
-/** The shared `records/modify` create both of the above submit. */
-async function createRecord(
-  label: string,
+/**
+ * The `records/modify` create the two wrappers above submit, by record type.
+ *
+ * Exported because record types beyond Note and Folder do get created against
+ * a real zone - `Attachment`, for the live suite's planted table fixture
+ * (`integration/plantTable.ts`). Keeping that on this one code path is the
+ * point: the harness writes through the same request builder, logging and
+ * response parsing as production rather than a second, unproven copy of them.
+ */
+export async function createZoneRecord(
   recordType: string,
   session: IcloudSession,
   ckDatabaseHost: string,
@@ -738,7 +745,7 @@ async function createRecord(
   zoneID: CloudKitZoneID,
   recordName: string,
   fields: Record<string, { value: unknown }>,
-  extras: CreateNoteExtras,
+  extras: CreateNoteExtras = {},
 ): Promise<NoteUpdateResult> {
   const record: Record<string, unknown> = { recordName, recordType, fields };
   if (extras.parentRecordName !== undefined) {
@@ -747,7 +754,8 @@ async function createRecord(
   if (extras.createShortGUID === true) {
     record.createShortGUID = true;
   }
-  const body = await postDatabase(`${label}:records/modify`, session, ckDatabaseHost, dsid, database, "records/modify", {
+  const label = `create${recordType}Record:records/modify`;
+  const body = await postDatabase(label, session, ckDatabaseHost, dsid, database, "records/modify", {
     operations: [{ operationType: "create", record }],
     zoneID,
   });

@@ -10,6 +10,7 @@
 import { rm } from "node:fs/promises";
 import path from "node:path";
 import { appleIdForDsid, loadConfig, type ItestConfig } from "./config.js";
+import { runCli } from "./cli.js";
 import { assertFolderSafe, newRunId, runPrefix, teardownRun, type TeardownReport } from "./containment.js";
 import { NotesWebOracle } from "./webOracle.js";
 import { Vault, type VaultOptions } from "./vault.js";
@@ -20,6 +21,9 @@ export class RunContext {
   private primaryVault: Vault | undefined;
   /** Records already in the test folder when this run began - never ours to delete. */
   private baseline: ReadonlySet<string> = new Set();
+  /** Non-Note records this run created, to remove once teardown has taken the
+   * notes; see `disposeAfterTeardown`. */
+  private readonly extraRecords: string[] = [];
 
   private constructor(
     readonly config: ItestConfig,
@@ -88,6 +92,23 @@ export class RunContext {
   }
 
   /**
+   * Registers a non-Note record for removal at the end of the run.
+   *
+   * Containment's two-key rule is built on notes and folders, which is
+   * everything a *push* can create. A test that reaches CloudKit directly can
+   * create records outside that walk - the live table fixture's `Attachment`
+   * record is the case in point - and those would otherwise accumulate in the
+   * account, invisible to both the pre-flight guard and the sweeper.
+   *
+   * They go after the notes: `forceDelete` is refused while a live record
+   * still references the target, and the note referencing this one is a
+   * fixture teardown has just purged.
+   */
+  disposeAfterTeardown(recordName: string): void {
+    this.extraRecords.push(recordName);
+  }
+
+  /**
    * Deletes this run's fixtures and disposes of local state. Reports rather
    * than throws on a failed delete: a teardown that aborts halfway leaves
    * more debris than one that carries on and says what it could not remove.
@@ -100,6 +121,26 @@ export class RunContext {
     let report: TeardownReport = { deleted: [], failed: [], skippedOtherRuns: [] };
     if (vaultDir !== undefined) {
       report = await teardownRun(vaultDir, this.config.folder, this.runId, this.baseline);
+
+      // Registered non-Note records go after the notes, and before the
+      // summary: a count printed above them would report less than the run
+      // actually removed.
+      for (const recordName of this.extraRecords) {
+        try {
+          await runCli(["object", "delete", recordName, vaultDir]);
+          report.deleted.push({ recordName, title: "(non-note record)" });
+        } catch (error) {
+          // Reported, not thrown, for the same reason `teardownRun` reports:
+          // a teardown that aborts halfway leaves more debris than one that
+          // carries on and says what it could not remove.
+          report.failed.push({
+            recordName,
+            title: "(non-note record)",
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
       console.error(
         `\n=== teardown ${this.runId}: deleted ${report.deleted.length}, failed ${report.failed.length}, ` +
           `left ${report.skippedOtherRuns.length} from other runs ===`,

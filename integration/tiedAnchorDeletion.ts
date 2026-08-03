@@ -40,16 +40,9 @@
  */
 
 import { Buffer } from "node:buffer";
-import { resolveFolderAccount } from "../src/auth/folderAuth.js";
-import {
-  lookupRecords,
-  noteZone,
-  updateRecords,
-  type CloudKitRecord,
-  type RecordUpdateResult,
-} from "../src/cloudkit/databaseClient.js";
-import { readCloneState } from "../src/notes/cloneState.js";
+import { lookupRecords, updateRecords, type CloudKitRecord, type RecordUpdateResult } from "../src/cloudkit/databaseClient.js";
 import { buildNoteUpdateFields } from "../src/notes/encodeNoteRecord.js";
+import { resolveHarnessAccount } from "./harnessAccount.js";
 import {
   applyTextEdit,
   computeSplices,
@@ -213,37 +206,11 @@ export interface PlantedTiedAnchorDeletion extends TiedAnchorDeletion {
  * different zone, and this is a test fixture, not a general writer.
  */
 export async function plantTiedAnchorDeletion(options: PlantTiedAnchorDeletionOptions): Promise<PlantedTiedAnchorDeletion> {
-  const state = await readCloneState(options.vaultDir);
-  if (!state) {
-    throw new Error(`${options.vaultDir} is not a clone - cannot resolve an account to write through`);
-  }
-  if (state.replicaId === undefined) {
-    throw new Error("The clone has no replicaId yet - push something through it before planting a corrupt document");
-  }
-  const replicaId = new Uint8Array(Buffer.from(state.replicaId, "base64"));
+  // Resolved in-process, and deliberately without the ability to log in
+  // interactively - see `harnessAccount.ts` for why that matters mid-run.
+  const { session, ckdatabasewsUrl, dsid, zone, replicaId } = await resolveHarnessAccount(options.vaultDir);
 
-  // Resolve the account the way push does, with one deliberate difference:
-  // this helper may never open a sign-in window. It runs inside the test
-  // runner rather than in a CLI subprocess, so there is nobody to complete
-  // one and it would simply block until something closed it. A lapsed
-  // session should fail this test loudly instead. (The subprocess side of
-  // the same rule is `clone --non-interactive`, which `vault.ts` passes.)
-  const auth = await resolveFolderAccount(options.vaultDir, state.account, {
-    performBrowserLogin: () => {
-      throw new Error(
-        "The saved sign-in has lapsed. Re-authenticate before running the live suite " +
-          "(the integration harness must never open a sign-in window mid-run).",
-      );
-    },
-  });
-  if (!auth.ckdatabasewsUrl) {
-    throw new Error("The account resolved without a CloudKit database host");
-  }
-  const zone = noteZone(undefined);
-
-  const [record] = await lookupRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, zone.database, zone.zoneID, [
-    options.noteId,
-  ]);
+  const [record] = await lookupRecords(session, ckdatabasewsUrl, dsid, zone.database, zone.zoneID, [options.noteId]);
   if (!record) {
     throw new Error(`Note record ${options.noteId} was not found`);
   }
@@ -270,7 +237,7 @@ export async function plantTiedAnchorDeletion(options: PlantTiedAnchorDeletionOp
   const corrupted = buildTiedAnchorDeletion(raw, newText, replicaId);
 
   const fields = buildNoteUpdateFields(record, compressNoteDocument(corrupted.raw).toString("base64"), newText, Date.now());
-  const [result] = await updateRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, zone.database, zone.zoneID, [
+  const [result] = await updateRecords(session, ckdatabasewsUrl, dsid, zone.database, zone.zoneID, [
     { recordName: options.noteId, recordType: "Note", recordChangeTag: changeTag, fields },
   ]);
   if (!result) {

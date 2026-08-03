@@ -13,8 +13,16 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { RunContext } from "./harness.js";
+import { plantTableOnNote } from "./plantTable.js";
+import { TABLE_REV_BASELINE } from "../src/notes/realFixtures.js";
 import { plantTiedAnchorDeletion } from "./tiedAnchorDeletion.js";
-import { readFrontmatterField, stripFrontmatter, type Vault } from "./vault.js";
+import {
+  parseMarkdownTable,
+  readFrontmatterField,
+  replaceMarkdownTable,
+  stripFrontmatter,
+  type Vault,
+} from "./vault.js";
 
 const enabled = process.env.ICLOUD_MD_ITEST === "1";
 
@@ -581,3 +589,168 @@ describe(
     });
   },
 );
+
+/**
+ * Table coverage.
+ *
+ * The table write path is the only part of `push` with two live corruption
+ * incidents behind it (the forgotten U+FFFC mirror, and the Stage-1 doubled
+ * cells) and, until this block, the only significant part with no live
+ * evidence at all: nothing in the harness could bring a table into existence,
+ * because `push` only edits tables that already exist and the web oracle is
+ * read-only. `plantTable.ts` closes that by copying a real captured Apple
+ * table onto a fresh note; see its header for why that isn't circular.
+ *
+ * The order below is deliberate. Nothing asserts anything about an *edit*
+ * until Apple's own client has been shown to render the planted table with
+ * the cells it should have - if the fixture weren't a real table, every
+ * later assertion would be about a fiction.
+ *
+ * Each edit is its own push, so the table accumulates genuine revision
+ * history the way a user's would, and each is checked against Apple's client
+ * rather than only against our own decode of our own bytes.
+ */
+describe("tables", { concurrency: 1, skip: enabled ? false : "set ICLOUD_MD_ITEST=1 to run" }, () => {
+  let run: RunContext;
+  let vault: Vault;
+  let noteId: string;
+  let attachmentId: string;
+  /** The grid every oracle should currently agree on. */
+  let expected: string[][];
+
+  const fileName = "table-canary.md";
+
+  /** Makes one edit the way a user would - by rewriting the table in the file. */
+  async function pushGrid(next: string[][], what: string): Promise<void> {
+    await vault.writeNote(fileName, replaceMarkdownTable(await vault.readNote(fileName), next));
+
+    const pushed = await vault.push();
+    const entry = pushed.json.entries.find((candidate) => candidate.file.endsWith(fileName));
+    assert.ok(entry !== undefined, `${what}: expected a push entry for ${fileName}, got ${JSON.stringify(pushed.json.entries)}`);
+    assert.equal(entry.resolution, "ready", `${what} was not accepted: ${entry.reason}`);
+    assert.equal(entry.outcome?.succeeded, true, `${what} failed: ${entry.outcome?.message}`);
+
+    await vault.pull();
+    assert.deepEqual(parseMarkdownTable(await vault.readNote(fileName)), next, `${what}: the vault should hold the edited grid`);
+    assert.equal((await vault.status()).exitCode, 0, `the vault should settle after ${what}`);
+    expected = next;
+  }
+
+  /** The independent check: the grid Apple's own client decoded, from its own model. */
+  async function assertWebShows(what: string): Promise<void> {
+    const web = await (await run.oracle()).readNote(noteId);
+    assert.deepEqual(
+      web.tables[attachmentId],
+      expected,
+      `Apple's client should show ${what}. Tables it holds: ${JSON.stringify(web.tables)}`,
+    );
+  }
+
+  before(async () => {
+    run = await RunContext.begin();
+    vault = run.primary;
+  });
+
+  after(async () => {
+    if (run !== undefined) {
+      await run.end();
+    }
+  });
+
+  it("plants a real captured Apple table on a pushed note", async () => {
+    const title = run.title("table canary");
+    await vault.writeNote(fileName, [`# ${title}`, "", "prose above the table", ""].join("\n"));
+    assert.equal((await vault.push()).exitCode, 0);
+    noteId = await vault.noteId(fileName);
+
+    // The table document and the Attachment record's field set are both
+    // Apple's, verbatim; only the note's U+FFFC wiring is ours.
+    const planted = await plantTableOnNote({ vaultDir: vault.dir, noteId, tableMergeableDataBase64: TABLE_REV_BASELINE });
+    attachmentId = planted.attachmentId;
+    // Containment's walk covers notes and folders - everything push can make.
+    // An Attachment record is neither, so the run has to be told about it.
+    run.disposeAfterTeardown(attachmentId);
+
+    assert.equal(planted.attachmentResult.ok, true, `CloudKit should accept the attachment: ${JSON.stringify(planted.attachmentResult)}`);
+    assert.equal(planted.noteResult.ok, true, `CloudKit should accept the note body: ${JSON.stringify(planted.noteResult)}`);
+    expected = planted.grid;
+
+    // A pull must now render the table into the file - and, just as
+    // importantly, leave the vault settled. A planted fixture that reads back
+    // as a pending change would make every edit below start from a lie.
+    await vault.pull();
+    assert.deepEqual(parseMarkdownTable(await vault.readNote(fileName)), expected, "the pulled file should hold the planted grid");
+    assert.equal((await vault.status()).exitCode, 0, "a freshly planted table must not read back as a local change");
+  });
+
+  it("shows the planted table in Apple's own client - the gate for everything below", async () => {
+    // Until this passes, nothing below is evidence: it is what establishes
+    // that the fixture is a table by Apple's definition and not merely by
+    // ours. Apple serialises a table as real <table> markup on copy, which is
+    // why the oracle can read a grid here where it cannot read the body.
+    await assertWebShows("the planted table");
+  });
+
+  it("pushes a cell text edit", async () => {
+    const next = expected.map((row) => [...row]);
+    next[1]![1] = "R2C1-edited";
+    await pushGrid(next, "a cell text edit");
+    await assertWebShows("the edited cell");
+  });
+
+  it("pushes a cell text deletion", async () => {
+    // Emptying a cell rather than shortening one: a deletion that removes a
+    // cell's entire run is the shape both past corruption incidents involved.
+    const next = expected.map((row) => [...row]);
+    next[2]![2] = "";
+    await pushGrid(next, "a cell text deletion");
+    await assertWebShows("the emptied cell");
+  });
+
+  it("pushes a row insert", async () => {
+    const next = [...expected.map((row) => [...row]), ["R9C0", "R9C1", "R9C2", "R9C3", "R9C4"]];
+    await pushGrid(next, "a row insert");
+    await assertWebShows("the inserted row");
+  });
+
+  it("pushes a row delete", async () => {
+    // A row with real content and edit history, not the one just added.
+    const next = expected.filter((_, index) => index !== 1).map((row) => [...row]);
+    await pushGrid(next, "a row delete");
+    await assertWebShows("the table without its deleted row");
+  });
+
+  it("pushes a column insert", async () => {
+    const next = expected.map((row, index) => [...row, `C9R${index}`]);
+    await pushGrid(next, "a column insert");
+    await assertWebShows("the inserted column");
+  });
+
+  it("pushes a column delete", async () => {
+    const next = expected.map((row) => row.filter((_, index) => index !== 1));
+    await pushGrid(next, "a column delete");
+    await assertWebShows("the table without its deleted column");
+  });
+
+  // A table merge canary belongs here - the note-body suite has one, and
+  // "fine cold, wrong against a held copy" is the shape both past table
+  // corruptions had. It is deliberately absent, because the harness cannot
+  // currently drive the merge: `forceReloadNote` reloads the *Note* record,
+  // and a table's bytes live on a separate `Attachment` record that the
+  // reload never refetches. Measured live (run 67bbc1): after a pushed cell
+  // edit the server held "R0C0-merged" while the open client's
+  // `icTableManager` still held "R0C0", indefinitely. Finding a path that
+  // makes the client re-read an attachment is its own task; a canary that
+  // passed without observing a merge would be worse than none.
+
+  it("reproduces the whole edited table in a fresh clone", async () => {
+    // The second oracle. A fresh clone has none of this run's local state, so
+    // it rebuilds the table purely from what the account now holds - the check
+    // that six successive edits left a coherent document behind, not just one
+    // that the vault that wrote it happens to agree with.
+    const second = await run.vault("table-check");
+    const rebuilt = await second.findFileByNoteId(noteId);
+    assert.ok(rebuilt !== undefined, `a fresh clone should contain the table note (${noteId})`);
+    assert.deepEqual(parseMarkdownTable(await second.readVaultFile(rebuilt)), expected, "a fresh clone should rebuild the same table");
+  });
+});
