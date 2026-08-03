@@ -61,6 +61,20 @@ export interface TopotextClockSource {
    * `noteDocument.ts` applies to note bodies (PR #9) - it is one shared
    * code path in Apple's client (`TTMergeableAttributedString`), so cells
    * and ordering mirrors obey it too.
+   *
+   * Both sides of that `max` are now checked against real Apple saves of a
+   * real table (`realFixtures.ts`'s `TABLE_RESTYLE_REVISIONS`, captured
+   * 2026-08-02): deleting a never-restyled run stamps 8 = max(0 + 8, floor
+   * 1), and deleting a *bolded* one stamps 17 = max(9 + 8, floor 10) - the
+   * old-anchor side, which nothing had exercised before that capture. It
+   * also settles that table cells carry style anchors exactly as note
+   * bodies do: bolding a cell restamps its live run at max(old + 1, floor).
+   *
+   * Apple has one other branch here, which this method deliberately does not
+   * model: a run whose charID this replica minted *in the same save* is
+   * stamped `{us, 0}` and leaves the style clock alone. Our writes apply one
+   * splice per cell per save, so no edit can create and tombstone a run at
+   * once - `tableEdit.test.ts` pins that across every supported edit type.
    */
   takeTombstoneAnchor(previousClock: number): number;
 }

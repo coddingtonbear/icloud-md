@@ -46,7 +46,9 @@
  *    deletion restamp their tombstones by Apple's one shared rule -
  *    `max(old style clock + 8, this save's style-clock floor)`, then the
  *    counter ends past it (`generateIdsForLocalChanges`; the same rule
- *    `noteDocument.ts` applies to note bodies). This is not cosmetic:
+ *    `noteDocument.ts` applies to note bodies, and both sides of the `max`
+ *    are checked against Apple's own saves by `TABLE_RESTYLE_REVISIONS`).
+ *    This is not cosmetic:
  *    `mergeWithString_mergeTimestamps` adopts a remote tombstone only when
  *    its style timestamp compares *strictly greater*, so a tombstone left
  *    at its original anchor is discarded by every other client (audit,
