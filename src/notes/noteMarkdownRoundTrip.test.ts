@@ -248,6 +248,80 @@ test("bare URLs render unescaped and round-trip as plain text", () => {
   assert.equal(assertRoundTrips([p("body", "(https://example.com)")]), "(https://example.com)");
 });
 
+test("ordinary words keep the punctuation GFM autolink literals make ambiguous", () => {
+  // The reported case: `remark-stringify` escapes a `.` after any `w`, so
+  // only two of these four dots were ever ambiguous, and neither was a link.
+  assert.equal(assertRoundTrips([p("body", "Www.VJW.digital.go.jp")]), "Www.VJW.digital.go.jp");
+
+  // The same escape lands in prose that has nothing to do with links.
+  assert.equal(assertRoundTrips([p("body", "Edit the flow.ts file")]), "Edit the flow.ts file");
+  assert.equal(assertRoundTrips([p("body", "call window.open() now")]), "call window.open() now");
+  assert.equal(assertRoundTrips([p("body", "a new.txt file")]), "a new.txt file");
+  assert.equal(assertRoundTrips([p("body", "W.W.")]), "W.W.");
+  // ... and the `@` rule does the same to an email address.
+  assert.equal(assertRoundTrips([p("body", "email me@example.com please")]), "email me@example.com please");
+
+  // A real www autolink is written bare too: reparsing makes it an autolink
+  // literal, which is not a link span, so the projection is unchanged.
+  assert.equal(assertRoundTrips([p("body", "See www.example.com for more")]), "See www.example.com for more");
+
+  // Every block kind a note can put text in.
+  assert.equal(assertRoundTrips([p("heading", "See www.example.com")]), "## See www.example.com");
+  assert.equal(assertRoundTrips([p("bulletList", "see flow.ts")]), "- see flow.ts");
+  assert.equal(assertRoundTrips([p("todoList", "read flow.ts", { done: false })]), "- [ ] read flow.ts");
+  assert.equal(assertRoundTrips([p("body", "see flow.ts", { blockQuoteLevel: 1 })]), "> see flow.ts");
+
+  // Wholly inside one styled span, and alongside Obsidian notation.
+  assert.equal(
+    assertRoundTrips([
+      {
+        ...p("body", "see flow.ts now"),
+        spans: [
+          { ...PLAIN_STYLE, length: 4 },
+          { ...PLAIN_STYLE, bold: true, length: 7 },
+          { ...PLAIN_STYLE, length: 4 },
+        ],
+      },
+    ]),
+    "see **flow.ts** now",
+  );
+  assert.equal(assertRoundTrips([p("body", "[[Note]] and flow.ts")]), "[[Note]] and flow.ts");
+  // A line-leading tag and the token starting at the same offset are one run.
+  assert.equal(assertRoundTrips([p("body", "#new.stuff")]), "#new.stuff");
+
+  // An Apple link span still renders as a real markdown link.
+  assert.equal(
+    assertRoundTrips([
+      { ...p("body", "www.example.com"), spans: [{ ...PLAIN_STYLE, link: "http://www.example.com", length: 15 }] },
+    ]),
+    "[www.example.com](http://www.example.com)",
+  );
+});
+
+test("tokens that aren't safe to write raw keep their escapes", () => {
+  // Emphasis-active characters and entity-shaped runs can't ride along in a
+  // raw node, so the whole token falls back to escaped text.
+  assert.equal(assertRoundTrips([p("body", "www.exa_mple.com")]), "www\\.exa\\_mple.com");
+  assert.equal(assertRoundTrips([p("body", "www.exa*mple*.com")]), "www\\.exa\\*mple\\*.com");
+  assert.equal(assertRoundTrips([p("body", "www.example.com/?a&amp;b")]), "www\\.example.com/?a\\&amp;b");
+  // Same boundary rule as bare URLs: what follows a raw run must be
+  // whitespace or the end of the line, because an autolink literal would
+  // swallow it on reparse.
+  assert.equal(assertRoundTrips([p("body", 'say "www.example.com" ok')]), 'say "www\\.example.com" ok');
+  // Real markdown still gets its escapes, even carrying a token.
+  assert.equal(assertRoundTrips([p("body", "# heading www.example.com")]), "\\# heading www.example.com");
+});
+
+test("each unescaping rule stands on its own when the other one fails", () => {
+  // `[ ]` written bare in a bullet would become a checkbox, so the Obsidian
+  // spelling is rejected for this note - but that must not cost the note the
+  // unrelated `flow.ts`, which is why the spellings are tried in combination.
+  assert.equal(assertRoundTrips([p("bulletList", "[ ]"), p("body", "flow.ts")]), "- \\[ ]\nflow.ts");
+  // The mirror image: the token here can't be written raw (`_`), and the
+  // wikilink still keeps its brackets.
+  assert.equal(assertRoundTrips([p("body", "[[Note]] and www.exa_mple.com")]), "[[Note]] and www\\.exa\\_mple.com");
+});
+
 test("Obsidian wikilinks keep their bare brackets and round-trip as plain text", () => {
   const rendered = assertRoundTrips([
     p("body", "Between Osaka and Kyoto, do not take a [[Shinkansen]] -- it's close enough for a normal train."),

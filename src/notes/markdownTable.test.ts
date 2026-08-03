@@ -215,3 +215,24 @@ test("renderMarkdownTable leaves safe bare URLs unescaped in cells", () => {
   assert.doesNotMatch(rendered, /https\\:/);
   assert.deepEqual(parseMarkdownTable(rendered), [["link", "https://maps.app.goo.gl/abc123"]]);
 });
+
+test("renderMarkdownTable leaves autolink-ambiguous punctuation unescaped in cells", () => {
+  // Same rule the note renderer applies (`renderNoteMarkdown`'s
+  // `findAutolinkEscapeRanges`): a `.` after a `w` and an `@` between word
+  // characters are escaped by position, not by outcome.
+  const grid = [
+    ["file", "host", "who"],
+    ["flow.ts", "Www.VJW.digital.go.jp", "me@example.com"],
+  ];
+  const rendered = renderMarkdownTable(grid);
+  assert.doesNotMatch(rendered, /\\[.@]/);
+  assert.deepEqual(parseMarkdownTable(rendered), grid);
+
+  // A cell that can't be written raw keeps its escapes, and the cell sharing
+  // its table keeps its Obsidian spelling.
+  const mixed = [["a"], ["[[N|x]] flow.ts"], ["www.exa_mple.com"]];
+  const renderedMixed = renderMarkdownTable(mixed);
+  assert.match(renderedMixed, /\[\[N\\\|x]] flow\.ts/);
+  assert.match(renderedMixed, /www\\\.exa\\_mple\.com/);
+  assert.deepEqual(parseMarkdownTable(renderedMixed), mixed);
+});

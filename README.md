@@ -245,6 +245,12 @@ resolution live.
   re-parsed before the friendlier spelling is kept, so it can never cost
   fidelity. Inside a table cell an alias pipe is written `[[Note\|alias]]`,
   the form Obsidian itself requires there.
+- **Ordinary words keep their punctuation.** Because GFM turns `www.…`,
+  `https://…` and `name@host` into links on sight, plain CommonMark escapes
+  the punctuation that *might* start one — anywhere, in any word. That gave
+  files `flow\.ts`, `window\.open()`, `me\@example.com`, and (the case that
+  prompted the fix) `Www\.VJW\.digital.go.jp`. Those are written as typed
+  now, under the same re-parse check as everything above.
 - **Local-only YAML frontmatter.** A leading `---` frontmatter block (for
   Obsidian tags, aliases, and the like) is treated as local metadata: it's
   skipped when deriving the note's title (the title is the first line *after*

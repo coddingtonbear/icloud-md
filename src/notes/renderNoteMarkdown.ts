@@ -23,11 +23,12 @@
  *
  * The one place this module overrides `remark-stringify`'s escaping is where
  * the escape would be *correct markdown but wrong for the reader*: bare URLs,
- * and the Obsidian notation a vault is full of (see `findObsidianRawRanges`).
- * Those are emitted as raw `html` nodes, and the result is re-parsed here
- * before it is kept - `renderNoteMarkdown` falls back to plain
- * `remark-stringify` escaping for the whole note otherwise, so the friendlier
- * spelling can never cost fidelity.
+ * the punctuation GFM autolink literals make ambiguous (see
+ * `findAutolinkEscapeRanges`), and the Obsidian notation a vault is full of
+ * (see `findObsidianRawRanges`). Those are emitted as raw `html` nodes, and
+ * the result is re-parsed here before it is kept - `renderNoteMarkdown` falls
+ * back to plain `remark-stringify` escaping for the whole note otherwise, so
+ * the friendlier spelling can never cost fidelity.
  */
 
 import type {
@@ -66,20 +67,61 @@ const HEADING_DEPTHS: Partial<Record<ParagraphKind, 1 | 2 | 3>> = {
 };
 
 /**
- * Renders the note, preferring the Obsidian-friendly spelling (see
- * `findObsidianRawRanges`) but only when it is *provably* the same document.
+ * Which of the friendlier-but-optional unescaping rules a render pass may
+ * use. Bare URLs (`findRawUrlRanges`) are not in here: they are unconditional,
+ * because they are what this renderer emitted before any of this existed.
+ */
+export interface RawSpelling {
+  /** Obsidian's own notation - see `findObsidianRawRanges`. */
+  obsidian: boolean;
+  /** Punctuation escaped only against GFM autolink literals - see
+   * `findAutolinkEscapeRanges`. */
+  autolink: boolean;
+}
+
+/** No optional rule at all: the escaping `remark-stringify` chose on its
+ * own, and the fallback every caller ends at. */
+export const CONSERVATIVE_SPELLING: RawSpelling = { obsidian: false, autolink: false };
+
+/**
+ * The spellings worth *trying* for these lines, nicest first: only the rules
+ * that would actually change something, and each combination of them, so a
+ * line that defeats one rule doesn't cost the reader the other. The
+ * conservative spelling is the caller's fallback and is not listed.
+ */
+export function spellingCandidates(lines: Iterable<string>): RawSpelling[] {
+  let obsidian = false;
+  let autolink = false;
+  for (const line of lines) {
+    obsidian ||= findObsidianRawRanges(line).length > 0;
+    autolink ||= findAutolinkEscapeRanges(line).length > 0;
+  }
+  const candidates: RawSpelling[] = [
+    { obsidian: true, autolink: true },
+    { obsidian: true, autolink: false },
+    { obsidian: false, autolink: true },
+  ];
+  return candidates.filter(
+    (candidate) => (!candidate.obsidian || obsidian) && (!candidate.autolink || autolink) && (candidate.obsidian || candidate.autolink),
+  );
+}
+
+/**
+ * Renders the note, preferring the friendliest spelling (see
+ * `spellingCandidates`) that is *provably* the same document.
  *
  * The unescaping rules below are read off CommonMark's own construct
  * definitions, but reading a spec is not the same as being right, and the
  * cost of being wrong would be a note that stops round-tripping - which
  * `classifyNoteRecord` turns into a read-only note. So the preference is
  * checked rather than trusted: render it, parse it back, and keep it only if
- * the projection survives exactly. Anything else falls back to the escaping
- * `remark-stringify` chose on its own, which is what this renderer emitted
- * before Obsidian markup was considered at all.
+ * the projection survives exactly. Anything else falls back to the next
+ * spelling down, and ultimately to the escaping `remark-stringify` chose on
+ * its own, which is what this renderer emitted before any friendlier spelling
+ * was considered at all.
  *
- * That makes the whole feature a strict improvement by construction: the
- * Obsidian spelling can never be *worse* than the conservative one, only
+ * That makes the whole feature a strict improvement by construction: a
+ * friendlier spelling can never be *worse* than the conservative one, only
  * equal or nicer to read. (When even the conservative rendering fails to
  * round-trip, the note is refused upstream and this output is discarded, so
  * the fallback costs nothing there either.)
@@ -88,11 +130,13 @@ export function renderNoteMarkdown(rawParagraphs: readonly FormatParagraph[]): s
   // Trailing whitespace is outside the projection (`trimTrailingWhitespace`);
   // rendering it would need `&#x20;` references to survive reparsing.
   const paragraphs = rawParagraphs.map(trimTrailingWhitespace);
-  if (!paragraphs.some((paragraph) => findObsidianRawRanges(paragraph.text).length > 0)) {
-    return renderLines(paragraphs, false);
+  for (const spelling of spellingCandidates(paragraphs.map((paragraph) => paragraph.text))) {
+    const rendered = renderLines(paragraphs, spelling);
+    if (projectionSurvives(paragraphs, rendered)) {
+      return rendered;
+    }
   }
-  const obsidian = renderLines(paragraphs, true);
-  return projectionSurvives(paragraphs, obsidian) ? obsidian : renderLines(paragraphs, false);
+  return renderLines(paragraphs, CONSERVATIVE_SPELLING);
 }
 
 /** Whether re-parsing `rendered` reproduces `paragraphs` exactly - the same
@@ -107,7 +151,7 @@ function projectionSurvives(paragraphs: readonly FormatParagraph[], rendered: st
   );
 }
 
-function renderLines(paragraphs: readonly FormatParagraph[], obsidian: boolean): string {
+function renderLines(paragraphs: readonly FormatParagraph[], spelling: RawSpelling): string {
   const lines: string[] = [];
   let i = 0;
   while (i < paragraphs.length) {
@@ -130,7 +174,7 @@ function renderLines(paragraphs: readonly FormatParagraph[], obsidian: boolean):
       while (end < paragraphs.length && isListParagraph(paragraphs[end]!) && paragraphs[end]!.blockQuoteLevel === bq) {
         end += 1;
       }
-      for (const list of buildListNodes(paragraphs.slice(i, end), obsidian)) {
+      for (const list of buildListNodes(paragraphs.slice(i, end), spelling)) {
         pushBlockLines(lines, list, bq);
       }
       i = end;
@@ -139,7 +183,7 @@ function renderLines(paragraphs: readonly FormatParagraph[], obsidian: boolean):
 
     const depth = HEADING_DEPTHS[paragraph.kind];
     if (depth !== undefined) {
-      const heading: Heading = { type: "heading", depth, children: phrasingFromParagraph(paragraph, obsidian) };
+      const heading: Heading = { type: "heading", depth, children: phrasingFromParagraph(paragraph, spelling) };
       pushBlockLines(lines, heading, bq);
       i += 1;
       continue;
@@ -151,7 +195,7 @@ function renderLines(paragraphs: readonly FormatParagraph[], obsidian: boolean):
     if (paragraph.text.length === 0) {
       lines.push(bq === 0 ? "" : ">".repeat(bq));
     } else {
-      const body: Paragraph = { type: "paragraph", children: phrasingFromParagraph(paragraph, obsidian) };
+      const body: Paragraph = { type: "paragraph", children: phrasingFromParagraph(paragraph, spelling) };
       pushBlockLines(lines, body, bq);
     }
     i += 1;
@@ -198,7 +242,7 @@ function pushBlockLines(lines: string[], node: BlockContent, blockQuoteLevel: nu
  * as the structure allows and is caught by the round-trip gate (Apple's own
  * editors only indent one step at a time).
  */
-function buildListNodes(paragraphs: readonly FormatParagraph[], obsidian: boolean): List[] {
+function buildListNodes(paragraphs: readonly FormatParagraph[], spelling: RawSpelling): List[] {
   const result: List[] = [];
   const stack: { list: List; indent: number }[] = [];
 
@@ -247,7 +291,7 @@ function buildListNodes(paragraphs: readonly FormatParagraph[], obsidian: boolea
           type: "paragraph",
           children: emptyTodo
             ? [{ type: "html", value: paragraph.done === true ? "[x]" : "[ ]" }]
-            : phrasingFromParagraph(paragraph, obsidian),
+            : phrasingFromParagraph(paragraph, spelling),
         },
       ],
     };
@@ -284,7 +328,11 @@ interface StyledText {
  * adjacent text node needed (`https://x` + `\_B` would reparse with a
  * literal backslash inside the URL).
  */
-const RAW_URL_PATTERN = /https?:\/\/[A-Za-z0-9./?=&%#+:,;@!$'()-]+/g;
+/** The characters a raw token may be made of: none of them can open an
+ * inline construct, and (with `ENTITY_SHAPED` below) none can decode as a
+ * character reference. */
+const RAW_TOKEN_CLASS = "[A-Za-z0-9./?=&%#+:,;@!$'()-]";
+const RAW_URL_PATTERN = new RegExp(`https?:\\/\\/${RAW_TOKEN_CLASS}+`, "g");
 const ENTITY_SHAPED = /&(?:#|[A-Za-z][A-Za-z0-9]*;)/;
 
 interface RawRange {
@@ -292,9 +340,10 @@ interface RawRange {
   end: number;
 }
 
-function findRawUrlRanges(text: string): RawRange[] {
+/** The shared safety test for emitting `text.slice(start, end)` raw. */
+function rawRangesFor(text: string, pattern: RegExp): RawRange[] {
   const out: RawRange[] = [];
-  for (const match of text.matchAll(RAW_URL_PATTERN)) {
+  for (const match of text.matchAll(pattern)) {
     const end = match.index + match[0].length;
     const before = match.index === 0 ? "" : text[match.index - 1]!;
     const after = end >= text.length ? "" : text[end]!;
@@ -310,6 +359,42 @@ function findRawUrlRanges(text: string): RawRange[] {
     out.push({ start: match.index, end });
   }
   return out;
+}
+
+function findRawUrlRanges(text: string): RawRange[] {
+  return rawRangesFor(text, RAW_URL_PATTERN);
+}
+
+/**
+ * The *rest* of what GFM autolink literals cost the reader. `remark-stringify`
+ * escapes by position rather than by outcome here too, and the positions come
+ * from `mdast-util-gfm-autolink-literal`'s `unsafe` list, whose `before`
+ * guards are a single character wide: a `.` is escaped after any `w` or `W`
+ * (not just after a real `www`), and an `@` between word characters. So
+ * ordinary prose picks up backslashes that have nothing to do with links -
+ * `flow\.ts`, `window\.open()`, `new\.txt`, `me\@example.com` - and so does
+ * the case that prompted this rule, `Www\.VJW\.digital.go.jp`, where only two
+ * of the four dots are even ambiguous.
+ *
+ * The fix is the same device the bare-URL rule uses: emit the whole token raw
+ * as an `html` node. A token here is a run of `RAW_TOKEN_CLASS` characters
+ * containing at least one of those escape triggers, under the same boundary
+ * and entity checks - so on reparse it is either plain text again (nothing in
+ * the character set can open a construct) or a GFM autolink literal, which
+ * the parser does not treat as a link span and collapses straight back to
+ * plain text. Either way the text is unchanged, and `renderNoteMarkdown`
+ * checks that rather than trusting it.
+ *
+ * Anything with an `_` (or any other emphasis-active character) adjacent to
+ * the trigger falls outside the character set and stays escaped, as it must.
+ */
+const AUTOLINK_ESCAPE_PATTERN = new RegExp(
+  `${RAW_TOKEN_CLASS}*(?:[Ww]\\.[A-Za-z0-9.-]|[A-Za-z0-9.+-]@[A-Za-z0-9.-]|[ps]:\\/)${RAW_TOKEN_CLASS}*`,
+  "g",
+);
+
+function findAutolinkEscapeRanges(text: string): RawRange[] {
+  return rawRangesFor(text, AUTOLINK_ESCAPE_PATTERN);
 }
 
 /**
@@ -371,13 +456,19 @@ function findObsidianRawRanges(text: string): RawRange[] {
 
 /** Every range in the line that may be written raw, in source order and
  * non-overlapping (a URL inside a wikilink target, say, is already covered by
- * the wikilink's own run). `obsidian` selects between the two spellings
- * `renderNoteMarkdown` picks from; bare URLs are in both, because they are
- * what this renderer emitted before Obsidian markup was considered. */
-function findRawRanges(text: string, obsidian: boolean): RawRange[] {
-  const all = [...findRawUrlRanges(text), ...(obsidian ? findObsidianRawRanges(text) : [])].sort(
-    (a, b) => a.start - b.start,
-  );
+ * the wikilink's own run; an overlap is resolved in favor of the earlier
+ * range, and a tie in favor of the longer one - a line-leading `#new.stuff`
+ * tag is one raw run, not a raw `#` followed by an escaped `new\.stuff`).
+ * `spelling` selects between the
+ * spellings `renderNoteMarkdown` picks from; bare URLs are in all of them,
+ * because they are what this renderer emitted before the optional rules
+ * existed. */
+function findRawRanges(text: string, spelling: RawSpelling): RawRange[] {
+  const all = [
+    ...findRawUrlRanges(text),
+    ...(spelling.obsidian ? findObsidianRawRanges(text) : []),
+    ...(spelling.autolink ? findAutolinkEscapeRanges(text) : []),
+  ].sort((a, b) => a.start - b.start || b.end - a.end);
   const out: RawRange[] = [];
   for (const range of all) {
     const previous = out[out.length - 1];
@@ -437,24 +528,17 @@ function textPieces(
   return out;
 }
 
-/** URL- and Obsidian-aware plain-text phrasing for single-line contexts where
- * end-of-string is a safe boundary (table cells: what follows is `<br>`, `|`
- * notation, or nothing - none of which an autolink literal can swallow).
- * `renderMarkdownTable` owns the same two-spellings choice this module's
- * `renderNoteMarkdown` makes, which is why `obsidian` is its caller's to
- * pass. */
-export function textPhrasing(value: string, obsidian: boolean): PhrasingContent[] {
-  return textPieces(value, 0, findRawRanges(value, obsidian), true);
+/** URL-, autolink- and Obsidian-aware plain-text phrasing for single-line
+ * contexts where end-of-string is a safe boundary (table cells: what follows
+ * is `<br>`, `|` notation, or nothing - none of which an autolink literal can
+ * swallow). `renderMarkdownTable` owns the same choice among spellings this
+ * module's `renderNoteMarkdown` makes, which is why `spelling` is its
+ * caller's to pass. */
+export function textPhrasing(value: string, spelling: RawSpelling): PhrasingContent[] {
+  return textPieces(value, 0, findRawRanges(value, spelling), true);
 }
 
-/** Whether a line has anything the Obsidian spelling would write differently
- * - lets a caller skip rendering (and checking) both spellings when there is
- * nothing to choose between. */
-export function hasObsidianMarkup(value: string): boolean {
-  return findObsidianRawRanges(value).length > 0;
-}
-
-function phrasingFromParagraph(paragraph: FormatParagraph, obsidian: boolean): PhrasingContent[] {
+function phrasingFromParagraph(paragraph: FormatParagraph, spelling: RawSpelling): PhrasingContent[] {
   const spans = normalizeSpans(paragraph);
   const pieces: StyledText[] = [];
   let at = 0;
@@ -467,7 +551,7 @@ function phrasingFromParagraph(paragraph: FormatParagraph, obsidian: boolean): P
   return buildPhrasing(
     pieces,
     ["link", "bold", "italic", "strikethrough", "underline"],
-    findRawRanges(paragraph.text, obsidian),
+    findRawRanges(paragraph.text, spelling),
   );
 }
 
