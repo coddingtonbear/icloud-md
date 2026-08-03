@@ -33,7 +33,7 @@ import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import remarkStringify from "remark-stringify";
 import { unified } from "unified";
-import { hasObsidianMarkup, textPhrasing } from "./renderNoteMarkdown.js";
+import { CONSERVATIVE_SPELLING, spellingCandidates, textPhrasing, type RawSpelling } from "./renderNoteMarkdown.js";
 
 /** `tablePipeAlign: false` is the closest available match to the previous
  * renderer's format: no column-width alignment padding. */
@@ -50,42 +50,42 @@ export interface MarkdownTableBlock {
 // --- rendering -------------------------------------------------------------
 
 /**
- * Renders the grid, preferring the Obsidian spelling of any cell that has one
- * (`[[Note]]` rather than `\[\[Note]]` - see `renderNoteMarkdown`'s
- * `findObsidianRawRanges`) but, exactly as that renderer does, only when it
- * is provably the same table: the preferred spelling is parsed back and kept
- * only if it yields what the conservative one does. A table's markdown is
- * spliced into the note body *after* the note-level round-trip gate has run,
- * so this is the only check standing behind it.
+ * Renders the grid, preferring the friendliest spelling of its cells - the
+ * Obsidian one (`[[Note]]` rather than `\[\[Note]]`) and the unescaped
+ * punctuation GFM autolink literals would otherwise cost (`flow.ts` rather
+ * than `flow\.ts`); see `renderNoteMarkdown`'s `spellingCandidates`. Exactly
+ * as that renderer does, a spelling is kept only when it is provably the same
+ * table: it is parsed back and compared against the conservative rendering. A
+ * table's markdown is spliced into the note body *after* the note-level
+ * round-trip gate has run, so this is the only check standing behind it.
  */
 export function renderMarkdownTable(grid: readonly string[][]): string {
   const header = grid[0];
   if (!header) {
     throw new Error("Table has no rows - refusing to guess at its structure");
   }
-  const conservative = stringifyGrid(grid, false);
-  if (!grid.some((row) => row.some((cell) => hasObsidianMarkup(cell)))) {
-    return conservative;
-  }
-  const obsidian = stringifyGrid(grid, true);
-  try {
-    if (JSON.stringify(parseMarkdownTable(obsidian)) === JSON.stringify(parseMarkdownTable(conservative))) {
-      return obsidian;
+  const conservative = stringifyGrid(grid, CONSERVATIVE_SPELLING);
+  for (const spelling of spellingCandidates(grid.flat())) {
+    const candidate = stringifyGrid(grid, spelling);
+    try {
+      if (JSON.stringify(parseMarkdownTable(candidate)) === JSON.stringify(parseMarkdownTable(conservative))) {
+        return candidate;
+      }
+    } catch {
+      // Either spelling failing to parse back means this grid can't be
+      // compared - keep the one this renderer has always emitted.
     }
-  } catch {
-    // Either spelling failing to parse back means this grid can't be
-    // compared - keep the one this renderer has always emitted.
   }
   return conservative;
 }
 
-function stringifyGrid(grid: readonly string[][], obsidian: boolean): string {
+function stringifyGrid(grid: readonly string[][], spelling: RawSpelling): string {
   const table: Table = {
     type: "table",
     children: grid.map(
       (row): TableRow => ({
         type: "tableRow",
-        children: row.map((cell): TableCell => ({ type: "tableCell", children: cellChildren(cell, obsidian) })),
+        children: row.map((cell): TableCell => ({ type: "tableCell", children: cellChildren(cell, spelling) })),
       }),
     ),
   };
@@ -98,14 +98,14 @@ function stringifyGrid(grid: readonly string[][], obsidian: boolean): string {
  * so they're carried as raw `<br>` html nodes, same notation the previous
  * renderer used. Everything else is a text node - `remark-stringify` owns
  * the escaping. */
-function cellChildren(text: string, obsidian: boolean): PhrasingContent[] {
+function cellChildren(text: string, spelling: RawSpelling): PhrasingContent[] {
   const children: PhrasingContent[] = [];
   text.split(/\r?\n/).forEach((part, index) => {
     if (index > 0) {
       children.push({ type: "html", value: "<br>" });
     }
     if (part.length > 0) {
-      children.push(...textPhrasing(part, obsidian));
+      children.push(...textPhrasing(part, spelling));
     }
   });
   return children;
