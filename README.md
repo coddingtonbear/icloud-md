@@ -176,7 +176,7 @@ zipped, or synced elsewhere); a cloned folder's own
 
 | Command | What it does |
 | --- | --- |
-| `clone <directory> [--filename-as-title] [--account <appleId>]` | Full initial export into a fresh directory: every note, attachments included. Signs in via a browser window the first time a directory (or Apple ID) is used. Refuses to run against an already-cloned directory — use `pull` there instead. `--filename-as-title` picks the Obsidian-shaped layout for the vault; it can only be chosen here. `--account` clones as an Apple ID already signed in on this machine, reusing its saved sign-in instead of asking. |
+| `clone <directory> [--filename-as-title] [--account <appleId>] [--non-interactive]` | Full initial export into a fresh directory: every note, attachments included. Signs in via a browser window the first time a directory (or Apple ID) is used. Refuses to run against an already-cloned directory — use `pull` there instead. `--filename-as-title` picks the Obsidian-shaped layout for the vault; it can only be chosen here. `--account` clones as an Apple ID already signed in on this machine, reusing its saved sign-in instead of asking. `--non-interactive` never opens a sign-in window, failing instead — for unattended runs, where a window has nobody to complete it. |
 | `pull [directory] [--defer-renames]` | Fetch everything that changed remotely since the last sync; auto-merges non-overlapping local edits, writes conflict markers for overlapping ones. Defaults to the current directory. `--defer-renames` is for editor integrations in a filename-as-title vault — see [Where the title lives](#where-the-title-lives). |
 | `push [directory] [--dry-run]` | Reconcile local disk state up to iCloud: creates notes for new `.md` files, uploads edited notes, moves notes whose file was deleted locally to Recently Deleted, and merges in remote changes to anything edited on both sides. Refuses anything ambiguous rather than guessing. |
 | `status [directory]` | Preview exactly what the next `push` would do — creates, edits, deletes, and any refusals — without writing anything. Runs the same live checks `push --dry-run` does, so it needs to sign in. |
@@ -235,6 +235,16 @@ resolution live.
   edit that adds/removes rows and columns in the same save, are refused
   rather than risking a bad write — split a reorder into a delete push
   followed by an insert push instead.
+- **Obsidian notation survives the trip.** Wikilinks and embeds
+  (`[[Note]]`, `[[Note|alias]]`, `![[img.png|300]]`), callouts
+  (`> [!NOTE] Title`), tags (`#project`), highlights (`==like this==`), and
+  footnotes (`[^1]`) keep their notation in the local file instead of
+  picking up the backslashes plain CommonMark would want
+  (`\[\[Note]]`, `\#project`). Markup that really *is* markdown — a `#`
+  heading, `[a](b)`, a `---` rule — still gets escaped, and every note is
+  re-parsed before the friendlier spelling is kept, so it can never cost
+  fidelity. Inside a table cell an alias pipe is written `[[Note\|alias]]`,
+  the form Obsidian itself requires there.
 - **Local-only YAML frontmatter.** A leading `---` frontmatter block (for
   Obsidian tags, aliases, and the like) is treated as local metadata: it's
   skipped when deriving the note's title (the title is the first line *after*

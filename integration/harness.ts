@@ -71,27 +71,8 @@ export class RunContext {
     return context;
   }
 
-  /**
-   * Clones another working copy for this run.
-   *
-   * Closes the oracle first, because `clone --account` authenticates by
-   * reusing the account's browser profile and Chromium will not open a second
-   * persistent context on a profile another Chromium is holding. Without
-   * this, any clone after the first web read stalls for its full 600 s
-   * timeout and then fails - three tests' worth, twice observed live (runs
-   * `85e66f` and `23077f`).
-   *
-   * A stop-gap, not the fix: the real one (the oracle running on a copy of
-   * the profile, or the harness refusing a mid-run sign-in outright) is its
-   * own task, "Live suite: a mid-run clone --account can't sign in silently
-   * while the web oracle holds the browser profile". Done here rather than at
-   * each call site so a new test cannot forget it.
-   *
-   * The cost is that a `NotesWebOracle` reference held across this call goes
-   * stale - ask `run.oracle()` again afterwards, which reopens it.
-   */
+  /** Clones another working copy for this run. */
   async vault(name: string, options: VaultOptions = {}): Promise<Vault> {
-    await this.closeOracle();
     const vault = await Vault.clone(this.config, path.join(this.workDir, name), options);
     this.vaults.push(vault);
     return vault;
@@ -103,26 +84,6 @@ export class RunContext {
       this.oracleHandle = await NotesWebOracle.open({ dsid: this.config.dsid, headless: this.config.headless });
     }
     return this.oracleHandle;
-  }
-
-  /**
-   * Closes the oracle, releasing the account's browser profile. A later
-   * `oracle()` reopens it.
-   *
-   * Call this before cloning, once the oracle has been opened. `clone
-   * --account` reuses that same profile directory to authenticate, and
-   * Chromium will not open a second persistent context on a profile another
-   * Chromium is holding - so a mid-run clone stalls for its full 600 s
-   * timeout and fails (observed live, runs `85e66f` and `23077f`; the
-   * underlying fix is its own task, "Live suite: a mid-run clone --account
-   * can't sign in silently while the web oracle holds the browser profile").
-   *
-   * This is an accommodation, not that fix: it only helps a test that knows
-   * to call it.
-   */
-  async closeOracle(): Promise<void> {
-    await this.oracleHandle?.close();
-    this.oracleHandle = undefined;
   }
 
   /** This run's fixture title prefix (see `ANY_RUN_PREFIX` for why parentheses). */

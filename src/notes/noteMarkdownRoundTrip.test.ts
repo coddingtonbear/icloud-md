@@ -248,6 +248,121 @@ test("bare URLs render unescaped and round-trip as plain text", () => {
   assert.equal(assertRoundTrips([p("body", "(https://example.com)")]), "(https://example.com)");
 });
 
+test("Obsidian wikilinks keep their bare brackets and round-trip as plain text", () => {
+  const rendered = assertRoundTrips([
+    p("body", "Between Osaka and Kyoto, do not take a [[Shinkansen]] -- it's close enough for a normal train."),
+  ]);
+  assert.equal(rendered, "Between Osaka and Kyoto, do not take a [[Shinkansen]] -- it's close enough for a normal train.");
+
+  // Alias, heading/section target, embed, two in one line, and the same in
+  // the other block kinds a note can put text in.
+  assert.equal(assertRoundTrips([p("body", "See [[Note|alias]] here")]), "See [[Note|alias]] here");
+  assert.equal(assertRoundTrips([p("body", "[[Folder/Note#Heading]]")]), "[[Folder/Note#Heading]]");
+  assert.equal(assertRoundTrips([p("body", "![[embed.png]]")]), "![[embed.png]]");
+  assert.equal(assertRoundTrips([p("body", "[[a]] and [[b]]")]), "[[a]] and [[b]]");
+  assert.equal(assertRoundTrips([p("bulletList", "see [[Note]]")]), "- see [[Note]]");
+  assert.equal(assertRoundTrips([p("todoList", "read [[Note]]", { done: false })]), "- [ ] read [[Note]]");
+  assert.equal(assertRoundTrips([p("heading", "About [[Note]]")]), "## About [[Note]]");
+  assert.equal(assertRoundTrips([p("body", "quoted [[Note]]", { blockQuoteLevel: 1 })]), "> quoted [[Note]]");
+
+  // A wikilink wholly inside one styled span still renders raw.
+  assert.equal(
+    assertRoundTrips([
+      {
+        ...p("body", "go to [[Note]] now"),
+        spans: [
+          { ...PLAIN_STYLE, length: 6 },
+          { ...PLAIN_STYLE, bold: true, length: 8 },
+          { ...PLAIN_STYLE, length: 4 },
+        ],
+      },
+    ]),
+    "go to **[[Note]]** now",
+  );
+});
+
+test("bracket runs that aren't safe to emit raw stay escaped but still round-trip", () => {
+  // `[[a]](b)` would reparse as a real link.
+  assertRoundTrips([p("body", "[[a]](b)")]);
+  // Characters that could open an inline construct or eat the next one.
+  assertRoundTrips([p("body", "[[a_b]]")]);
+  assertRoundTrips([p("body", "[[a*b]]")]);
+  assertRoundTrips([p("body", "[[a\\b]]")]);
+  assertRoundTrips([p("body", "[[a&amp;b]]")]);
+  assertRoundTrips([p("body", "[[a<b>c]]")]);
+  assertRoundTrips([p("body", "[[a`b]]")]);
+  // Unbalanced or nested brackets aren't wikilinks at all.
+  assertRoundTrips([p("body", "[[a]")]);
+  assertRoundTrips([p("body", "[a]]")]);
+  assertRoundTrips([p("body", "[[[a]]")]);
+  assertRoundTrips([p("body", "[[a [[b]] c]]")]);
+  // A wikilink straddling a style boundary falls back to escaped text.
+  assertRoundTrips([
+    {
+      ...p("body", "[[Note]]"),
+      spans: [
+        { ...PLAIN_STYLE, bold: true, length: 4 },
+        { ...PLAIN_STYLE, length: 4 },
+      ],
+    },
+  ]);
+  // A bracket run that would become a link if written bare.
+  assert.equal(assertRoundTrips([p("body", "[a](b)")]), "\\[a]\\(b)");
+  assert.equal(assertRoundTrips([p("body", "[a][b]")]), "\\[a][b]");
+  assert.equal(assertRoundTrips([p("body", "[a]: https://example.com")]), "\\[a]: https://example.com");
+});
+
+test("Obsidian callouts, tags, highlights and footnotes keep their notation too", () => {
+  // Callouts: the `[!TYPE]` head of a blockquote line, foldable or not.
+  assert.equal(assertRoundTrips([p("body", "[!NOTE] Worth knowing", { blockQuoteLevel: 1 })]), "> [!NOTE] Worth knowing");
+  assert.equal(assertRoundTrips([p("body", "[!TIP]- Folded", { blockQuoteLevel: 1 })]), "> [!TIP]- Folded");
+  assert.equal(
+    assertRoundTrips([p("body", "[!WARNING]", { blockQuoteLevel: 1 }), p("body", "body line", { blockQuoteLevel: 1 })]),
+    "> [!WARNING]\n> body line",
+  );
+
+  // Tags: an ATX heading needs whitespace (or end of line) after its `#`s,
+  // so a line-leading tag is not ambiguous with one.
+  assert.equal(assertRoundTrips([p("body", "#project")]), "#project");
+  assert.equal(assertRoundTrips([p("body", "#work/urgent and #done")]), "#work/urgent and #done");
+  assert.equal(assertRoundTrips([p("body", "intro"), p("body", "#project")]), "intro\n#project");
+  assert.equal(assertRoundTrips([p("bulletList", "#project")]), "- #project");
+
+  // Highlights: a setext underline is a line of *nothing but* `=`.
+  assert.equal(assertRoundTrips([p("body", "==highlight== and more")]), "==highlight== and more");
+  assert.equal(assertRoundTrips([p("body", "intro"), p("body", "==highlight==")]), "intro\n==highlight==");
+
+  // Footnotes, both spellings, and plain bracketed prose.
+  assert.equal(assertRoundTrips([p("body", "See [^1] for the details")]), "See [^1] for the details");
+  assert.equal(assertRoundTrips([p("body", "See ^[an inline note] there")]), "See ^[an inline note] there");
+  assert.equal(assertRoundTrips([p("body", "[Shinkansen]")]), "[Shinkansen]");
+});
+
+test("markup that really is markdown stays escaped", () => {
+  // A real heading, and the two shapes that are still headings.
+  assert.equal(assertRoundTrips([p("body", "# Real heading")]), "\\# Real heading");
+  assert.equal(assertRoundTrips([p("body", "#")]), "\\#");
+  assert.equal(assertRoundTrips([p("body", "#\tTabbed")]), "\\#\tTabbed");
+  // A line of nothing but `=` is a setext underline; `---` a thematic break.
+  assert.equal(assertRoundTrips([p("body", "intro"), p("body", "===")]), "intro\n\\===");
+  assert.equal(assertRoundTrips([p("body", "---")]), "\\---");
+  // Character references and raw html are not Obsidian notation.
+  assert.equal(assertRoundTrips([p("body", "&amp;")]), "\\&amp;");
+  assert.equal(assertRoundTrips([p("body", "<div>x</div>")]), "\\<div>x\\</div>");
+});
+
+test("the Obsidian spelling is dropped whole when it would change the document", () => {
+  // `[ ]` is an inert bracket run by every rule above - but writing it bare
+  // in a bullet makes GFM read a checkbox, so the reparse check rejects the
+  // Obsidian spelling for this note and the escaped one is emitted instead.
+  const rendered = assertRoundTrips([p("bulletList", "[ ]")]);
+  assert.notEqual(rendered, "- [ ]");
+
+  // The fallback is per *note*, not per run: this note's wikilink loses its
+  // bare brackets because of the checkbox-shaped bullet sharing the file.
+  assert.equal(assertRoundTrips([p("bulletList", "[ ]"), p("body", "[[Note]]")]), "- \\[ ]\n\\[\\[Note]]");
+});
+
 test("URLs that could open inline constructs fall back to escaped text but still round-trip", () => {
   // `_` is outside the raw-URL character set; the tail renders escaped.
   assertRoundTrips([p("body", "https://en.wikipedia.org/wiki/A_B")]);

@@ -46,7 +46,9 @@
  *    deletion restamp their tombstones by Apple's one shared rule -
  *    `max(old style clock + 8, this save's style-clock floor)`, then the
  *    counter ends past it (`generateIdsForLocalChanges`; the same rule
- *    `noteDocument.ts` applies to note bodies). This is not cosmetic:
+ *    `noteDocument.ts` applies to note bodies, and both sides of the `max`
+ *    are checked against Apple's own saves by `TABLE_RESTYLE_REVISIONS`).
+ *    This is not cosmetic:
  *    `mergeWithString_mergeTimestamps` adopts a remote tombstone only when
  *    its style timestamp compares *strictly greater*, so a tombstone left
  *    at its original anchor is discarded by every other client (audit,
@@ -1044,6 +1046,27 @@ function remapObjectId(id: ObjectID, remap: ReadonlyMap<number, number>): void {
  * mirror, the second broke the redirect/identity-pair join.
  */
 export function validateTableDocumentInvariants(doc: TableDocument): void {
+  // A *populated* `startVersion` (CRDT.Document field 2) marks the blob as a
+  // delta - the archived output of Apple's `CRDocument.deltaSince(since)`,
+  // which carries only the objects changed since `since` rather than the
+  // whole graph, and whose receiver answers `CRMergeResult.Fail` when that
+  // baseline isn't dominated by its own version
+  // (`mergeResultForMergingWithDocument`, web-client source). Every model in
+  // this file assumes a full graph, and the byte round-trip gate would
+  // faithfully preserve the marker, so an edited push would still claim to
+  // be a delta. Refuse first and alone: a partial graph would fail most of
+  // the checks below for reasons that say nothing about what's wrong.
+  //
+  // Presence alone is *not* the signal. Both long-lived fixtures carry an
+  // empty `startVersion` (`12 00`) - the zero vector, dominated by every
+  // version, which Apple never fails on - and refusing those would reject
+  // real, editable tables.
+  if ((doc.document.startVersion?.element.length ?? 0) > 0) {
+    throw new Error(
+      "Table document carries a populated startVersion - it is a CRDT delta, not a full document, and this engine only edits full documents",
+    );
+  }
+
   const failures: string[] = [];
   const replicaCount = doc.version.element.length;
 

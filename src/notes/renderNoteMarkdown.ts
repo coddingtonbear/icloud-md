@@ -20,6 +20,14 @@
  * full render→parse round trip on every note and refuses to mark a note
  * publishable when the projection doesn't survive (e.g. CommonMark
  * adjacency artifacts like a body line directly above a `5.`-numbered list).
+ *
+ * The one place this module overrides `remark-stringify`'s escaping is where
+ * the escape would be *correct markdown but wrong for the reader*: bare URLs,
+ * and the Obsidian notation a vault is full of (see `findObsidianRawRanges`).
+ * Those are emitted as raw `html` nodes, and the result is re-parsed here
+ * before it is kept - `renderNoteMarkdown` falls back to plain
+ * `remark-stringify` escaping for the whole note otherwise, so the friendlier
+ * spelling can never cost fidelity.
  */
 
 import type {
@@ -38,12 +46,14 @@ import remarkParse from "remark-parse";
 import remarkStringify from "remark-stringify";
 import { unified } from "unified";
 import {
+  formatsRoundTripEqual,
   normalizeSpans,
   trimTrailingWhitespace,
   type FormatParagraph,
   type InlineSpan,
   type ParagraphKind,
 } from "./noteFormat.js";
+import { parseNoteMarkdown } from "./parseNoteMarkdown.js";
 
 /** Same plugin set as the parser and `markdownTable.ts`, so escaping
  * decisions and construct recognition always agree. */
@@ -55,10 +65,49 @@ const HEADING_DEPTHS: Partial<Record<ParagraphKind, 1 | 2 | 3>> = {
   subheading: 3,
 };
 
+/**
+ * Renders the note, preferring the Obsidian-friendly spelling (see
+ * `findObsidianRawRanges`) but only when it is *provably* the same document.
+ *
+ * The unescaping rules below are read off CommonMark's own construct
+ * definitions, but reading a spec is not the same as being right, and the
+ * cost of being wrong would be a note that stops round-tripping - which
+ * `classifyNoteRecord` turns into a read-only note. So the preference is
+ * checked rather than trusted: render it, parse it back, and keep it only if
+ * the projection survives exactly. Anything else falls back to the escaping
+ * `remark-stringify` chose on its own, which is what this renderer emitted
+ * before Obsidian markup was considered at all.
+ *
+ * That makes the whole feature a strict improvement by construction: the
+ * Obsidian spelling can never be *worse* than the conservative one, only
+ * equal or nicer to read. (When even the conservative rendering fails to
+ * round-trip, the note is refused upstream and this output is discarded, so
+ * the fallback costs nothing there either.)
+ */
 export function renderNoteMarkdown(rawParagraphs: readonly FormatParagraph[]): string {
   // Trailing whitespace is outside the projection (`trimTrailingWhitespace`);
   // rendering it would need `&#x20;` references to survive reparsing.
   const paragraphs = rawParagraphs.map(trimTrailingWhitespace);
+  if (!paragraphs.some((paragraph) => findObsidianRawRanges(paragraph.text).length > 0)) {
+    return renderLines(paragraphs, false);
+  }
+  const obsidian = renderLines(paragraphs, true);
+  return projectionSurvives(paragraphs, obsidian) ? obsidian : renderLines(paragraphs, false);
+}
+
+/** Whether re-parsing `rendered` reproduces `paragraphs` exactly - the same
+ * check `classifyNoteRecord` gates publishability on, applied here to decide
+ * between two spellings of the same note rather than to accept or refuse it. */
+function projectionSurvives(paragraphs: readonly FormatParagraph[], rendered: string): boolean {
+  const back = parseNoteMarkdown(rendered);
+  return (
+    back.status === "ok" &&
+    back.text === paragraphs.map((paragraph) => paragraph.text).join("\n") &&
+    formatsRoundTripEqual(paragraphs, back.paragraphs)
+  );
+}
+
+function renderLines(paragraphs: readonly FormatParagraph[], obsidian: boolean): string {
   const lines: string[] = [];
   let i = 0;
   while (i < paragraphs.length) {
@@ -81,7 +130,7 @@ export function renderNoteMarkdown(rawParagraphs: readonly FormatParagraph[]): s
       while (end < paragraphs.length && isListParagraph(paragraphs[end]!) && paragraphs[end]!.blockQuoteLevel === bq) {
         end += 1;
       }
-      for (const list of buildListNodes(paragraphs.slice(i, end))) {
+      for (const list of buildListNodes(paragraphs.slice(i, end), obsidian)) {
         pushBlockLines(lines, list, bq);
       }
       i = end;
@@ -90,7 +139,7 @@ export function renderNoteMarkdown(rawParagraphs: readonly FormatParagraph[]): s
 
     const depth = HEADING_DEPTHS[paragraph.kind];
     if (depth !== undefined) {
-      const heading: Heading = { type: "heading", depth, children: phrasingFromParagraph(paragraph) };
+      const heading: Heading = { type: "heading", depth, children: phrasingFromParagraph(paragraph, obsidian) };
       pushBlockLines(lines, heading, bq);
       i += 1;
       continue;
@@ -102,7 +151,7 @@ export function renderNoteMarkdown(rawParagraphs: readonly FormatParagraph[]): s
     if (paragraph.text.length === 0) {
       lines.push(bq === 0 ? "" : ">".repeat(bq));
     } else {
-      const body: Paragraph = { type: "paragraph", children: phrasingFromParagraph(paragraph) };
+      const body: Paragraph = { type: "paragraph", children: phrasingFromParagraph(paragraph, obsidian) };
       pushBlockLines(lines, body, bq);
     }
     i += 1;
@@ -149,7 +198,7 @@ function pushBlockLines(lines: string[], node: BlockContent, blockQuoteLevel: nu
  * as the structure allows and is caught by the round-trip gate (Apple's own
  * editors only indent one step at a time).
  */
-function buildListNodes(paragraphs: readonly FormatParagraph[]): List[] {
+function buildListNodes(paragraphs: readonly FormatParagraph[], obsidian: boolean): List[] {
   const result: List[] = [];
   const stack: { list: List; indent: number }[] = [];
 
@@ -198,7 +247,7 @@ function buildListNodes(paragraphs: readonly FormatParagraph[]): List[] {
           type: "paragraph",
           children: emptyTodo
             ? [{ type: "html", value: paragraph.done === true ? "[x]" : "[ ]" }]
-            : phrasingFromParagraph(paragraph),
+            : phrasingFromParagraph(paragraph, obsidian),
         },
       ],
     };
@@ -238,13 +287,13 @@ interface StyledText {
 const RAW_URL_PATTERN = /https?:\/\/[A-Za-z0-9./?=&%#+:,;@!$'()-]+/g;
 const ENTITY_SHAPED = /&(?:#|[A-Za-z][A-Za-z0-9]*;)/;
 
-interface RawUrlRange {
+interface RawRange {
   start: number;
   end: number;
 }
 
-function findRawUrlRanges(text: string): RawUrlRange[] {
-  const out: RawUrlRange[] = [];
+function findRawUrlRanges(text: string): RawRange[] {
+  const out: RawRange[] = [];
   for (const match of text.matchAll(RAW_URL_PATTERN)) {
     const end = match.index + match[0].length;
     const before = match.index === 0 ? "" : text[match.index - 1]!;
@@ -263,11 +312,96 @@ function findRawUrlRanges(text: string): RawUrlRange[] {
   return out;
 }
 
+/**
+ * Obsidian's own notation - wikilinks and embeds (`[[Note]]`,
+ * `[[Note|alias]]`, `![[img.png|300]]`), callouts (`> [!NOTE] Title`),
+ * footnote references (`[^1]`, `^[inline]`), and tags (`#project`) - is not
+ * markdown at all. To Apple it is ordinary text, and to CommonMark it is
+ * ordinary text too. `remark-stringify` escapes it anyway, because it escapes
+ * by *position* rather than by outcome: any `[` might pair with a later `](`,
+ * and any line-leading `#` might be a heading. The note still round-trips,
+ * but the reader's vault loses a link, a callout, or a tag, and the file
+ * picks up a gratuitous diff.
+ *
+ * Emitting these runs verbatim - as raw `html` nodes, the same escape-dodging
+ * device the bare-URL rule uses (and `<u>`, and the empty-todo checkbox) -
+ * gives the file back its Obsidian spelling, and reparsing turns each run
+ * straight back into the same plain text.
+ *
+ * Each rule below is drawn from what CommonMark actually requires, and each
+ * one leaves the genuinely ambiguous cases escaped:
+ *
+ * - **Bracket runs.** A `[...]` or `[[...]]` run (optionally preceded by `!`)
+ *   is inert unless something *after* it makes it a link: `(` opens an inline
+ *   link (`[a](b)`), `[` a reference link (`[a][b]`), and `:` a link
+ *   definition (`[a]: url`) - all three disqualify the run. So does any
+ *   character inside it that could open an inline construct, decode as a
+ *   character reference, or eat the next character (`[` `]` `\` `<` `>` `&`
+ *   `*` `_` `~` `` ` ``).
+ * - **Line-leading `#` runs.** An ATX heading needs a space, a tab, or the
+ *   end of the line after its `#`s, so `#project` is a tag and `# Heading` is
+ *   a heading. Only the former is unescaped.
+ * - **Line-leading `=` runs.** A setext heading underline is a line of
+ *   *nothing but* `=`, so `==highlight==` is safe and a bare `===` is not.
+ *
+ * None of this is trusted on its own: `renderNoteMarkdown` reparses the
+ * result and falls back to full escaping unless the note comes back
+ * identical.
+ */
+const RAW_BRACKET_PATTERN = /!?(?:\[\[[^[\]\n\\<>&*_~`]*\]\]|\[[^[\]\n\\<>&*_~`]*\])/g;
+const BRACKET_LINK_OPENERS = new Set(["(", "[", ":"]);
+const LEADING_TAG_PATTERN = /^#+(?![ \t]|$)/;
+const LEADING_EQUALS_PATTERN = /^=+/;
+
+function findObsidianRawRanges(text: string): RawRange[] {
+  const out: RawRange[] = [];
+  const leading = LEADING_TAG_PATTERN.exec(text) ?? (/^=+$/.test(text) ? null : LEADING_EQUALS_PATTERN.exec(text));
+  if (leading) {
+    out.push({ start: 0, end: leading[0].length });
+  }
+  for (const match of text.matchAll(RAW_BRACKET_PATTERN)) {
+    const end = match.index + match[0].length;
+    if (BRACKET_LINK_OPENERS.has(text[end] ?? "")) {
+      continue;
+    }
+    out.push({ start: match.index, end });
+  }
+  return out;
+}
+
+/** Every range in the line that may be written raw, in source order and
+ * non-overlapping (a URL inside a wikilink target, say, is already covered by
+ * the wikilink's own run). `obsidian` selects between the two spellings
+ * `renderNoteMarkdown` picks from; bare URLs are in both, because they are
+ * what this renderer emitted before Obsidian markup was considered. */
+function findRawRanges(text: string, obsidian: boolean): RawRange[] {
+  const all = [...findRawUrlRanges(text), ...(obsidian ? findObsidianRawRanges(text) : [])].sort(
+    (a, b) => a.start - b.start,
+  );
+  const out: RawRange[] = [];
+  for (const range of all) {
+    const previous = out[out.length - 1];
+    if (previous === undefined || range.start >= previous.end) {
+      out.push(range);
+    }
+  }
+  return out;
+}
+
 /** Splits one piece of plain text (starting at `absoluteStart` within its
- * line) into text nodes and raw-html URL nodes, honoring only the ranges
- * that fall entirely inside this piece - a range split across a style
- * boundary renders escaped instead. */
-function textPieces(value: string, absoluteStart: number, rawRanges: readonly RawUrlRange[]): PhrasingContent[] {
+ * line) into text nodes and raw-html nodes, honoring only the ranges that
+ * fall entirely inside this piece - a range split across a style boundary
+ * renders escaped instead. In a table cell (`escapePipes`) a `|` can't ride
+ * along in a raw node - it would end the cell - so the run is broken around
+ * its pipes and they render as text, which `remark-stringify` escapes to
+ * `\|`: exactly the form Obsidian itself requires for a piped wikilink
+ * inside a table. */
+function textPieces(
+  value: string,
+  absoluteStart: number,
+  rawRanges: readonly RawRange[],
+  escapePipes = false,
+): PhrasingContent[] {
   const out: PhrasingContent[] = [];
   let at = 0;
   for (const range of rawRanges) {
@@ -279,7 +413,19 @@ function textPieces(value: string, absoluteStart: number, rawRanges: readonly Ra
     if (start > at) {
       out.push({ type: "text", value: value.slice(at, start) });
     }
-    out.push({ type: "html", value: value.slice(start, end) });
+    const raw = value.slice(start, end);
+    if (escapePipes && raw.includes("|")) {
+      raw.split("|").forEach((part, index) => {
+        if (index > 0) {
+          out.push({ type: "text", value: "|" });
+        }
+        if (part.length > 0) {
+          out.push({ type: "html", value: part });
+        }
+      });
+    } else {
+      out.push({ type: "html", value: raw });
+    }
     at = end;
   }
   if (at === 0) {
@@ -291,14 +437,24 @@ function textPieces(value: string, absoluteStart: number, rawRanges: readonly Ra
   return out;
 }
 
-/** URL-aware plain-text phrasing for single-line contexts where end-of-string
- * is a safe boundary (table cells: what follows is `<br>`, `|` notation, or
- * nothing - none of which an autolink literal can swallow). */
-export function textPhrasing(value: string): PhrasingContent[] {
-  return textPieces(value, 0, findRawUrlRanges(value));
+/** URL- and Obsidian-aware plain-text phrasing for single-line contexts where
+ * end-of-string is a safe boundary (table cells: what follows is `<br>`, `|`
+ * notation, or nothing - none of which an autolink literal can swallow).
+ * `renderMarkdownTable` owns the same two-spellings choice this module's
+ * `renderNoteMarkdown` makes, which is why `obsidian` is its caller's to
+ * pass. */
+export function textPhrasing(value: string, obsidian: boolean): PhrasingContent[] {
+  return textPieces(value, 0, findRawRanges(value, obsidian), true);
 }
 
-function phrasingFromParagraph(paragraph: FormatParagraph): PhrasingContent[] {
+/** Whether a line has anything the Obsidian spelling would write differently
+ * - lets a caller skip rendering (and checking) both spellings when there is
+ * nothing to choose between. */
+export function hasObsidianMarkup(value: string): boolean {
+  return findObsidianRawRanges(value).length > 0;
+}
+
+function phrasingFromParagraph(paragraph: FormatParagraph, obsidian: boolean): PhrasingContent[] {
   const spans = normalizeSpans(paragraph);
   const pieces: StyledText[] = [];
   let at = 0;
@@ -308,7 +464,11 @@ function phrasingFromParagraph(paragraph: FormatParagraph): PhrasingContent[] {
     }
     at += span.length;
   }
-  return buildPhrasing(pieces, ["link", "bold", "italic", "strikethrough", "underline"], findRawUrlRanges(paragraph.text));
+  return buildPhrasing(
+    pieces,
+    ["link", "bold", "italic", "strikethrough", "underline"],
+    findRawRanges(paragraph.text, obsidian),
+  );
 }
 
 type InlineDimension = "link" | "bold" | "italic" | "strikethrough" | "underline";
@@ -341,7 +501,7 @@ function dimensionValue(span: InlineSpan, dimension: InlineDimension): string | 
 function buildPhrasing(
   pieces: readonly StyledText[],
   dimensions: readonly InlineDimension[],
-  rawRanges: readonly RawUrlRange[],
+  rawRanges: readonly RawRange[],
 ): PhrasingContent[] {
   let dimension: InlineDimension | undefined;
   let fewestGroups = Number.POSITIVE_INFINITY;

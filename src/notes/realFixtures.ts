@@ -652,3 +652,141 @@ export const TABLE_UNSORTED_TT_REGRESSION =
   "/ea7p8pP/+r1T174RbWS/Onzs/e/3NT3xOfOPvqPx060NyrJE5suHTz5yd93nP3a/X8MZ35bryRd+7Jzr9/y64s/yEXvHy5PbKskt35ryx++/peD0xca" +
   "X25kr/10upJsHvigsWv3sXPPvXemb9uzp96uJD98+f1wa0/7jT9v/+XUU39O91SSrZeOd70VPDN5YrK7/9Xbuk9Wkj23Z6fX/2jo3O9v33Mh99Hxs5Vk" +
   "XWPqkTtOf7jmpY3T043ZC7srSbC5c/zmPU+/9tWjE7ue/9tHRytJoWf045n8m+fjNx5/8Z2udy9+ZUucxdd0JA2jVWkYtczNLb1BGkbNaRgF/wRjLkI2";
+
+/**
+ * The six-revision life of a table that gets a cell **restyled** before that
+ * cell is deleted (Attachment of note "Table Restyle Probe (2026-08-02)",
+ * `har_captures/2026-08-02_table-cell-restyle-scripted.har`). Captured to put
+ * real Apple bytes behind the two branches of `generateIdsForLocalChanges`
+ * that PR #12 implemented from source reading alone - see the vault note
+ * "Capture Apple restyling a table cell, to pin the untested style-clock
+ * branches", dev log 2026-08-02.
+ *
+ * Every other table capture we hold only ever deletes runs whose style anchor
+ * is still 0, so only the `floor` side of `max(old style clock + 8, floor)`
+ * had ever been checked against a real save. Here Apple bolds a cell first,
+ * which raises that cell's anchor, and the later deletion of the same text
+ * lands on the `old + 8` side. The three style-clock facts the sequence
+ * pins down, all in one replica's own numbering (`ttTimestamp` entry #1):
+ *
+ *  - seq 1 -> 2, deleting never-restyled "bravo" (anchor 0, style clock 1):
+ *    tombstone stamped 8 = max(0 + 8, 1), clock left at 9.
+ *  - seq 2 -> 3, bolding "alpha" (anchor 0, style clock 9): the *live* run is
+ *    restamped 9 = max(0 + 1, 9), clock left at 10 - so table cells do carry
+ *    style anchors exactly as note bodies do, and a formatting op biases by
+ *    +1 where a deletion biases by +8.
+ *  - seq 3 -> 4, deleting that bolded "alpha" (anchor 9, style clock 10):
+ *    tombstone stamped 17 = max(9 + 8, 10), clock left at 18. The `old + 8`
+ *    side wins outright, which is the branch nothing had exercised.
+ *  - seq 4 -> 5, "echo" typed and deleted inside one save: its tombstone is
+ *    stamped {us, 0}, and the style clock does not move at all - Apple's
+ *    other branch (a charID this replica minted in this same pass), which our
+ *    engine never reaches because one save applies one splice per cell.
+ */
+export const TABLE_RESTYLE_REVISIONS: readonly { seq: number; op: string; grid: string[][]; base64: string }[] = [
+  {
+    seq: 0,
+    op: "create: empty 2x2 table",
+    grid: [["",""],["",""]],
+    base64:
+      "eJzjYBBq4+dgEGCQ+s/HxcHFBmQySjBI+WR5cbBIqXEwCCkpKRgQAFJsHIxCTAaMQJoZSDMDaVYgzQGk2YA0rxQPFxcXC8hkII9JSjdLm4NRSp2DSUhZSdE5" +
+      "KCQxKSfVOT+nNDfPJbMoNbkkMz/PJzWtJCQ/KDM9o0TqOmMT42VGrmWMXFVcPkJs7/fvASIpAbCBIHeDaQ1GsAgjUIRJCkxrMEmJcXEA5f4DAT9QHZytxcTB" +
+      "CMJCIkDvCVg9OSB6urmIyYZVVFfeMpUHKMooJPBtvWWiYr2CQvnqrq9ei27XCmlwCXExGYC8xSIFDyawGDtQjA0hhqSSFYtKdoSYFE8WFwcTMJBYhJgEGFF4" +
+      "TCg8ZhQeC61DZPuFK/+fr2Nvdgpxs/p19owOJEQkm5fv6PWYtUp6nZ2eZucjTqg/uYB+4kTzJw9QjBsjREAqubCo5MERIqwoPDYUHjsKj0NKywhiBzfQPD40" +
+      "OziBYoJIdsDUgpImP5paoGkGAkhq9YJ0hBiwhCyOcCRZPbJbhLC4RZh+blHiyExJzSvJLKlUEksuwpYplViKU3PSlNiSi4Lyy4uVOENDPV0881JSK5Q4k4sg" +
+      "aouVuJNTc3KgHC3x5PxcvcSCgpxUPecglxA9v2C/0tyk1CIsEsElRZl56VqiGBIgW5DV5+WXpBbrQYsNTAlPZxwSozqGuw4jgdc/VLRecB7bKNXqe+685sx9" +
+      "RgJNBu2Zmg2npi/TOMBe93T6FCOMkt1I4JVO7eLHX/svTGWzsDn8R/GREUadYCRwKtSIwyCKJWwa96+rHw8sPWyEUR4aCYhw1cRv5NhvsCpIrWS56JX5Rhgl" +
+      "qZUMlxQXhiuFmIBVIbD0BQDHP+k0",
+  },
+  {
+    seq: 1,
+    op: "fill alpha/bravo/charlie in one save",
+    grid: [["alpha","bravo"],["charlie",""]],
+    base64:
+      "eJzjYBB66crBIMAg9ciVS4GLDchklmAA0owCTGCaCUozg2gpnywvDhYpNQ4GISUlBQMCQApoihCTASOQZgbSzECaFUhzAGk2IM0rxcPFxcUCshHIY5LSzdLm" +
+      "YJRS52ASUlZSdA4KSUzKSXXOzynNzXPJLEpNLsnMz/NJTSsJyQ/KTM8okbrO2MR4mZFrGSNXFZePENv7/XuASEoAbCDIP2BagxEswggUYZIC0xpMUmJcHEC5" +
+      "/0DAD1QHZ2sxcTCCsJAI0HsCVk8OiJ5uLmKyYRXVlbdM5QGKMgoJfFtvmahYr6BQvrrrq9ei27VCGlxCXEwGIG+xSHGAg48RGFwgMXagGBtCDEklKxaV7Agx" +
+      "KZ4sLg4mYCCxCDEJsKDwWFF4bCg8dlqHyPYLV/4/X8fe7BTiZvXr7BkdSIhINi/f0esxa5X0Ojs9zc5HnFB/cgH9xInmTx6gGDdGiIBUcmFRyYMjRDhQeJwo" +
+      "PC4UHreUlhHEDm6geXxodnACxQSR7ICpBSVNfjS1QNMMBJDUega5C7Em5hRkJOIMXlBkEQ5eVinvIE8h9uSMxKKczFQ8hrETYRg7ih+EsPhBGN0PSUWJZfkU" +
+      "+0EvSEeIAYspOPQocWSmpOaVZJZUKoklF2HL50osxak5aUpsyUVB+eXFSpyhoZ4unnkpqRVKnMlFELXFStzJqTk5UI6WeHJ+rl5iQUFOqp5zkEuInl+wX2lu" +
+      "UmoRFongkqLMvHQtUQwJkC3I6vPyS1KL9aAlEaaEpzMOiVEdozpGdYzqGNUxqmNUx6iOUR2jOkZ1jOoY1TGqY1THqI5RHaM6RnWM6hjVMapjVMeojlEdozpG" +
+      "dYzqoKcOI4HXP1S0XnAe2yjV6nvuvObMfUYC0eu/O9zfp8Z7Lil8nhvfoQtGAhmm8rxn1q6ONdhj+OZqX32EkcDzaNtER+v7ems3zvcsClUKMhJoMmjP1Gw4" +
+      "NX2ZxgH2uqfTpxhhLJIwEnilU7v48df+C1PZLGwO/1F8ZISxvMJI4FSoEYdBFEvYNO5fVz8eWHrYCGNpgZGACFdN/EaO/QargtRKlotemW+EsSjBSoZLigvD" +
+      "b0JMHJxAzAgAtUBoaQ==",
+  },
+  {
+    seq: 2,
+    op: "delete bravo (never restyled: style anchor 0)",
+    grid: [["alpha",""],["charlie",""]],
+    base64:
+      "eJztm19oU1ccx3Nvb5KTk7SeXU03j4O2V+nSWEN2QNBORZtOF60Vro0OO5E0vTW3pEm5jThXtWKR/WFbN5gTZUxQVLC2pfjgHjotE/bg/FNYuzH20OEm3aYy" +
+      "NuhaZKDnptlMmmTzZU/+Lrl87+/P5/e7vx9J3g6yyH90IQux0LtdeAW28UfrcxauAhFTKqa1KK0SkVJqTavNVFrfthFJtBJZZEUp9//HRXl1WfQLXIu4FnG1" +
+      "ckVcbVyLqQtjLJlvwi2RLmtbigT6AhLlxUpFQG0MN8e0QCK2pz1epxtaJKkn4vVaa7Ixoeq7o0n6rXBY+FrAZwX8Bq6Xbb9dGeYfSlIFzTlT6hFSHoF7RJpS" +
+      "j0hLMeKxh/yax/P+efaKSDBveQEfj9T8NOL+qscQV1ndy8pWai7uFWTy5+DKcEV3efnevnemNp76/oDswTIW/eYAEkWptQp8XabPzn22x76MTGueTPtjH3W1" +
+      "YSTyJUmySOxZFsqyHFkW/r83cml07OHkgL2ntnF9zYMb16tnN7Kw59xn771y4vyigTW+qrdvO9JzYj6TY86cLu5z5mzEzMR5Ml0FNuLMslxZVnGWVUK9bLaH" +
+      "k9crmdPDwX3PZPT4O9f8as6bk8ur+UlGblDdIFvDsY5ouOB6RWJ9gvVa6SY1KNsj0bAR07V/KWZ/gmL2rBnkPDPMz5ihVl0rW/J0lLNeH5ULhXtSn1qdt0aB" +
+      "fAXpLVo8qSf3KaURI98PXJE6tVirYosYamJvp+IIhYJ1wXiL9rriiBizuZ2KM6LFYmnD+2wk0e4Ld3TENF9ArWv0NWxt2NPerBl5AluThh7f7XXnBMwumfnx" +
+      "RFLr9KX/gnIDwUCBABBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEAAAQQQQAABBBBAAAEEEEA8vQQjd2eWeH92" +
+      "fDlEj2y+eavq+GVGmgan105criy+2bz90/UlX4wyEl1eVny9v2+nf/jFe+Pvd7/KyGTT6vC6lyZ8/UMng0ZIURmp6LtFfnnXs3lsbHp79M7wBUZ+kLpb7qMP" +
+      "LgZDb33SNPNNgBHv573NH7r36eS177ZFX96CGDnsf1OvOnTt2FnPiP3gnWMfsZxTwYz8Wn3g9I9TvaNHbStWXf2r4jbLOU/MyLUQQ/4d0raPnQ/Gfx85c5Xl" +
+      "nKVlZAHev2sIXfGfVyuT59xjJ1nOKdya5zHFORuRReQw70dn59tP",
+  },
+  {
+    seq: 3,
+    op: "bold alpha (raises its style anchor)",
+    grid: [["alpha",""],["charlie",""]],
+    base64:
+      "eJzt3HtsU1UcB/Deuz5Ob9vtcF1RrkbWq5ld3Zp61QQmKm5zWBxo7lpQpiFdd1lbu3Z2JYARt2wRH0HRiOIrkGgckTnm8A9NnLBINIIISxw+4h8YdKKoMZrw" +
+      "CD7w3K5Ku7boPyb+8b1p8+s55/c5p79fH39eYhBf2MURAzVIT+3ihNsFM3ttucjAIkf5TOSzsSwbjdSYiaZsNGejhZozkWSjVY9SS2wxMUrVxCDKcpXvHy6J" +
+      "nSryPo7FMhbLWDSxSFg0s+iQ7IIgGPV3yEa8VBe7knDSFYQXL5NdjWog1B7XGpPx1V2JpmhKC6ejyUSLtiodSKrRzkha+pTr5z7mhEFOuE9oEc0/7RljD4lm" +
+      "NtQbkIluLjPDsRleykQ3L80WCFs7y64Klvf3aw9POP0pVrLyaP3X484PB1L8ApOzbu58zc5mOZGeHJkfcvVWVa0ZevTE4pe+WC+6BVHgfXpZRolk2s2xdulz" +
+      "elHmc3M5maYimZZzc5I9JhCeNcko8lTIG9nyRva8keO/7sibE5Nnj+20DDQEmuvPfHSgdrojcwa2v/XYLc/vuHjnDd6aR45as3UKrCbrjDrtbM5W0BE9UyiS" +
+      "aS/RkfK8UUXeiOaNZkkeZfoMG9uvfMYZVjY3K+eMv3L1r2bFjFy2m4/m5IbUlaIpFO+OhEq2l6emTHut52mvRExSpeBobQ76A9radF1DMt7hNLCL7XKr6hct" +
+      "4UgoFY9q5znE8i8+Q0tebWKR2i7Iqa1BXSgaipwo5pVFqrjSZ0petbboHiXyZRLt0BLpaHqdPDucKvbDl409WnyVbA6n1OSaHtkaDPqb/IkOba1sDaemc3tk" +
+      "W1iLx7MDz4XhZJc31N0d17yNalPAu7R16equdi1VZKE1nYomOj3OggX9lNz8RDKt9Xizf02FC/7GEgsQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ" +
+      "EBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBD/D6HQ709f7vnW+v6o9OCSg4dqntut0LaRUwuP7K52HGxfvrW5/N0J" +
+      "hUaunes4MDx0t2/sqh8OP957h0KPtV0fuum6I97h0W3+VFBWFeoaOkS/2+heMjl5anlkauw1hX5p7O34kTzxhj/48Ittpz9pVKjnnU3tTzrXReldny+L3Hwb" +
+      "UejwovGRea+6rrnx9xU1d/7yq6jQ15+NlXVf3f/Zvcl9fZfuezum0MG+rd9Mzenc8Md7H5w8vuGeZoX2+x6K1vTt3zLoHrc8MLVls1Jwl1yFHq9d//JXJzZN" +
+      "PG2et2Dvb66jSsH9dRW6P6gQ3wrjsmdsZw7/PP7KXqXg3rIKrRTuXzlK9vh2qNXp7c7JbUrBXWnrLxEkoaCPIk+s7Cn8CSE2V4o=",
+  },
+  {
+    seq: 4,
+    op: "delete bolded alpha (previous style anchor 9)",
+    grid: [["",""],["charlie",""]],
+    base64:
+      "eJzt3W9sE2UcB/DerWuv1257drRMDiPraUZXRlMeNYEJguucdg5IygbKNGbrbmtn186uZDLFLZsyNSiaiFNjIIqOyBxzMUYTJywQjSDCjAU1vsCgk4ka/yT8" +
+      "CSr49FZlXTv/vPDdt1nz7fM8v8/dc79r9/YEnbRlghN0RCc/NMGJAdHAPpuu0LHkCK8ln8ysZOqJXsvsZBqSaSQGLYVkmpIpEkFLczItiZSrmisFvVwk6CRF" +
+      "KXT/w0tmu5F4N8cyi2UWy2yWAksDyxzZIoqiPrFzNuLlhc0LBE6eL/DS1Yrd46uuqw+pnkhoQ0u4PBhV/bFgJFylNsaqI75gUyAmf8p1c59wYj8ndohVkuHH" +
+      "fSPsTybaARON0dLBaTMcm+FlLR28PFsU2Nol9spjdX99dvICl3hLVnZ5pPTrUduHPVF+abZt4bwlqoXNchI5O7Skzt5ZWNg+8NiZype+2CQ5REnk3YnL0suC" +
+      "dhs41q7EnJHNGS7PTanMzlBpvDwnW5pFgWdN0ks8yUkZ5aaM8lJG5P/uyFtj8Uun9hh7yqorSi98dLhksiNzena9/fitz++eu+dGV/GjJ03J6xTZNZmmXaeF" +
+      "zZnTOpKoFDNUWmboSH7KSEoZzUoZWWUnnTyHmR0vd9o5El+6/Cnn+LM28dXMm1bLjuYmU2rLfCskXYbOSlpneZKtdTa/kJu5t/JtPq9k9AfqoqGgOuNN4onx" +
+      "X9wkY8rmpQybn/WfNy/87eZdvpKMx5ihXhGCDWo4FoxtVGb7o5l+2Yq+TQ01KgZ/1Bdpb1NMNTXecm+4Qb1PMfmjk7VtitmvhkLJgbPAH2lx1bW2hlSXx1de" +
+      "7Vq1ZtWGlno1mmFhTSwaDDc5bWkLibNMrQ9HYmqbK/m/J33B65lhAQICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIC" +
+      "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICIl1Q8t35a5wTpveH5YdXHjla/NxeSmqHzq04sbco50j9" +
+      "uu0VufvHKAlcPy/n8ODAXe6RRd8fe6LzdkpO1S6ru+mGE67B4R3eaI3io8Q+cJR8u8WxMh4/ty4wPvIaJV/qOxt+EJ58w1vzyAu15497KHG+u7X+KdvGILnz" +
+      "87WBm1cLlAzeMjq0+FX7dct/X198xy+/SpS8/mxzVuu13Z/dGznYddXBd5op6e/a/s34nKbNF9/74OzpzfdUULJsee+Lc+9vrG9fXWvt/cnLUVIWX7Sg4+Mc" +
+      "a+zNSofZU3CRksaXOf3xnfP7OjzebfFgwX5Kut29weKuQ339jlHjg+N9T9O0xz9Scrpk086vzmwd22ZYvPTAb/aTNO3BkZQcqqGCe71+7TPmC8d+Hn3lAE17" +
+      "aCIlVvGBu4eFfe7dvqLYLlt8B0173GLplaIspnVf4gUTe0t/ALAiwHw=",
+  },
+  {
+    seq: 5,
+    op: "type and delete echo inside one save",
+    grid: [["",""],["charlie",""]],
+    base64:
+      "eJzt1H9MlHUcB3Ceh/vx3MMBXx84iYeWcDYF1Nv5rTYhVOKIPEJdJ2hJzcH5AEcnR8c50iIYLEnnj7SUZA2Xpk5JiEnTLUTU9cPfNE+t2bJMszTXj01kWtL3" +
+      "jis5flV/tPXH+3a3932/38/reb7fz3MghEhtTbwQQkLkXU28WMOJGjYIuy+EJUd4f/KBDA2kiqj8qQ6kJpBaovGnEEhdIEUi+DMskPpAhhPRnxGBjPSlnFOa" +
+      "LajkCUKIZDTGm//mJbNdSryZYxnKMpSlmqXAUsMyXNaLoqjynYiNeHlK6SSBkycKvDTemGCx5RYUOhWLy7l0SVmmw63YPQ5XWY5S5Ml12RzFJR75PFfLneHE" +
+      "HZy4XMyRND8d7GBvmfgv6OuYPxM5/wzHZnjZn4m8PFYU2Fofe0Wyur++J/MC5/tI0ex4JPVyl+F4nZtPUxumjEtR9GyWk0hPa0pBQnV8fGXzqpvZWy9USYmi" +
+      "JPJm37FUsuB/PBxrl29Oy+Y09+YGVKqHqdTem5P1paLAsyapJJ6QoNGYoJEUNIr6rzuyr9vbd7VFW5eRm5V6++SJyf0dia3buX/NrMbdcS0zTEkrL+kC5xTZ" +
+      "mXSDzqlnc2FDOuKrFIep1I/QkeigkSFoNDZoFCMn0/57+H5gEYPuoWNzYwbc489a308zclAtu5qZDKjNsKVLIcN0VvJ3lidqf2fHxHMj91Z+0maVtPaSArfT" +
+      "oYz4kHii/QcPSRu0eWmYzUf9680Lo25+9GvoiKp/16Ndwyg4FitlHodnmXGs3T3cX7tRVaE4i4wau9vmqqww6vLyrJnWssXKi0ad3d1fW2EMsytOZ2CQHGN3" +
+      "LTEVlJc7FZPFlplrmjNvztIlhYp7mIV5HrejrDjZMGTBd5eB9WUuj1JhCvw/GrpgtYywAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB" +
+      "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB" +
+      "AQEBAQHxfxeUXO99MPl73cdt8quzT51O2txJSX7rrfSLnRPCTxUuaMqKONxNSckj48JP7Gl+ztwx9ceza6ufpuRq/vSCxx69aNrTtsXqzjPaKEloPk1+WJ04" +
+      "2+u9taDkSsd7lHytql58Q3h9rzXvtbfze89ZKEk+sK5wvWGZgzz7xfySx+cKlOx5oqt12q6Eh2f+vjDpmV/vSJS8/1ZpaPlDtZ+/4Dpa88DRD0sp2VHT9N2V" +
+      "2OIVdz/6tOfaiuezKJk+s/6duJeKCivn5kfX/2zlKMnwTp20/LPwaM8H2Ylhlpi7lBS9y6nObZvYsNxi3eh1xBympO3Qef2GA2fa2z4pbI9Ur/dSciT9es6N" +
+      "r9rfOLfpm83jn7J8SUlTc+PeRY13Dm3foCvu7VwdRUmtud6RVHOsYUdil/aVKw1vUtLTmlKQUB0fX9m86mb21gtVlFybXLXt25vrujdqpqUd+S3hEiWpl7sM" +
+      "x+vcfJraMGVciqKn5FgeFcwLVfM3hd0++0vX9iOUxNbt3L9mVuPuuJYZpqSVl3SURIsvL2oTDpp32yZ4dhq8WyjZ1+3tu9qircvIzUq9ffLE5NT7RVkc8swk" +
+      "XghnH+kPTwg6/A==",
+  },
+];

@@ -3,15 +3,14 @@
  * runner rather than through a `runCli` subprocess.
  *
  * The one rule that matters here, and the reason this is shared rather than
- * copied per helper: **the harness may never open a sign-in window**. The web
- * oracle holds the account's browser profile open for the whole run
- * (`webOracle.ts`'s `launchPersistentContext` on `profileDirForDsid`), so a
- * login started mid-run would both block on a human and - because a
- * successful login *promotes* an ephemeral profile over that directory, an
- * `rm` followed by a `rename` (`src/auth/accountStore.ts`) - delete the
- * directory underneath the running browser. A lapsed session must fail the
- * run loudly instead. Two helpers each keeping their own copy of that rule is
- * exactly how one of them ends up without it.
+ * copied per helper: **the harness may never open a sign-in window**. There is
+ * nobody at this browser to complete one, so it would simply block until
+ * something closed it; a lapsed session must fail the run loudly instead.
+ * Two helpers each keeping their own copy of that rule is exactly how one of
+ * them ends up without it.
+ *
+ * The subprocess side of the same rule is `clone --non-interactive`, which
+ * `vault.ts` passes.
  */
 
 import { Buffer } from "node:buffer";

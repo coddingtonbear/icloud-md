@@ -205,6 +205,25 @@ export class RequestedAccountMismatchError extends IcloudNotesSyncError {
   }
 }
 
+/**
+ * A sign-in needing a human came up while running `--non-interactive`.
+ *
+ * Opening a window in an unattended context is worse than failing: nobody is
+ * there to complete it, so the command blocks until something closes it (the
+ * live integration suite paid 5.5 minutes per clone this way on 2026-08-02
+ * before giving up). Failing immediately says what actually happened.
+ */
+export class InteractiveSignInRefusedError extends IcloudNotesSyncError {
+  constructor(message: string, options: ErrorOptions = {}) {
+    super(message, {
+      ...options,
+      hint:
+        "Sign in once with a browser window available - \"icloud-md reauthenticate <clone>\" for a known account, or " +
+        '"icloud-md clone <directory>" without --non-interactive - and then retry.',
+    });
+  }
+}
+
 export class AccountMismatchError extends IcloudNotesSyncError {
   constructor(targetDir: string, expectedAppleId: string, actualAppleId: string) {
     super(`${targetDir} was cloned for ${expectedAppleId}, but the session just authenticated is for ${actualAppleId}.`, {

@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { create } from "@bufbuild/protobuf";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
-import { gridFromTableDocument, parseTableDocument, tableDocumentRoundTrips } from "./decodeTableRecord.js";
+import { encodeTableDocument, gridFromTableDocument, parseTableDocument, tableDocumentRoundTrips } from "./decodeTableRecord.js";
+import { VectorTimestampSchema, VectorTimestamp_ElementSchema } from "./gen/crdt_pb.js";
 import { validateTableDocumentInvariants } from "./tableEdit.js";
 import { prepareTableAttachmentUpdate } from "./tablePushEdit.js";
 import { TABLE_FIRST_REVISION } from "./realFixtures.js";
@@ -114,6 +116,27 @@ test("prepareTableAttachmentUpdate: refuses a record with no readable MergeableD
   assert.equal(result.ok, false);
   if (!result.ok) {
     assert.match(result.reason, /no readable data/);
+  }
+});
+
+test("prepareTableAttachmentUpdate: refuses a record whose document is a CRDT delta", () => {
+  // A delta (populated `CRDT.Document.startVersion`) round-trips byte-for-byte
+  // like any other document, so the round-trip gate lets it through - push has
+  // to refuse it on the marker itself, and report why rather than throw.
+  const doc = parseTableDocument(Buffer.from(TABLE_FIRST_REVISION, "base64"));
+  doc.document.startVersion = create(VectorTimestampSchema, {
+    element: [create(VectorTimestamp_ElementSchema, { replicaIndex: 0n, clock: 1n, subclock: 0n })],
+  });
+  const delta = encodeTableDocument(doc);
+  assert.equal(tableDocumentRoundTrips(delta), true);
+
+  const record = noteRecordName({
+    fields: { MergeableDataEncrypted: { value: delta.toString("base64"), type: "ENCRYPTED_BYTES" } },
+  });
+  const result = prepareTableAttachmentUpdate(record, [["A0", "B0-edited"], ["", ""]], OUR_REPLICA);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.match(result.reason, /populated startVersion/);
   }
 });
 

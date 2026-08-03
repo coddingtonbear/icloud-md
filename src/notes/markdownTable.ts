@@ -33,7 +33,7 @@ import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import remarkStringify from "remark-stringify";
 import { unified } from "unified";
-import { textPhrasing } from "./renderNoteMarkdown.js";
+import { hasObsidianMarkup, textPhrasing } from "./renderNoteMarkdown.js";
 
 /** `tablePipeAlign: false` is the closest available match to the previous
  * renderer's format: no column-width alignment padding. */
@@ -49,17 +49,43 @@ export interface MarkdownTableBlock {
 
 // --- rendering -------------------------------------------------------------
 
+/**
+ * Renders the grid, preferring the Obsidian spelling of any cell that has one
+ * (`[[Note]]` rather than `\[\[Note]]` - see `renderNoteMarkdown`'s
+ * `findObsidianRawRanges`) but, exactly as that renderer does, only when it
+ * is provably the same table: the preferred spelling is parsed back and kept
+ * only if it yields what the conservative one does. A table's markdown is
+ * spliced into the note body *after* the note-level round-trip gate has run,
+ * so this is the only check standing behind it.
+ */
 export function renderMarkdownTable(grid: readonly string[][]): string {
   const header = grid[0];
   if (!header) {
     throw new Error("Table has no rows - refusing to guess at its structure");
   }
+  const conservative = stringifyGrid(grid, false);
+  if (!grid.some((row) => row.some((cell) => hasObsidianMarkup(cell)))) {
+    return conservative;
+  }
+  const obsidian = stringifyGrid(grid, true);
+  try {
+    if (JSON.stringify(parseMarkdownTable(obsidian)) === JSON.stringify(parseMarkdownTable(conservative))) {
+      return obsidian;
+    }
+  } catch {
+    // Either spelling failing to parse back means this grid can't be
+    // compared - keep the one this renderer has always emitted.
+  }
+  return conservative;
+}
+
+function stringifyGrid(grid: readonly string[][], obsidian: boolean): string {
   const table: Table = {
     type: "table",
     children: grid.map(
       (row): TableRow => ({
         type: "tableRow",
-        children: row.map((cell): TableCell => ({ type: "tableCell", children: cellChildren(cell) })),
+        children: row.map((cell): TableCell => ({ type: "tableCell", children: cellChildren(cell, obsidian) })),
       }),
     ),
   };
@@ -72,14 +98,14 @@ export function renderMarkdownTable(grid: readonly string[][]): string {
  * so they're carried as raw `<br>` html nodes, same notation the previous
  * renderer used. Everything else is a text node - `remark-stringify` owns
  * the escaping. */
-function cellChildren(text: string): PhrasingContent[] {
+function cellChildren(text: string, obsidian: boolean): PhrasingContent[] {
   const children: PhrasingContent[] = [];
   text.split(/\r?\n/).forEach((part, index) => {
     if (index > 0) {
       children.push({ type: "html", value: "<br>" });
     }
     if (part.length > 0) {
-      children.push(...textPhrasing(part));
+      children.push(...textPhrasing(part, obsidian));
     }
   });
   return children;
