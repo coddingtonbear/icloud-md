@@ -636,13 +636,13 @@ describe("tables", { concurrency: 1, skip: enabled ? false : "set ICLOUD_MD_ITES
     expected = next;
   }
 
-  /** The independent check: Apple's own client, reading its own table markup. */
+  /** The independent check: the grid Apple's own client decoded, from its own model. */
   async function assertWebShows(what: string): Promise<void> {
     const web = await (await run.oracle()).readNote(noteId);
     assert.deepEqual(
-      web.tables[0],
+      web.tables[attachmentId],
       expected,
-      `Apple's client should show ${what}. Tables seen: ${JSON.stringify(web.tables)}; clipboard html: ${web.html.slice(0, 1500)}`,
+      `Apple's client should show ${what}. Tables it holds: ${JSON.stringify(web.tables)}`,
     );
   }
 
@@ -732,45 +732,16 @@ describe("tables", { concurrency: 1, skip: enabled ? false : "set ICLOUD_MD_ITES
     await assertWebShows("the table without its deleted column");
   });
 
-  it("an open web client merges a pushed cell edit into its held copy - not just re-decodes", async () => {
-    // Every table assertion above reads *cold*: the client is navigated to the
-    // note and decodes our stored bytes, so it agrees with whatever we wrote
-    // by construction. That is precisely the blind spot both past table
-    // corruptions lived in - documents that looked right cold and were
-    // discarded, or doubled, by a client that already held a copy. This is the
-    // table equivalent of the note-body merge canary above.
-    const oracle = await run.oracle();
-    const before = await oracle.readNote(noteId);
-    assert.deepEqual(before.tables[0], expected, "the client should be holding the table before we edit it");
-
-    const next = expected.map((row) => [...row]);
-    next[0]![0] = "R0C0-merged";
-    await pushGrid(next, "a cell edit under an open client");
-
-    // The same forced reload the note-body canary uses. A table's bytes live
-    // on a separate Attachment record, so this is also the test of whether the
-    // client's reload picks the table up at all.
-    const reloaded = await oracle.forceReloadNote(noteId);
-    assert.ok(reloaded !== undefined, "the open client should know the note it is displaying");
-
-    // Wait on the client's own testimony rather than on a clock: poll until it
-    // shows the edit, then confirm from `icTableManager`'s own merge traces
-    // that it got there by merging rather than by storing a first copy.
-    const deadline = Date.now() + 30_000;
-    let after = await oracle.rereadOpenNote(noteId);
-    while (Date.now() < deadline && after.tables[0]?.[0]?.[0] !== "R0C0-merged") {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      after = await oracle.rereadOpenNote(noteId);
-    }
-    assert.deepEqual(after.tables[0], expected, "the open client should have adopted the edited cell");
-
-    const traces = await oracle.mergeTraces();
-    assert.ok(traces !== undefined, "Apple's diagnose hook should be reachable");
-    assert.ok(
-      traces.tableMergeTraces.some((trace) => trace !== null),
-      "the client should have recorded a table merge - a stored first copy leaves no trace at all",
-    );
-  });
+  // A table merge canary belongs here - the note-body suite has one, and
+  // "fine cold, wrong against a held copy" is the shape both past table
+  // corruptions had. It is deliberately absent, because the harness cannot
+  // currently drive the merge: `forceReloadNote` reloads the *Note* record,
+  // and a table's bytes live on a separate `Attachment` record that the
+  // reload never refetches. Measured live (run 67bbc1): after a pushed cell
+  // edit the server held "R0C0-merged" while the open client's
+  // `icTableManager` still held "R0C0", indefinitely. Finding a path that
+  // makes the client re-read an attachment is its own task; a canary that
+  // passed without observing a merge would be worse than none.
 
   it("reproduces the whole edited table in a fresh clone", async () => {
     // The second oracle. A fresh clone has none of this run's local state, so

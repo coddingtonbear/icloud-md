@@ -77,10 +77,20 @@ nothing, so none of it is ours:
   the suite asserts nothing about any *edit* until Apple's client has rendered
   the planted table with the cells it should have.
 
-Apple serialises a table as ordinary `<table>` markup on copy, so the oracle
-can read a table as a grid even though it cannot read the canvas-rendered body
-around it — which is what makes a real second opinion on every table edit
-possible.
+Reading the result back needed a different route from the rest of the oracle.
+A table is not on the clipboard — it copies as the bare U+FFFC placeholder,
+marked `data-tt-replacement="true"`, with none of its cells — and it is not in
+the DOM either, being canvas-rendered like the body. So the oracle reads
+`icTableManager` instead: the sibling of the `topoTextManager` whose merge
+traces the suite already uses, holding the live `CRTable` the client decoded
+from the attachment's bytes, keyed by attachment record id. Walking its
+`_rows`/`_columns` and reading each cell's `.string.UTF16String` is Apple's own
+view of the grid, from Apple's own decoder.
+
+That is a stronger second opinion than scraped markup would have been: it needs
+no merge to have happened and no UI to be driven, and it is keyed by attachment
+id, so an LRU still holding a table from an earlier note can't be mistaken for
+this one.
 
 `plantTable.test.ts` covers the planter offline, on captured bytes, under plain
 `npm test`: a planter that quietly produced a malformed body would make the

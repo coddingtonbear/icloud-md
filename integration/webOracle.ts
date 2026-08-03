@@ -73,15 +73,16 @@ export interface WebNote {
   html: string;
   paragraphs: WebParagraph[];
   /**
-   * Every table in the note, in document order, as rows of cell text - taken
-   * from the `<table>` markup Apple's own client puts on the clipboard.
-   *
-   * Deliberately read from Apple's serialization rather than compared against
-   * this project's `decodeTableRecord.ts`: a table this tool encoded wrongly
-   * and then decoded back to what it meant is the exact failure mode a second
-   * oracle exists to catch.
+   * The record id the client actually has selected. Normally `noteId`; see
+   * `readNote` for why it is worth carrying separately.
    */
-  tables: string[][][];
+  selectedNoteId: string;
+  /**
+   * Every table the client currently holds, keyed by its `Attachment` record
+   * id, as rows of cell text - read out of Apple's *own* table model rather
+   * than from anything this project decoded. See `readTables`.
+   */
+  tables: Record<string, string[][]>;
 }
 
 /**
@@ -171,7 +172,17 @@ export class NotesWebOracle {
    */
   async readNote(noteId: string): Promise<WebNote> {
     await this.page.goto(noteUrl(noteId), { waitUntil: "domcontentloaded" });
-    return this.copyOpenNote(noteId);
+    const note = await this.copyOpenNote(noteId);
+    // Navigating to a note the account no longer has leaves the client
+    // sitting on its previous selection, silently - so every field above
+    // would describe some other note, plausibly. Refuse rather than report.
+    if (note.selectedNoteId !== "" && !note.selectedNoteId.toLowerCase().includes(noteId.toLowerCase())) {
+      throw new Error(
+        `The web client did not open note ${noteId}; it is showing ${note.selectedNoteId} ` +
+          `(titled ${JSON.stringify(note.title)}). A trashed or missing note does this.`,
+      );
+    }
+    return note;
   }
 
   /**
@@ -240,7 +251,10 @@ export class NotesWebOracle {
       plainText: lastPlain,
       html: lastHtml,
       paragraphs: lastHtml === "" ? [] : await this.parseClipboardHtml(lastHtml),
-      tables: lastHtml === "" ? [] : await this.parseClipboardTables(lastHtml),
+      // Read from the client's own table model, not the clipboard - see
+      // `readTables`. Independent of whether the copy above succeeded.
+      tables: await this.readTables(),
+      selectedNoteId: await this.selectedNoteId(),
     };
   }
 
@@ -284,29 +298,93 @@ export class NotesWebOracle {
   }
 
   /**
-   * Pulls every table out of the clipboard `text/html`, as rows of cell text.
+   * Reads every table the client currently holds, as rows of cell text, out
+   * of Apple's own in-memory table model.
    *
-   * Apple serialises a note's table as ordinary `<table>` markup on copy, so
-   * unlike the note body (which is canvas-rendered and unscrapable) a table
-   * really can be read as a grid. Parsed in-page for the same reason
-   * `parseClipboardHtml` is: the browser already has a correct HTML parser,
-   * and test-only code shouldn't add one to this project's dependencies.
+   * The clipboard is no help for a table, which is not obvious and cost a
+   * detour to establish (live probe, 2026-08-02): a table copies as the bare
+   * U+FFFC placeholder span, marked `data-tt-replacement="true"`, carrying
+   * none of its cells. Nor is a table in the DOM - like the note body it is
+   * rendered to the canvas. Either way there is nothing to scrape.
    *
-   * Cell text is whitespace-normalised - Apple's markup carries layout
-   * newlines and non-breaking spaces inside cells that no assertion should
-   * have to know about.
+   * What there *is* is `icTableManager`, the sibling of the `topoTextManager`
+   * whose merge traces these tests already read: a `CRDTManager` keyed by
+   * `Private::Notes::currentUser::<attachment record id>`, holding the live
+   * `CRTable` the client decoded from that attachment's bytes. Walking its
+   * `_rows`/`_columns` ordered sets and reading each cell's
+   * `.string.UTF16String` gives Apple's own view of the grid - its own
+   * ordering, its own cell strings, its own decoder.
+   *
+   * That makes this a *stronger* oracle than scraped markup would have been:
+   * it is the client's parse of the exact bytes we wrote, and it needs
+   * neither a merge to have happened nor any UI to be driven. It is also why
+   * the result is keyed by attachment id rather than by position - the
+   * manager is an LRU that can still hold tables from notes visited earlier,
+   * and a positional read would happily return one of those.
    */
-  private parseClipboardTables(html: string): Promise<string[][][]> {
-    return this.page.evaluate((source: string) => {
-      const doc = new DOMParser().parseFromString(source, "text/html");
-      return Array.from(doc.querySelectorAll("table")).map((table) =>
-        Array.from(table.querySelectorAll("tr")).map((row) =>
-          Array.from(row.querySelectorAll("td, th")).map((cell) =>
-            (cell.textContent ?? "").replace(/ /g, " ").replace(/\s+/g, " ").trim(),
-          ),
-        ),
-      );
-    }, html) as Promise<string[][][]>;
+  /**
+   * The tables the client currently holds, without the clipboard round trip
+   * `rereadOpenNote` performs - cheap enough to poll in a wait loop, and it
+   * sends no keystrokes at all.
+   */
+  async tables(): Promise<Record<string, string[][]>> {
+    return this.readTables();
+  }
+
+  private async readTables(): Promise<Record<string, string[][]>> {
+    const frame = await this.appFrame();
+    // Passed as source text, and free of inner named functions, because the
+    // test runner's TypeScript transform rewrites those into calls to a
+    // `__name` helper that does not exist inside the page.
+    return (await frame.evaluate(`(() => {
+      const debug = window.NotesApp ? window.NotesApp.Debug : undefined;
+      const note = debug && debug.noteList ? debug.noteList._lastSelectedNote : undefined;
+      const manager = note && note._cwStore ? note._cwStore.icTableManager : undefined;
+      const out = {};
+      if (!manager || !manager.data || typeof manager.data[Symbol.iterator] !== "function") {
+        return out;
+      }
+      for (const entry of manager.data) {
+        const key = String(entry[0]);
+        const table = entry[1] ? entry[1].table : undefined;
+        if (!table || !table._rows || !table._columns) {
+          continue;
+        }
+        const rowIds = [];
+        const columnIds = [];
+        for (let i = 0; i < table._rows.size; i += 1) rowIds.push(table._rows.get(i));
+        for (let i = 0; i < table._columns.size; i += 1) columnIds.push(table._columns.get(i));
+        const grid = [];
+        for (const rowId of rowIds) {
+          const row = [];
+          for (const columnId of columnIds) {
+            const cell = table.cellContentsAtRowAndColumn(rowId, columnId);
+            row.push(cell && cell.string && cell.string.UTF16String !== undefined ? cell.string.UTF16String : "");
+          }
+          grid.push(row);
+        }
+        out[key.slice(key.lastIndexOf(":") + 1)] = grid;
+      }
+      return out;
+    })()`)) as Record<string, string[][]>;
+  }
+
+  /**
+   * The record id the client actually has selected.
+   *
+   * Worth checking rather than assuming: navigating to a note that has been
+   * trashed leaves the client showing whatever note it had selected before,
+   * with no error of any kind (observed 2026-08-02, on a note the account had
+   * quietly moved to Recently Deleted). Everything `readNote` returns would
+   * then describe the wrong note, convincingly.
+   */
+  private async selectedNoteId(): Promise<string> {
+    const frame = await this.appFrame();
+    return (await frame.evaluate(`(() => {
+      const debug = window.NotesApp ? window.NotesApp.Debug : undefined;
+      const note = debug && debug.noteList ? debug.noteList._lastSelectedNote : undefined;
+      return note && note.id !== undefined ? String(note.id) : "";
+    })()`)) as string;
   }
 
   /**
