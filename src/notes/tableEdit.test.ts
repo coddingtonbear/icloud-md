@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { create, isFieldSet } from "@bufbuild/protobuf";
 import { applyTableEdit, diffTableGrid, validateTableDocumentInvariants } from "./tableEdit.js";
+import {
+  DocumentSchema as CrdtDocumentSchema,
+  VectorTimestampSchema,
+  VectorTimestamp_ElementSchema,
+} from "./gen/crdt_pb.js";
 import {
   cellKey,
   encodeTableDocument,
@@ -762,6 +768,63 @@ for (const snapshot of TABLE_LONG_LIVED_SNAPSHOTS) {
     editAndVerify(reparsed, withRow);
   });
 }
+
+// --- delta documents (a populated startVersion) are refused -------------------
+//
+// `CRDT.Document.startVersion` marks the blob as the output of Apple's
+// `CRDocument.deltaSince` - a partial graph whose receiver answers
+// `CRMergeResult.Fail` when the baseline isn't dominated by its own version.
+// No capture has shown a record blob carrying a populated one, but the byte
+// round-trip gate would preserve it silently, so the engine refuses rather
+// than push an edited document still claiming to be a delta.
+
+const START_VERSION_FIELD = CrdtDocumentSchema.fields.find((f) => f.localName === "startVersion")!;
+
+test("real fixtures carry startVersion only as the present-but-empty zero vector", () => {
+  const present = ALL_FIXTURES.filter((fixture) => isFieldSet(parse(fixture.base64).document, START_VERSION_FIELD));
+  // The two long-lived snapshots, and only those - see `realFixtures.ts`.
+  assert.deepEqual(
+    present.map((fixture) => fixture.tag),
+    TABLE_LONG_LIVED_SNAPSHOTS.map((snapshot) => snapshot.tag),
+  );
+  for (const fixture of present) {
+    // Empty, i.e. dominated by every version: not a delta, and editable.
+    assert.equal(parse(fixture.base64).document.startVersion?.element.length, 0);
+    validateTableDocumentInvariants(parse(fixture.base64));
+  }
+});
+
+test("a document carrying a populated startVersion is refused, in memory and after a round trip", () => {
+  const doctored = parse(TABLE_FINAL_REVISION);
+  doctored.document.startVersion = create(VectorTimestampSchema, {
+    element: [create(VectorTimestamp_ElementSchema, { replicaIndex: 0n, clock: 1n, subclock: 0n })],
+  });
+  assert.throws(() => validateTableDocumentInvariants(doctored), /populated startVersion/);
+
+  // The same document as bytes: parsing keeps the marker, so the refusal
+  // reaches a delta that arrives from a record rather than from a mutation.
+  const reparsed = parseTableDocument(encodeTableDocument(doctored));
+  assert.equal(reparsed.document.startVersion?.element.length, 1);
+  const grid = gridFromTableDocument(reparsed);
+  const edited = grid.map((row) => [...row]);
+  edited[0]![0] = "changed";
+  assert.throws(() => applyTableEdit(reparsed, edited, OUR_REPLICA), /populated startVersion/);
+});
+
+test("clearing a doctored startVersion restores editability", () => {
+  // Guards the refusal against being an accident of the doctoring itself:
+  // the same document, minus only the marker, still edits cleanly.
+  const doctored = parse(TABLE_FINAL_REVISION);
+  doctored.document.startVersion = create(VectorTimestampSchema, {
+    element: [create(VectorTimestamp_ElementSchema, { replicaIndex: 0n, clock: 1n, subclock: 0n })],
+  });
+  const reparsed = parseTableDocument(encodeTableDocument(doctored));
+  reparsed.document.startVersion = undefined;
+  const grid = gridFromTableDocument(reparsed);
+  const edited = grid.map((row) => [...row]);
+  edited[0]![0] = "changed";
+  editAndVerify(reparsed, edited);
+});
 
 // --- diffTableGrid plan shapes ------------------------------------------------
 
