@@ -224,11 +224,10 @@ export async function plantTiedAnchorDeletion(options: PlantTiedAnchorDeletionOp
 
   // Resolve the account the way push does, with one deliberate difference:
   // this helper may never open a sign-in window. It runs inside the test
-  // runner rather than in a CLI subprocess, and the web oracle is holding
-  // the account's browser profile open for the duration of the run - a
-  // login here would both block on a human and replace that profile
-  // directory underneath the running browser (see `accountStore.ts`'s
-  // promote step). A lapsed session should fail this test loudly instead.
+  // runner rather than in a CLI subprocess, so there is nobody to complete
+  // one and it would simply block until something closed it. A lapsed
+  // session should fail this test loudly instead. (The subprocess side of
+  // the same rule is `clone --non-interactive`, which `vault.ts` passes.)
   const auth = await resolveFolderAccount(options.vaultDir, state.account, {
     performBrowserLogin: () => {
       throw new Error(

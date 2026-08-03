@@ -32,6 +32,14 @@ export interface CloneOptions {
    * caller has *named* the identity, so there is nothing ambiguous to resolve.
    */
   account?: string | undefined;
+  /**
+   * Never open a sign-in window: fail instead. For unattended callers (CI,
+   * cron, the live integration suite), where a window has nobody to complete
+   * it and so turns a fast failure into a long block. Only affects the
+   * *visible* fallback - a saved session or a headless profile relaunch is
+   * still tried, and is what makes an unattended `--account` clone work.
+   */
+  nonInteractive?: boolean;
 }
 
 export interface CloneSummary {
@@ -63,10 +71,11 @@ export async function runClone(
   }
   const titleMode = options.filenameAsTitle === true ? "filename" : "in-body";
 
+  const interactive = options.nonInteractive !== true;
   const auth =
     options.account !== undefined && options.account !== ""
-      ? await bindKnownAccount(options.account, { onStatus: onLoginStatus })
-      : await bindNewFolderAccount({ onStatus: onLoginStatus });
+      ? await bindKnownAccount(options.account, { onStatus: onLoginStatus, interactive })
+      : await bindNewFolderAccount({ onStatus: onLoginStatus, interactive });
   if (!auth.ckdatabasewsUrl) {
     throw new NotesUnavailableError();
   }

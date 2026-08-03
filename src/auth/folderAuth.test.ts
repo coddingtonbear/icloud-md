@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { accountProfileDir, accountSessionPath, readAccountMeta, writeAccountMeta } from "./accountStore.js";
 import { bindKnownAccount, bindNewFolderAccount, reauthenticateFolder, resolveFolderAccount } from "./folderAuth.js";
-import { RequestedAccountMismatchError, SignInIncompleteError, UnknownAccountError } from "../errors.js";
+import {
+  InteractiveSignInRefusedError,
+  RequestedAccountMismatchError,
+  SignInIncompleteError,
+  UnknownAccountError,
+} from "../errors.js";
 import type { AuthCheckResult } from "../cloudkit/setupClient.js";
 import { writeCloneState, type CloneState } from "../notes/cloneState.js";
 import { writeSessionFile, type IcloudSession } from "../session.js";
@@ -321,6 +326,160 @@ test("bindKnownAccount rejects an unknown account, listing the ones that exist",
         assert.ok(error instanceof UnknownAccountError);
         assert.match(error.message, /typo@example\.com/);
         assert.match(error.hint ?? "", /real@example\.com/);
+        return true;
+      },
+    );
+  }));
+
+/**
+ * The regression the 2026-08-02 live run needs: a clone of an account that
+ * already has a live session must not touch a browser at all. Relaunching the
+ * account's profile is the step that failed there (see `reuseStoredSession`),
+ * and holding a live session makes it unnecessary in the common case.
+ */
+test("bindKnownAccount reuses the account's stored session without launching a browser", () =>
+  withTempRoot(async (root) => {
+    const accountsRoot = path.join(root, "accounts");
+    const stored = makeSession("STORED=1");
+    await writeAccountMeta({ appleId: "someone@example.com", dsid: "555" }, accountsRoot);
+    await writeSessionFile(stored, accountSessionPath("555", accountsRoot));
+
+    const status: string[] = [];
+    const auth = await bindKnownAccount("someone@example.com", {
+      accountsRoot,
+      onStatus: (message) => status.push(message),
+      performBrowserLogin: async () => {
+        throw new Error("a live stored session must not need a browser");
+      },
+      checkAuthentication: async (session) => {
+        assert.equal(session.cookie, "STORED=1", "the stored session is what gets checked");
+        return ok("555", "someone@example.com", session);
+      },
+    });
+
+    assert.equal(auth.dsid, "555");
+    assert.equal(auth.session.cookie, "STORED=1");
+    assert.ok(
+      status.some((message) => /Reusing someone@example\.com's saved session/.test(message)),
+      `the reuse should be announced, got ${JSON.stringify(status)}`,
+    );
+  }));
+
+test("bindKnownAccount persists a session the reuse check rotated", () =>
+  withTempRoot(async (root) => {
+    const accountsRoot = path.join(root, "accounts");
+    await writeAccountMeta({ appleId: "someone@example.com", dsid: "555" }, accountsRoot);
+    await writeSessionFile(makeSession("STORED=1"), accountSessionPath("555", accountsRoot));
+
+    // `/validate` rotates X-APPLE-WEBAUTH-TOKEN on every call; a rotation
+    // that isn't written back leaves the next command re-presenting a token
+    // this one already superseded.
+    const rotated = makeSession("STORED=2");
+    await bindKnownAccount("someone@example.com", {
+      accountsRoot,
+      performBrowserLogin: async () => {
+        throw new Error("a live stored session must not need a browser");
+      },
+      checkAuthentication: async () => ok("555", "someone@example.com", rotated),
+    });
+
+    assert.equal(await readSessionCookie(accountSessionPath("555", accountsRoot)), "STORED=2");
+  }));
+
+test("bindKnownAccount falls back to the browser when the stored session no longer authenticates", () =>
+  withTempRoot(async (root) => {
+    const accountsRoot = path.join(root, "accounts");
+    await writeAccountMeta({ appleId: "someone@example.com", dsid: "555" }, accountsRoot);
+    await writeSessionFile(makeSession("EXPIRED=1"), accountSessionPath("555", accountsRoot));
+
+    const captured = makeSession("FRESH=1");
+    const attempts: (boolean | undefined)[] = [];
+    const auth = await bindKnownAccount("someone@example.com", {
+      accountsRoot,
+      performBrowserLogin: async (options) => {
+        attempts.push(options?.headless);
+        return captured;
+      },
+      checkAuthentication: async (session) =>
+        session.cookie === "EXPIRED=1"
+          ? { ok: false, status: 421, error: "session expired" }
+          : ok("555", "someone@example.com", session),
+    });
+
+    assert.equal(auth.dsid, "555");
+    assert.deepEqual(attempts, [true], "a stale stored session should still get the silent profile relaunch");
+    assert.equal(await readSessionCookie(accountSessionPath("555", accountsRoot)), "FRESH=1");
+  }));
+
+test("bindKnownAccount refuses a stored session that authenticates as a different account", () =>
+  withTempRoot(async (root) => {
+    const accountsRoot = path.join(root, "accounts");
+    await writeAccountMeta({ appleId: "wanted@example.com", dsid: "555" }, accountsRoot);
+    await writeSessionFile(makeSession("MISFILED=1"), accountSessionPath("555", accountsRoot));
+
+    // An inconsistent store, not a stale one: guessing past it risks binding
+    // the new folder to someone else's notes.
+    await assert.rejects(
+      () =>
+        bindKnownAccount("wanted@example.com", {
+          accountsRoot,
+          performBrowserLogin: async () => {
+            throw new Error("should never fall back to a browser after an identity mismatch");
+          },
+          checkAuthentication: async (session) => ok("999", "someoneelse@example.com", session),
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof RequestedAccountMismatchError);
+        assert.match(error.message, /someoneelse@example\.com/);
+        return true;
+      },
+    );
+  }));
+
+test("bindKnownAccount refuses to open a window when non-interactive, instead of blocking on one", () =>
+  withTempRoot(async (root) => {
+    const accountsRoot = path.join(root, "accounts");
+    await writeAccountMeta({ appleId: "someone@example.com", dsid: "555" }, accountsRoot);
+    await writeSessionFile(makeSession("EXPIRED=1"), accountSessionPath("555", accountsRoot));
+
+    const attempts: (boolean | undefined)[] = [];
+    await assert.rejects(
+      () =>
+        bindKnownAccount("someone@example.com", {
+          accountsRoot,
+          interactive: false,
+          performBrowserLogin: async (options) => {
+            attempts.push(options?.headless);
+            throw new SignInIncompleteError("no silent recovery available");
+          },
+          checkAuthentication: async () => ({ ok: false, status: 421, error: "session expired" }),
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof InteractiveSignInRefusedError);
+        assert.match(error.message, /someone@example\.com/);
+        assert.ok(error.cause instanceof SignInIncompleteError, "the silent attempt's failure is kept as the cause");
+        return true;
+      },
+    );
+
+    assert.deepEqual(attempts, [true], "the silent attempt still runs; only the visible one is refused");
+  }));
+
+test("bindNewFolderAccount refuses outright when non-interactive - it has nothing silent to try", () =>
+  withTempRoot(async (root) => {
+    await assert.rejects(
+      () =>
+        bindNewFolderAccount({
+          accountsRoot: path.join(root, "accounts"),
+          tmpRoot: path.join(root, "tmp"),
+          interactive: false,
+          performBrowserLogin: async () => {
+            throw new Error("should never launch a browser when non-interactive");
+          },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof InteractiveSignInRefusedError);
+        assert.match(error.hint ?? "", /--non-interactive/);
         return true;
       },
     );

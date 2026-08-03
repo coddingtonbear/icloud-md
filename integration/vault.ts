@@ -31,11 +31,20 @@ export class Vault {
     await mkdir(path.dirname(dir), { recursive: true });
     // `--account` is what makes an unattended run possible: without it, clone
     // opens an interactive sign-in for every new directory.
+    //
+    // `--non-interactive` is what keeps a *failed* one cheap. A clone that
+    // cannot reuse the account's saved sign-in silently would otherwise open
+    // a window and wait on a human who isn't there - which on 2026-08-02 cost
+    // 5.5 minutes per remaining cloning test once the first one lapsed. There
+    // is nobody at this browser, so a refusal is the only useful outcome.
+    // (`--account` now reuses the stored session first, so that fallback
+    // should not be reached at all; this bounds the cost if it ever is.)
     const args = [
       "clone",
       dir,
       "--account",
       config.dsid,
+      "--non-interactive",
       ...(options.filenameAsTitle === true ? ["--filename-as-title"] : []),
     ];
     await runCli<CloneSummary>(args, { timeoutMs: 600_000 });
