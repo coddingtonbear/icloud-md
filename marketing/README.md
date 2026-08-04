@@ -20,9 +20,9 @@ Warm, light, story-led. Leads with the shared-notes household scenario (the actu
 
 ### `terminal/` — "Notes as files"
 
-*Apple Notes, checked out to `./notes`. For good.*
+*Apple Notes, checked out to `./notes`. And pushed back.*
 
-Committed dark, mono-led identity, modeled on the strongest pattern in the research (atuin.sh): install one-liner with copy button directly in the hero, typed terminal transcript as the demo (the product is invisible infrastructure, so the transcript *is* the screenshot). Data-ownership pitch ("a note you can't grep is a note you half-own"), feature grid, quickstart with real commands, comparison table versus AppleScript tools and NoteStore.sqlite parsers.
+Committed dark, mono-led identity, modeled on the strongest pattern in the research (atuin.sh): install one-liner with copy button directly in the hero, typed terminal transcript as the demo (the product is invisible infrastructure, so the transcript *is* the screenshot — so it quotes real `icloud-md` output verbatim, and shows no other tool). Data-ownership pitch, feature grid, quickstart with real commands, an Obsidian section pointing at the `obsidian-apple-notes` plugin, comparison table versus AppleScript tools and NoteStore.sqlite parsers.
 
 ### `trust/` — "Would rather stop than guess" *(researcher's recommended primary)*
 

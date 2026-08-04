@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>icloud-md — your notes are files again</title>
-<meta name="description" content="Two-way sync between Apple iCloud Notes and a folder of plain Markdown files. Diffable, greppable, git-trackable, editor-agnostic — on Linux, Windows, or macOS.">
-<meta property="og:title" content="icloud-md — Apple Notes, checked out to ./notes. For good.">
-<meta property="og:description" content="Two-way sync between iCloud Notes and a folder of plain Markdown — diffable, greppable, git-trackable. No Mac required.">
+<meta name="description" content="Bi-directional sync between Apple iCloud Notes and a folder of plain Markdown files. Diffable, greppable, git-trackable, editor-agnostic — on Linux, Windows, or macOS.">
+<meta property="og:title" content="icloud-md — Apple Notes, checked out to ./notes. As plain Markdown. Even on Linux.">
+<meta property="og:description" content="Bi-directional sync between iCloud Notes and a folder of plain Markdown — diffable, greppable, git-trackable. No Mac required.">
 <meta property="og:type" content="website">
 <meta name="theme-color" content="#0D1320">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='18' fill='%230D1320'/%3E%3Ctext x='50' y='68' font-size='52' text-anchor='middle' font-family='monospace' fill='%23FFB454'%3E%E2%96%9A%3C/text%3E%3C/svg%3E">
@@ -31,10 +31,13 @@
   a { color: var(--cyan); }
   .wrap { max-width: 62rem; margin: 0 auto; padding: 0 1.25rem; }
 
-  header.site { display: flex; justify-content: space-between; align-items: center; padding: 1.2rem 0; }
-  .brand { font-family: var(--mono); font-weight: 700; }
+  /* Wraps rather than overlapping: at phone widths the nav is wider than
+     what's left beside the brand, and both are flex items that would
+     otherwise shrink into each other. */
+  header.site { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .5rem 1.4rem; padding: 1.2rem 0; }
+  .brand { font-family: var(--mono); font-weight: 700; white-space: nowrap; }
   .brand::before { content: "▚ "; color: var(--amber); }
-  nav.site { display: flex; gap: 1.4rem; }
+  nav.site { display: flex; flex-wrap: wrap; gap: .5rem 1.4rem; }
   nav.site a { font-family: var(--mono); font-size: .85rem; color: var(--ink-dim); text-decoration: none; }
   nav.site a:hover, nav.site a:focus-visible { color: var(--amber); }
 
@@ -68,13 +71,15 @@
   .term .dot { width: .7rem; height: .7rem; border-radius: 50%; background: var(--panel-edge); }
   .term pre {
     margin: 0; padding: 1.1rem 1.2rem 1.3rem; font-family: var(--mono); font-size: .88rem; line-height: 1.65;
-    overflow-x: auto; min-height: 19.5em;
+    overflow-x: auto; min-height: 24.5em;
   }
   .term .p { color: var(--green); }
   .term .cmd { color: var(--ink); font-weight: 600; }
   .term .out { color: var(--ink-dim); }
-  .term .add { color: var(--green); }
-  .term .del { color: var(--red); }
+  /* The status labels a real listing prints, in the colours it prints them:
+     yellow for something changing in place, green for something appearing. */
+  .term .mod { color: var(--amber); }
+  .term .new { color: var(--green); }
   .term .ok { color: var(--cyan); }
   .term .cursor { display: inline-block; width: .55em; height: 1.1em; background: var(--amber); vertical-align: text-bottom; animation: blink 1s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
@@ -95,6 +100,10 @@
   .why { max-width: 44rem; }
   .why p { margin: 0 0 1rem; }
   .why .pull { border-left: 3px solid var(--amber); padding-left: 1rem; color: var(--ink); font-size: 1.05rem; }
+  .why ul { margin: 0 0 1rem; padding-left: 1.15rem; }
+  .why li { margin: 0 0 .7rem; }
+  .why li strong { color: var(--cyan); font-weight: 600; }
+  .why code { font-family: var(--mono); font-size: .92em; color: var(--ink); }
 
   table.compare { border-collapse: collapse; width: 100%; font-size: .92rem; }
   .table-scroll { overflow-x: auto; }
@@ -127,21 +136,22 @@
     <nav class="site">
       <a href="#features">features</a>
       <a href="#quickstart">quickstart</a>
+      <a href="#obsidian">obsidian</a>
       <a href="#compare">compare</a>
       <a href="https://github.com/coddingtonbear/icloud-md">github</a>
     </nav>
   </header>
 
   <div class="hero">
-    <h1>Apple Notes, checked out to <span class="path">./notes</span>. For good.</h1>
-    <p class="sub">Two-way sync between iCloud Notes and a folder of plain Markdown — diffable, greppable, git-trackable, editor-agnostic. A git-flavored CLI, on Linux, Windows, or macOS. No Mac required.</p>
+    <h1>Apple Notes, checked out to <span class="path">./notes</span>. As plain Markdown. Even on Linux.</h1>
+    <p class="sub">Bi-directional sync between iCloud Notes and a folder of real files — diffable, greppable, git-trackable, editor-agnostic. A git-flavored CLI for Linux, Windows, and macOS.</p>
     <div class="install-line">
       <span class="p">$</span>
       <code id="install-cmd">npm install -g icloud-md</code>
       <button type="button" onclick="navigator.clipboard.writeText('npm install -g icloud-md').then(()=>{this.textContent='copied';setTimeout(()=>this.textContent='copy',1200)})">copy</button>
     </div>
 
-    <div class="term" aria-label="Terminal session demonstrating clone, edit, and push">
+    <div class="term" aria-label="Terminal session demonstrating cloning notes, editing one, and pushing it back">
       <div class="titlebar" aria-hidden="true"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
       <pre id="term-pre"><span class="cursor"></span></pre>
     </div>
@@ -149,7 +159,7 @@
 
   <section class="why">
     <h2>why files</h2>
-    <p class="pull">A note you can’t <code>grep</code> is a note you half-own.</p>
+    <p class="pull">Notes.app is a fine place to write. It shouldn’t be the only place your notes exist.</p>
     <p>Apple Notes lives in exactly one place: Notes.app and the iCloud web client. No export, no API, no way to bring your own tooling. icloud-md checks your notes out into the filesystem, where twenty-five years of text tooling already works — and pushes your edits back as if you'd typed them into Notes.app all along.</p>
     <p>The working directory is the local state. Wrap it in git and you have history, blame, and off-site backup for every note you’ve ever taken — including the ones other people share with you.</p>
   </section>
@@ -157,12 +167,12 @@
   <section id="features">
     <h2>features</h2>
     <div class="grid">
-      <div class="cell"><h3>two-way, reconciling</h3><p><code>pull</code> merges remote edits into local ones (real diff3); <code>push</code> creates, edits, moves, and deletes. Optimistic locking — a note changed remotely is a conflict, never an overwrite.</p></div>
-      <div class="cell"><h3>shared notes</h3><p>Notes and folders shared with you clone under a directory per sharer. Creates and edits push back into shared folders you can write to.</p></div>
+      <div class="cell"><h3>bi-directional sync</h3><p><code>pull</code> merges remote edits into your local ones; <code>push</code> sends creates, edits, moves, and deletes back up. A note that changed remotely is reported as a conflict, never silently overwritten.</p></div>
+      <div class="cell"><h3>no Mac required</h3><p>A plain Node CLI, not an AppleScript wrapper. Clone to Linux or Windows and treat your notes like any other folder of text — nothing to install on your phone, nothing running in the background.</p></div>
       <div class="cell"><h3>rich text round-trips</h3><p>Headings, nested lists, checklists, blockquotes, code blocks, links, bold/italic — real Markdown down, real Apple formatting back up. Tables too.</p></div>
+      <div class="cell"><h3>shared notes</h3><p>Notes and folders shared with you clone under a directory per sharer. Creates and edits push back into shared folders you can write to.</p></div>
       <div class="cell"><h3>history / diff / revert</h3><p>Every sync that changes a note snapshots it first. Inspect any past version, diff two, or write one back to the server.</p></div>
-      <div class="cell"><h3>folders are directories</h3><p><code>mkdir Recipes/Desserts</code>, drop a note in, push — both folders exist in Notes before the note lands. Moves sync in both directions.</p></div>
-      <div class="cell"><h3>refuses, not guesses</h3><p>Byte-for-byte round-trip verification before any write. What the tool can’t fully parse stays read-only. Ambiguity is an error, not a coin flip.</p></div>
+      <div class="cell"><h3>careful by default</h3><p><code>status</code> shows exactly what a push would do before it does it. Every write is round-trip verified byte-for-byte, and anything the tool can’t fully parse stays read-only. Ambiguity is an error, not a coin flip.</p></div>
     </div>
   </section>
 
@@ -174,13 +184,20 @@ npm install -g icloud-md
 <span class="c"># first clone opens Apple's real sign-in page (password, 2FA)</span>
 icloud-md clone ./notes
 
-<span class="c"># Obsidian-shaped vault instead: file name = note title</span>
-icloud-md clone ./vault --filename-as-title
-
 cd notes
 icloud-md status     <span class="c"># what would push do?</span>
 icloud-md pull       <span class="c"># merge down remote edits</span>
 icloud-md push       <span class="c"># send local edits up</span></pre>
+  </section>
+
+  <section id="obsidian" class="why">
+    <h2>using obsidian?</h2>
+    <p>A cloned vault is already just Markdown, so Obsidian can open it as-is. Two things make the fit exact:</p>
+    <ul>
+      <li><strong>the Apple Notes Sync plugin</strong> — a thin Obsidian front-end for this CLI, in the <a href="https://community.obsidian.md/plugins/icloud-notes">community plugin browser</a> (<a href="https://github.com/coddingtonbear/obsidian-apple-notes">source</a>). Connect a folder, then pull and push from the ribbon, the command palette, or the status bar — and optionally on a schedule. Desktop only; it shells out to <code>icloud-md</code>.</li>
+      <li><strong><code>--filename-as-title</code></strong> — clone with this flag and each file is <em>named</em> for its note's title and holds only the body, which is the shape Obsidian expects. Renaming a file then retitles the note.</li>
+    </ul>
+    <p>Obsidian's own notation survives the round trip in either shape: wikilinks and embeds, callouts, <code>#tags</code>, <code>==highlights==</code> and footnotes keep their spelling on disk instead of collecting the backslashes plain Markdown would want. YAML frontmatter is treated as local metadata — add aliases and tags freely; they stay on your machine and never look like a note change.</p>
   </section>
 
   <section id="compare">
@@ -211,15 +228,18 @@ icloud-md push       <span class="c"># send local edits up</span></pre>
 
 <script>
   (function () {
+    // Verbatim `icloud-md` output, down to the label column and the "(s)" -
+    // the transcript is this page's screenshot, so it has to be the real thing.
     const lines = [
       { t: "$ ", cls: "p" }, { t: "icloud-md clone ./notes\n", cls: "cmd", type: true },
-      { t: "Cloned 214 notes (3 sharers, 12 folders, 41 attachments)\n\n", cls: "out" },
-      { t: "$ ", cls: "p" }, { t: "vim \"Grocery list.md\"\n\n", cls: "cmd", type: true },
-      { t: "$ ", cls: "p" }, { t: "git diff --stat\n", cls: "cmd", type: true },
-      { t: " Grocery list.md | 2 ", cls: "out" }, { t: "+", cls: "add" }, { t: "-\n\n", cls: "del" },
+      { t: "Cloned 214 notes (plus 18 shared with you) into ./notes, 41 attachment(s) downloaded\n", cls: "out" },
+      { t: "Skipped: 3 deleted, 0 undecodable\n\n", cls: "out" },
+      { t: "$ ", cls: "p" }, { t: "cd notes && vim \"Grocery list.md\"\n\n", cls: "cmd", type: true },
       { t: "$ ", cls: "p" }, { t: "icloud-md push\n", cls: "cmd", type: true },
-      { t: "M Grocery list.md", cls: "ok" }, { t: "  → pushed\n", cls: "out" },
-      { t: "1 note updated, 0 conflicts, 0 refused\n\n", cls: "out" },
+      { t: "Pushed Grocery list.md\n", cls: "ok" },
+      { t: "Pushed 1 note(s) from /home/you/notes\n\n        ", cls: "out" },
+      { t: "modified:", cls: "mod" }, { t: " Grocery list.md\n\n", cls: "out" },
+      { t: "0 to create, 1 changed, 0 to delete.\n\n", cls: "out" },
       { t: "$ ", cls: "p" },
     ];
     const pre = document.getElementById("term-pre");
