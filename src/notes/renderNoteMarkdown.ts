@@ -27,11 +27,11 @@
  * `findAutolinkEscapeRanges`), the Obsidian notation a vault is full of
  * (see `findObsidianRawRanges`), and a `---` body line, which is written as
  * a real thematic break rather than `\---` (see `rendersAsThematicBreak` -
- * the one rule of the four that is a *block*, not an escaped range). The
- * rest are emitted as raw `html` nodes, and
- * the result is re-parsed here before it is kept - `renderNoteMarkdown` falls
- * back to plain `remark-stringify` escaping for the whole note otherwise, so
- * the friendlier spelling can never cost fidelity.
+ * the one of the four that is a *block* rather than an escaped range; the
+ * others are emitted as raw `html` nodes). Whichever rules apply, the result
+ * is re-parsed here before it is kept - `renderNoteMarkdown` falls back to
+ * plain `remark-stringify` escaping for the whole note otherwise, so the
+ * friendlier spelling can never cost fidelity.
  */
 
 import type {

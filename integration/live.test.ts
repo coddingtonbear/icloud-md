@@ -142,6 +142,46 @@ describe("live sync against a real iCloud account", { concurrency: 1, skip: enab
     assert.equal((await vault.status()).exitCode, 0, "the vault should settle after pushing an edit");
   });
 
+  it("pushes a `---` rule that Apple's client shows as a paragraph of three dashes, and reads it back as a rule", async () => {
+    // A thematic break has no Apple construct; this tool syncs it as the
+    // three dashes it looks like. Both halves of that claim are checked
+    // against the account rather than against our own decoder: Apple's own
+    // client must show an ordinary Body paragraph reading `---` (so nothing
+    // exotic reached the wire), and a fresh clone - which renders from what
+    // the account holds, not from this file - must write the rule back as a
+    // bare `---` rather than the escaped `\---`.
+    const title = run.title("rule canary");
+    const fileName = "rule-canary.md";
+    await vault.writeNote(
+      fileName,
+      [`# ${title}`, "", "above the rule", "", "---", "", "below the rule", ""].join("\n"),
+    );
+
+    const pushed = await vault.push();
+    assert.equal(pushed.exitCode, 0, `a thematic break should be pushable:\n${pushed.stdout}`);
+    const noteId = await vault.noteId(fileName);
+    assert.equal((await vault.status()).exitCode, 0, "the vault should settle after pushing a rule");
+
+    const web = await (await run.oracle()).readNote(noteId);
+    assert.deepEqual(
+      web.paragraphs.filter((p) => p.text !== "").map((p) => `${p.kind}:${p.text}`),
+      [`title:${title}`, "body:above the rule", "body:---", "body:below the rule"],
+      "Apple's client should show the rule as an ordinary body paragraph of three dashes",
+    );
+
+    await vault.pull();
+    const second = await run.vault("rule-check");
+    const secondFile = await second.findByNoteId(noteId);
+    assert.ok(secondFile !== undefined, `a fresh clone should contain the note (${noteId})`);
+    const rebuilt = stripFrontmatter(await second.readNote(secondFile));
+    assert.match(rebuilt, /\n\n---\n\n/, `a fresh clone should write the rule bare, got:\n${rebuilt}`);
+    assert.equal(
+      rebuilt.trim(),
+      stripFrontmatter(await vault.readNote(fileName)).trim(),
+      "a fresh clone should reproduce the same markdown this test wrote",
+    );
+  });
+
   it("pushes a deletion that an open web client merges into its held copy - not just re-decodes", async () => {
     // The other web-oracle tests read cold: the client decodes our stored
     // bytes, so it agrees with whatever we wrote by construction. This one
