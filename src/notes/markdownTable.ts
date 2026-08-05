@@ -58,6 +58,10 @@ export interface MarkdownTableBlock {
  * table: it is parsed back and compared against the conservative rendering. A
  * table's markdown is spliced into the note body *after* the note-level
  * round-trip gate has run, so this is the only check standing behind it.
+ *
+ * (The `thematicBreak` spelling is inert here - a cell's contents are inline,
+ * so a `---` cell is text either way. A grid holding one just offers the same
+ * candidate twice, which costs a wasted pass and nothing else.)
  */
 export function renderMarkdownTable(grid: readonly string[][]): string {
   const header = grid[0];

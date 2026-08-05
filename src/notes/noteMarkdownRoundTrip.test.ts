@@ -156,9 +156,9 @@ test("parser refuses constructs Apple Notes can't express, with precise reasons"
   assert.equal(deep.status, "unsupported");
   if (deep.status === "unsupported") assert.match(deep.reason, /depth-4 heading/);
 
-  const rule = parseNoteMarkdown("a\n\n---\n\nb");
+  const rule = parseNoteMarkdown("a\n\n***\n\nb");
   assert.equal(rule.status, "unsupported");
-  if (rule.status === "unsupported") assert.match(rule.reason, /thematic break/);
+  if (rule.status === "unsupported") assert.match(rule.reason, /write it as "---"/);
 
   const html = parseNoteMarkdown("<div>\nblock\n</div>");
   assert.equal(html.status, "unsupported");
@@ -417,9 +417,10 @@ test("markup that really is markdown stays escaped", () => {
   assert.equal(assertRoundTrips([p("body", "# Real heading")]), "\\# Real heading");
   assert.equal(assertRoundTrips([p("body", "#")]), "\\#");
   assert.equal(assertRoundTrips([p("body", "#\tTabbed")]), "\\#\tTabbed");
-  // A line of nothing but `=` is a setext underline; `---` a thematic break.
+  // A line of nothing but `=` is a setext underline. (`---` is a thematic
+  // break, which this renderer writes bare where it can - see the thematic
+  // break tests below for where it can't.)
   assert.equal(assertRoundTrips([p("body", "intro"), p("body", "===")]), "intro\n\\===");
-  assert.equal(assertRoundTrips([p("body", "---")]), "\\---");
   // Character references and raw html are not Obsidian notation.
   assert.equal(assertRoundTrips([p("body", "&amp;")]), "\\&amp;");
   assert.equal(assertRoundTrips([p("body", "<div>x</div>")]), "\\<div>x\\</div>");
@@ -435,6 +436,91 @@ test("the Obsidian spelling is dropped whole when it would change the document",
   // The fallback is per *note*, not per run: this note's wikilink loses its
   // bare brackets because of the checkbox-shaped bullet sharing the file.
   assert.equal(assertRoundTrips([p("bulletList", "[ ]"), p("body", "[[Note]]")]), "- \\[ ]\n\\[\\[Note]]");
+});
+
+test("a `---` body line renders as a real thematic break wherever that reparses as one", () => {
+  // The plain case: an empty paragraph above, which is what a note written
+  // with a divider in it actually looks like.
+  assert.equal(assertRoundTrips([p("body", "a"), p("body", ""), p("body", "---"), p("body", ""), p("body", "b")]), "a\n\n---\n\nb");
+
+  // Everything else a rule can sit directly below without becoming a setext
+  // underline: an ATX heading, a list item, a fenced block, another rule.
+  assert.equal(assertRoundTrips([p("heading", "H"), p("body", "---")]), "## H\n---");
+  assert.equal(assertRoundTrips([p("bulletList", "item"), p("body", "---")]), "- item\n---");
+  assert.equal(assertRoundTrips([p("todoList", "todo", { done: true }), p("body", "---")]), "- [x] todo\n---");
+  assert.equal(assertRoundTrips([p("monospaced", "code"), p("body", "---")]), "```\ncode\n```\n---");
+  assert.equal(assertRoundTrips([p("body", ""), p("body", "---"), p("body", "---")]), "\n---\n---");
+
+  // Inside a blockquote, where the rule carries the quote's markers.
+  assert.equal(
+    assertRoundTrips([p("body", "", { blockQuoteLevel: 1 }), p("body", "---", { blockQuoteLevel: 1 })]),
+    ">\n> ---",
+  );
+
+  // And the reverse direction: a file written by hand parses to exactly the
+  // same paragraph an Apple note holding three dashes decodes to.
+  const parsed = parseNoteMarkdown("intro\n\n---\n\noutro");
+  assert.equal(parsed.status, "ok");
+  if (parsed.status !== "ok") return;
+  assert.deepEqual(
+    parsed.paragraphs.map((q) => [q.kind, q.text]),
+    [
+      ["body", "intro"],
+      ["body", ""],
+      ["body", "---"],
+      ["body", ""],
+      ["body", "outro"],
+    ],
+  );
+});
+
+test("a `---` body line stays escaped where a bare rule would mean something else", () => {
+  // Directly below a body line, `---` is a setext underline: the pair would
+  // come back as one Heading rather than two Body paragraphs.
+  assert.equal(assertRoundTrips([p("body", "intro"), p("body", "---")]), "intro\n\\---");
+  assert.equal(
+    assertRoundTrips([p("body", "intro", { blockQuoteLevel: 1 }), p("body", "---", { blockQuoteLevel: 1 })]),
+    "> intro\n> \\---",
+  );
+
+  // As the file's first line, a bare `---` is a frontmatter opening fence to
+  // `splitFrontmatter` - in a filename-as-title vault, where the body's own
+  // first line is what a file starts with, that would eat real content.
+  assert.equal(assertRoundTrips([p("body", "---")]), "\\---");
+  assert.equal(assertRoundTrips([p("body", "---"), p("body", ""), p("body", "---")]), "\\---\n\n---");
+
+  // Styling has nowhere to live on a rule.
+  const bold: FormatParagraph = { ...p("body", ""), text: "---", spans: [{ ...PLAIN_STYLE, bold: true, length: 3 }] };
+  assert.equal(assertRoundTrips([p("body", ""), bold]), "\n**---**");
+});
+
+test("a `---` written any other way is refused rather than normalized", () => {
+  // Accepting these would mean storing `---` in the note while the file
+  // still said `***`, so the file and the note would disagree from the push
+  // onward. Refusing keeps every accepted file a fixpoint.
+  for (const spelling of ["***", "___", "- - -", "-----", "  ---"]) {
+    const result = parseNoteMarkdown(`intro\n\n${spelling}\n\noutro`);
+    assert.equal(result.status, "unsupported", `${spelling} should be refused`);
+    if (result.status === "unsupported") assert.match(result.reason, /write it as "---"/);
+  }
+
+  // Trailing whitespace is outside the projection everywhere else too, so a
+  // `---   ` line is the canonical spelling with trailing spaces.
+  const trailing = parseNoteMarkdown("intro\n\n---   \n\noutro");
+  assert.equal(trailing.status, "ok");
+  if (trailing.status === "ok") assert.equal(trailing.paragraphs[2]?.text, "---");
+});
+
+test("a `---` directly below a table or attachment placeholder is a setext underline, not a rule", () => {
+  // Pinning why `rendersAsThematicBreak` refuses to write a rule under a
+  // non-empty body line even though a table's markdown - not the U+FFFC
+  // placeholder the model holds - is what ends up on the line above in the
+  // file. CommonMark reads the pair as a heading, and the `---` line stops
+  // existing; the renderer never produces this layout.
+  const result = parseNoteMarkdown("￼\n---");
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.deepEqual(result.paragraphs.map((q) => [q.kind, q.text]), [["heading", "￼"]]);
 });
 
 test("URLs that could open inline constructs fall back to escaped text but still round-trip", () => {

@@ -28,12 +28,16 @@
  *   escapes can't suppress it - see `markdownTable.ts`) are *not* link
  *   spans: only bracket/angle syntax is. Apple's own bare-URL links
  *   round-trip as plain text by the same rule (`normalizeSpans`).
+ * - A `---` thematic break has no Apple construct but an obvious plain-text
+ *   reading, so it becomes a Body paragraph whose text is literally `---`
+ *   (see `recordThematicBreak`); the renderer turns that paragraph back
+ *   into a rule.
  * - Constructs Apple Notes can't express degrade in one of two ways:
  *   inline constructs (inline code, images, ...) contribute their raw
  *   source text literally, like `markdownTable.ts`'s cell fallback; block
- *   constructs (thematic breaks, html blocks, deep headings, ...) refuse
- *   the parse with a precise reason - push surfaces it, and the read-side
- *   round-trip gate never produces them.
+ *   constructs (html blocks, deep headings, ...) refuse the parse with a
+ *   precise reason - push surfaces it, and the read-side round-trip gate
+ *   never produces them.
  */
 
 import type { Heading, List, Paragraph, PhrasingContent, RootContent } from "mdast";
@@ -51,6 +55,10 @@ import {
 } from "./noteFormat.js";
 
 const processor = unified().use(remarkParse).use(remarkGfm, { tablePipeAlign: false });
+
+/** The one spelling of a thematic break this tool round-trips, and the exact
+ * paragraph text an Apple note stores it as - see `recordThematicBreak`. */
+export const THEMATIC_BREAK_TEXT = "---";
 
 export type ParseNoteMarkdownResult =
   | { status: "ok"; paragraphs: FormatParagraph[]; text: string }
@@ -172,7 +180,8 @@ class Parser {
         this.walkList(node, blockQuoteLevel, 0);
         return;
       case "thematicBreak":
-        throw new Unsupported("a thematic break (---/***) has no Apple Notes equivalent");
+        this.recordThematicBreak(node, blockQuoteLevel);
+        return;
       case "html":
         throw new Unsupported(
           "raw HTML blocks can't be represented in Apple Notes (underline's <u> tags are supported inline, within a line of text)",
@@ -182,6 +191,33 @@ class Parser {
       default:
         throw new Unsupported(`markdown construct "${node.type}" has no Apple Notes equivalent`);
     }
+  }
+
+  /**
+   * A thematic break has no construct of its own in Apple Notes, but three
+   * dashes on a line of their own read as a divider to a human - the same
+   * fidelity trade underline and the empty-todo checkbox already make. So
+   * `---` becomes an ordinary Body paragraph whose text is literally `---`,
+   * and `renderNoteMarkdown` turns that paragraph back into a rule.
+   *
+   * Only the canonical spelling is accepted. CommonMark has many (`***`,
+   * `___`, `- - -`, `-----`, up to three leading spaces), but they would all
+   * have to be *stored* as `---` - so the note's remote text would no longer
+   * match the file that produced it, and the difference would sit in the base
+   * copy until some later pull rewrote the line. Canonical-only keeps every
+   * accepted file a fixpoint (`render(parse(file))` is the file), and is
+   * still strictly more permissive than refusing every spelling.
+   */
+  private recordThematicBreak(node: RootContent, blockQuoteLevel: number): void {
+    const position = nodeLines(node);
+    const raw = stripQuoteMarkers(this.lines[position.start - 1] ?? "").trimEnd();
+    if (raw !== THEMATIC_BREAK_TEXT) {
+      throw new Unsupported(
+        `a thematic break written "${raw}" has no Apple Notes equivalent - write it as "${THEMATIC_BREAK_TEXT}", which syncs as a line of three dashes`,
+      );
+    }
+    const spans = [{ ...PLAIN_STYLE, length: THEMATIC_BREAK_TEXT.length }];
+    this.record(position.start, makeParagraph("body", blockQuoteLevel, THEMATIC_BREAK_TEXT, spans, BODY_SEED));
   }
 
   private recordHeading(node: Heading, blockQuoteLevel: number): void {

@@ -24,11 +24,14 @@
  * The one place this module overrides `remark-stringify`'s escaping is where
  * the escape would be *correct markdown but wrong for the reader*: bare URLs,
  * the punctuation GFM autolink literals make ambiguous (see
- * `findAutolinkEscapeRanges`), and the Obsidian notation a vault is full of
- * (see `findObsidianRawRanges`). Those are emitted as raw `html` nodes, and
- * the result is re-parsed here before it is kept - `renderNoteMarkdown` falls
- * back to plain `remark-stringify` escaping for the whole note otherwise, so
- * the friendlier spelling can never cost fidelity.
+ * `findAutolinkEscapeRanges`), the Obsidian notation a vault is full of
+ * (see `findObsidianRawRanges`), and a `---` body line, which is written as
+ * a real thematic break rather than `\---` (see `rendersAsThematicBreak` -
+ * the one of the four that is a *block* rather than an escaped range; the
+ * others are emitted as raw `html` nodes). Whichever rules apply, the result
+ * is re-parsed here before it is kept - `renderNoteMarkdown` falls back to
+ * plain `remark-stringify` escaping for the whole note otherwise, so the
+ * friendlier spelling can never cost fidelity.
  */
 
 import type {
@@ -41,6 +44,7 @@ import type {
   Paragraph,
   PhrasingContent,
   Root,
+  ThematicBreak,
 } from "mdast";
 import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
@@ -48,17 +52,24 @@ import remarkStringify from "remark-stringify";
 import { unified } from "unified";
 import {
   formatsRoundTripEqual,
+  inlineStylesEqual,
   normalizeSpans,
+  PLAIN_STYLE,
   trimTrailingWhitespace,
   type FormatParagraph,
   type InlineSpan,
   type ParagraphKind,
 } from "./noteFormat.js";
-import { parseNoteMarkdown } from "./parseNoteMarkdown.js";
+import { parseNoteMarkdown, THEMATIC_BREAK_TEXT } from "./parseNoteMarkdown.js";
 
 /** Same plugin set as the parser and `markdownTable.ts`, so escaping
  * decisions and construct recognition always agree. */
-const processor = unified().use(remarkParse).use(remarkGfm, { tablePipeAlign: false }).use(remarkStringify, { bullet: "-" });
+const processor = unified()
+  .use(remarkParse)
+  .use(remarkGfm, { tablePipeAlign: false })
+  // `rule: "-"` only affects thematic breaks, and `---` is the one spelling
+  // the parser accepts back (`THEMATIC_BREAK_TEXT`).
+  .use(remarkStringify, { bullet: "-", rule: "-" });
 
 const HEADING_DEPTHS: Partial<Record<ParagraphKind, 1 | 2 | 3>> = {
   title: 1,
@@ -77,11 +88,14 @@ export interface RawSpelling {
   /** Punctuation escaped only against GFM autolink literals - see
    * `findAutolinkEscapeRanges`. */
   autolink: boolean;
+  /** A `---` body line written as a real thematic break rather than
+   * `\---` - see `rendersAsThematicBreak`. */
+  thematicBreak: boolean;
 }
 
 /** No optional rule at all: the escaping `remark-stringify` chose on its
  * own, and the fallback every caller ends at. */
-export const CONSERVATIVE_SPELLING: RawSpelling = { obsidian: false, autolink: false };
+export const CONSERVATIVE_SPELLING: RawSpelling = { obsidian: false, autolink: false, thematicBreak: false };
 
 /**
  * The spellings worth *trying* for these lines, nicest first: only the rules
@@ -92,17 +106,24 @@ export const CONSERVATIVE_SPELLING: RawSpelling = { obsidian: false, autolink: f
 export function spellingCandidates(lines: Iterable<string>): RawSpelling[] {
   let obsidian = false;
   let autolink = false;
+  let thematicBreak = false;
   for (const line of lines) {
     obsidian ||= findObsidianRawRanges(line).length > 0;
     autolink ||= findAutolinkEscapeRanges(line).length > 0;
+    thematicBreak ||= line === THEMATIC_BREAK_TEXT;
   }
   const candidates: RawSpelling[] = [
-    { obsidian: true, autolink: true },
-    { obsidian: true, autolink: false },
-    { obsidian: false, autolink: true },
+    { obsidian: true, autolink: true, thematicBreak: true },
+    { obsidian: true, autolink: true, thematicBreak: false },
+    { obsidian: true, autolink: false, thematicBreak: true },
+    { obsidian: false, autolink: true, thematicBreak: true },
+    { obsidian: true, autolink: false, thematicBreak: false },
+    { obsidian: false, autolink: true, thematicBreak: false },
+    { obsidian: false, autolink: false, thematicBreak: true },
   ];
   return candidates.filter(
-    (candidate) => (!candidate.obsidian || obsidian) && (!candidate.autolink || autolink) && (candidate.obsidian || candidate.autolink),
+    (candidate) =>
+      (!candidate.obsidian || obsidian) && (!candidate.autolink || autolink) && (!candidate.thematicBreak || thematicBreak),
   );
 }
 
@@ -189,6 +210,13 @@ function renderLines(paragraphs: readonly FormatParagraph[], spelling: RawSpelli
       continue;
     }
 
+    if (spelling.thematicBreak && rendersAsThematicBreak(paragraphs, i)) {
+      const rule: ThematicBreak = { type: "thematicBreak" };
+      pushBlockLines(lines, rule, bq);
+      i += 1;
+      continue;
+    }
+
     // Body. An empty body line is written literally (a blank line, or bare
     // `>` markers at blockquote level) rather than stringified - remark has
     // no notion of an empty paragraph.
@@ -201,6 +229,63 @@ function renderLines(paragraphs: readonly FormatParagraph[], spelling: RawSpelli
     i += 1;
   }
   return lines.join("\n");
+}
+
+/**
+ * Whether the paragraph at `index` may be written as a real `---` rule
+ * instead of the `\---` `remark-stringify` escapes it to. Apple has no rule
+ * construct, so the note stores three literal dashes and the parser reads
+ * them back as one (`recordThematicBreak`) - what this decides is only how
+ * the *file* spells them.
+ *
+ * Two positions are excluded, both because a bare `---` there would mean
+ * something else entirely on reparse:
+ *
+ * - **Directly below a non-empty body line**, where `---` is a setext
+ *   underline and the pair becomes a Heading (`> a` / `> ---` too - the
+ *   quote markers don't change that). Everything else above it - a blank
+ *   line, an ATX heading, a list item, a fenced block, another rule - leaves
+ *   a genuine thematic break, as CommonMark and this repo's own remark
+ *   pipeline both confirm.
+ * - **As the body's very first line**, where `splitFrontmatter` would read
+ *   it as a frontmatter opening fence. That only bites in a filename-as-
+ *   title vault (elsewhere the body opens with the note's title line), and
+ *   there it would eat everything up to the next `---` as an envelope. The
+ *   renderer simply never writes that file.
+ *
+ * Styled dashes (a bold `---`, say) are excluded too: a rule has nowhere to
+ * put the styling, and dropping it would fail the round-trip check below and
+ * cost the note its other friendly spellings as well.
+ *
+ * Consecutive rules stand or fall together: `---` under `---` is a second
+ * thematic break, but under an escaped `\---` - an ordinary paragraph - it
+ * is that paragraph's setext underline. So the run is traced back to the
+ * paragraph above it, and that one line decides for all of them.
+ */
+function rendersAsThematicBreak(paragraphs: readonly FormatParagraph[], index: number): boolean {
+  if (!isPlainRuleParagraph(paragraphs[index])) {
+    return false;
+  }
+  let start = index;
+  while (start > 0 && isPlainRuleParagraph(paragraphs[start - 1])) {
+    start -= 1;
+  }
+  const previous = paragraphs[start - 1];
+  if (previous === undefined) {
+    return false;
+  }
+  return !(previous.kind === "body" && previous.text.length > 0);
+}
+
+/** A Body paragraph holding nothing but three unstyled dashes - the model's
+ * side of a thematic break. */
+function isPlainRuleParagraph(paragraph: FormatParagraph | undefined): boolean {
+  return (
+    paragraph !== undefined &&
+    paragraph.kind === "body" &&
+    paragraph.text === THEMATIC_BREAK_TEXT &&
+    normalizeSpans(paragraph).every((span) => inlineStylesEqual(span, PLAIN_STYLE))
+  );
 }
 
 function isListParagraph(paragraph: FormatParagraph): boolean {
