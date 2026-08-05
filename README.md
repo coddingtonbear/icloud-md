@@ -241,10 +241,22 @@ resolution live.
   footnotes (`[^1]`) keep their notation in the local file instead of
   picking up the backslashes plain CommonMark would want
   (`\[\[Note]]`, `\#project`). Markup that really *is* markdown — a `#`
-  heading, `[a](b)`, a `---` rule — still gets escaped, and every note is
+  heading, `[a](b)` — still gets escaped, and every note is
   re-parsed before the friendlier spelling is kept, so it can never cost
   fidelity. Inside a table cell an alias pipe is written `[[Note\|alias]]`,
   the form Obsidian itself requires there.
+- **Thematic breaks (`---`) sync as three dashes.** Apple Notes has no
+  horizontal rule, but a line of three dashes reads as a divider in both
+  places, so `---` in a file and a note paragraph holding `---` are treated
+  as the same thing — writable in either direction, where before a `---`
+  anywhere in a file made the whole note unpushable. The other CommonMark
+  spellings (`***`, `___`, `- - -`) are still refused, with a message
+  saying to write `---` instead: accepting them would mean the note and the
+  file that produced it no longer said the same thing. In the two places
+  where a bare `---` would be read as something else — directly under a text
+  line (where it is a `## Heading` underline) and as a file's very first line
+  (where it opens a frontmatter block) — the file keeps the escaped `\---`
+  spelling, which pushes back to exactly the same three dashes.
 - **Ordinary words keep their punctuation.** Because GFM turns `www.…`,
   `https://…` and `name@host` into links on sight, plain CommonMark escapes
   the punctuation that *might* start one — anywhere, in any word. That gave

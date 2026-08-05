@@ -87,9 +87,12 @@ export function splitFrontmatter(text: string, options: SplitFrontmatterOptions 
       break;
     }
   }
-  // An opening `---` with no closing fence isn't frontmatter - a note body
-  // legitimately can't start this way (a thematic break is unpublishable), so
-  // treating it as body keeps such a file readable rather than eating it.
+  // An opening `---` with no closing fence isn't frontmatter, so treating it
+  // as body keeps such a file readable rather than eating it. A body *can*
+  // start with a `---` thematic break in a filename-as-title vault, which is
+  // what the guard above is for; the renderer never writes one there anyway
+  // (see `rendersAsThematicBreak`), because a second `---` further down would
+  // make this file indistinguishable from a real envelope.
   if (closingFence === -1) {
     return { frontmatter: "", body: text };
   }

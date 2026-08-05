@@ -106,6 +106,19 @@ test("two adjacent thematic breaks stay in the body", () => {
   assert.equal(split.body, text);
 });
 
+test("a rule with prose directly under it is still read as an envelope - which is why the renderer never writes one", () => {
+  // The guard above can only separate the two cases when the second line is
+  // another fence or blank; `---` followed immediately by prose is exactly
+  // what a real envelope looks like, so this file loses "Some prose" to the
+  // envelope. Nothing produces it: `renderNoteMarkdown` writes a body's
+  // leading rule as `\---` for this reason (see `rendersAsThematicBreak`),
+  // and this test is what says that guard is still load-bearing.
+  const split = splitFrontmatter("---\nSome prose\n---\nMore prose", { filenameAsTitle: true });
+
+  assert.equal(split.frontmatter, "---\nSome prose\n---\n");
+  assert.equal(split.body, "More prose");
+});
+
 test("a real envelope is still recognized in a filename-as-title vault", () => {
   const text = "---\napple-note-id: 089D915D-C76E-4F44-AB80-2190073281A3\n---\n\nBody";
 
