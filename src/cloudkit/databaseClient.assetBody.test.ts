@@ -108,6 +108,9 @@ test("fetchAllNoteRecords asks for TextDataAsset and inlines a large note's text
     const decoded = classifyNoteRecord(record);
     assert.equal(decoded.status, "ok");
     assert.equal(decoded.status === "ok" ? decoded.titleLine : undefined, "Today");
+    // Readable, but never pushed: writing it back would mean uploading an asset.
+    assert.equal(decoded.status === "ok" ? decoded.publishable : undefined, false);
+    assert.match(decoded.status === "ok" ? (decoded.unpublishableReason ?? "") : "", /separate file/);
   } finally {
     mock.restore();
   }

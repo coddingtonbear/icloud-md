@@ -84,6 +84,21 @@ export interface ClassifyNoteOptions {
 
 /** Shared skip/decode rules used by `clone`, `pull`, and `push` so they can't drift apart. */
 export function classifyNoteRecord(record: CloudKitRecord, options: ClassifyNoteOptions = {}): NoteDecodeResult {
+  const result = classifyNoteBody(record, options);
+  // A note whose text Apple moved into a TextDataAsset reads like any other
+  // once `inlineAssetBodies` has fetched it, but writing it back would mean
+  // uploading a new asset - a path never captured - so it arrives read-only.
+  if (result.status === "ok" && result.publishable && record.fields.TextDataAsset?.value != null) {
+    return {
+      ...result,
+      publishable: false,
+      unpublishableReason: "is so large that Apple keeps its text in a separate file, which can't be written back yet",
+    };
+  }
+  return result;
+}
+
+function classifyNoteBody(record: CloudKitRecord, options: ClassifyNoteOptions): NoteDecodeResult {
   if (isDeleted(record)) {
     return { status: "deleted" };
   }
