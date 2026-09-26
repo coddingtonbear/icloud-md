@@ -127,6 +127,8 @@ const NOTE_DESIRED_KEYS = [
   "MergeableDataEncrypted",
   "IsPinned",
   "TextDataEncrypted",
+  // Where a very large note keeps its text instead - see `inlineAssetBodies`.
+  "TextDataAsset",
 ];
 
 const NOTE_DESIRED_RECORD_TYPES = [
@@ -257,6 +259,7 @@ export async function fetchZoneNoteRecords(
       onPage?.(pageRecords.length);
     }
 
+    await inlineAssetBodies(records);
     return { records, syncToken };
   };
 
@@ -543,6 +546,7 @@ export async function fetchSharedNoteRecords(
           missingBody.map((record) => record.recordName),
         );
         mergeLookedUpRecords(records, lookedUp);
+        await inlineAssetBodies(records);
       }
 
       // A body still missing after the lookup means this zone's fetch is
@@ -570,6 +574,34 @@ export async function fetchSharedNoteRecords(
   }
 
   return { zones, skippedZones };
+}
+
+/**
+ * Moves a very large note's text inline, where every reader expects it.
+ * Past some size Apple stores a note's text as a `TextDataAsset` instead of
+ * `TextDataEncrypted`, and the record then carries no `TextDataEncrypted` at
+ * all - so without this the note reads as body-less and is never cloned or
+ * pulled. The asset holds the same bytes the inline field would (a gzipped
+ * NoteStoreProto document, confirmed against a real ~830 KB note, 2026-09-26),
+ * so its download is inlined as-is and decodes on the normal path.
+ *
+ * Only the in-memory record changes. Push re-reads the record before any
+ * write and still refuses a note stored as an asset. A failed download
+ * propagates rather than leaving the note body-less: that would read as a
+ * clean sync while the syncToken moved past the note.
+ */
+export async function inlineAssetBodies(records: CloudKitRecord[]): Promise<void> {
+  for (const record of records) {
+    if (!needsBodyLookup(record)) {
+      continue;
+    }
+    const asset = record.fields.TextDataAsset?.value;
+    if (!isRecord(asset) || typeof asset.downloadURL !== "string") {
+      continue;
+    }
+    const bytes = await fetchAssetBytes(asset.downloadURL);
+    record.fields.TextDataEncrypted = { value: bytes.toString("base64"), type: "ENCRYPTED_BYTES" };
+  }
 }
 
 function needsBodyLookup(record: CloudKitRecord): boolean {
