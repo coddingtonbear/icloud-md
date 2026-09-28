@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { CorruptSessionFileError, MissingSessionFileError } from "./errors.js";
 
@@ -29,10 +30,26 @@ export async function loadSession(sessionPath: string): Promise<IcloudSession> {
   return assertIcloudSession(parsed, sessionPath);
 }
 
-/** Writes a session file with the same permissions convention import-har/login both rely on. */
+/**
+ * Writes a session file with the same permissions convention import-har/login both rely on.
+ *
+ * The file is written to a temp file beside it and renamed into place, so a
+ * reader never sees a half-written session and a crash mid-write leaves the
+ * previous session intact. Writing in place truncated the file first: another
+ * process reading it at that moment (a second sync, or another app sharing the
+ * session) got a JSON parse error, and a process killed mid-write left a
+ * corrupt file that only a fresh sign-in could replace.
+ */
 export async function writeSessionFile(session: IcloudSession, sessionPath: string): Promise<void> {
   await mkdir(path.dirname(sessionPath), { recursive: true, mode: 0o700 });
-  await writeFile(sessionPath, JSON.stringify(session, null, 2) + "\n", { mode: 0o600 });
+  const tempPath = `${sessionPath}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tempPath, JSON.stringify(session, null, 2) + "\n", { mode: 0o600 });
+    await rename(tempPath, sessionPath);
+  } catch (err) {
+    await rm(tempPath, { force: true });
+    throw err;
+  }
 }
 
 /** Parses a `Name1=Value1; Name2=Value2` cookie header into a name→value map, preserving order. */
