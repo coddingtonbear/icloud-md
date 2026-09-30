@@ -19,6 +19,7 @@ icloud-md push
 - [Why](#why)
 - [Install](#install)
 - [Quick start](#quick-start)
+  * [Browser selection and troubleshooting](#browser-selection-and-troubleshooting)
 - [Using Obsidian?](#using-obsidian)
 - [Commands](#commands)
 - [What works today](#what-works-today)
@@ -164,6 +165,74 @@ trusted, returning browser. Credentials are never stored inside the vault
 folder itself (a vault is exactly the kind of thing that gets copied,
 zipped, or synced elsewhere); a cloned folder's own
 `.icloud-md/state.json` only records *which* account it's bound to.
+
+### Browser selection and troubleshooting
+
+By default, sign-in uses the Chromium build matched to icloud-md's own Playwright
+version, downloading it on first use if it is missing. If the download is blocked
+but you already have a Chromium-based browser installed, select its executable:
+
+```sh
+icloud-md --browser-executable /usr/bin/chromium clone ./my-notes
+# Or persist the choice in the environment, including for unattended recovery:
+export ICLOUD_MD_BROWSER_EXECUTABLE=/usr/bin/chromium
+icloud-md reauthenticate ./my-notes
+```
+
+The command-line option wins over the environment variable; with neither set,
+the bundled browser remains the default. The value must be an absolute executable
+path, not a command with arguments. Empty or relative values are errors. A failed
+explicit choice never downloads or silently selects a different browser. The
+browser still uses icloud-md's dedicated per-account/temporary profile, never your
+normal browser profile. Arbitrary system-browser versions are **not guaranteed
+compatible** with Playwright: opening a window alone does not prove login works.
+Named channels and attaching to an already-running browser are not supported.
+
+These commands need no Apple account, saved sign-in, or cloned directory:
+
+```sh
+icloud-md browser-info            # read-only: no launch or download
+icloud-md --json browser-info     # same information for scripts
+icloud-md install-browser        # explicitly download the matched Chromium
+```
+
+`browser-info` shows the selected source and executable path, whether it exists,
+Playwright's version and CLI path, Linux display settings, and installed-browser
+candidates found on PATH (plus standard macOS application paths). Candidates are
+suggestions only: none is selected automatically. The default path describes the
+headed sign-in browser; Playwright may use its matching headless shell for silent
+recovery. `install-browser` always installs the bundled version, even when an
+executable override is set. It invokes this installation's exact Playwright CLI,
+so it also works for global npm installs; do not substitute `npx playwright`,
+which can resolve a different version from your current directory. Download
+output is shown after the installer exits.
+
+Interactive sign-in needs a usable graphical desktop. Start it from a terminal
+**in the same GUI environment the person signing in can see and control**. A VM
+can work with a shared desktop, but an SSH/headless shell does not necessarily
+inherit that desktop's DISPLAY/Wayland connection or permissions. `browser-info`
+reports those settings but does not prove the desktop is reachable.
+
+Chromium sandboxing is enabled, including for silent recovery. Run as an
+unprivileged user; if your Linux host/container blocks user namespaces or needs
+sandbox/runtime packages, fix that configuration rather than disabling the
+sandbox. Missing shared libraries need the browser's OS dependencies. For the
+bundled browser, `browser-info` identifies the exact Playwright CLI whose
+`install-deps chromium` command your administrator can use. icloud-md never
+silently retries without sandboxing.
+
+Certificate verification remains enabled. For `ERR_CERT_AUTHORITY_INVALID` or
+other trust errors, check the system clock, browser/OS CA trust store, and any
+network-inspecting proxy's trusted root certificate. A browser-download failure
+may involve Node's CA trust configuration instead. Fix the environment's trust
+configuration; do not bypass certificate checks. A successful launch followed by
+a certificate error is not evidence that the iCloud login flow works.
+
+Known launch errors get specific recovery guidance; unrecognized errors retain
+their original message and stack. Terminal output and saved error reports include
+nested causes with credential/header/URL redaction. Installer output is bounded
+in saved diagnostics. Review diagnostics before sharing: free-text redaction
+cannot promise to recognize every possible secret or private path.
 
 ## Using Obsidian?
 

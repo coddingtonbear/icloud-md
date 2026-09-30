@@ -112,10 +112,39 @@ export class CorruptSessionFileError extends IcloudNotesSyncError {
 
 export class ChromiumNotInstalledError extends IcloudNotesSyncError {
   constructor(options: ErrorOptions = {}) {
-    super("Could not launch the login browser.", {
+    super("The bundled login browser executable is missing.", {
       ...options,
-      hint: 'Playwright\'s Chromium may not be installed yet - run "npx playwright install chromium" and retry.',
+      hint: 'Run "icloud-md install-browser" to install Chromium using this icloud-md installation\'s Playwright dependency.',
     });
+  }
+}
+
+export type BrowserFailure = "executable" | "installation" | "display" | "dependencies" | "sandbox" | "certificate";
+
+const BROWSER_FAILURES: Record<BrowserFailure, [string, string]> = {
+  executable: ["The selected browser executable is missing or cannot be executed.",
+    "Check --browser-executable or ICLOUD_MD_BROWSER_EXECUTABLE. No alternate browser was selected or downloaded."],
+  installation: ["Could not install the bundled login browser.",
+    'Check network/proxy access and certificate trust, then retry "icloud-md install-browser". ' +
+    "Alternatively select an installed browser with --browser-executable."],
+  display: ["The login browser could not connect to a graphical display.",
+    "Run sign-in from a terminal in the desktop session you share with the person signing in. " +
+    'Check DISPLAY/Wayland access with "icloud-md browser-info"; SSH/headless shells may not share that session.'],
+  dependencies: ["The login browser is missing operating-system runtime dependencies.",
+    'Run "icloud-md browser-info" to locate this installation\'s Playwright CLI. ' +
+    'Use that CLI\'s "install-deps chromium" command with your administrator, or install your system browser\'s dependencies.'],
+  sandbox: ["The login browser could not start with Chromium sandboxing enabled.",
+    "Use an unprivileged desktop user and check your host/container's user-namespace and sandbox configuration. " +
+    "icloud-md does not retry without the sandbox."],
+  certificate: ["The browser could not verify a server certificate.",
+    "Check the system clock, browser/OS CA trust store, and any inspecting proxy's trusted root certificate. " +
+    "Keep certificate verification enabled; do not bypass the error."],
+};
+
+export class BrowserLaunchError extends IcloudNotesSyncError {
+  constructor(readonly reason: BrowserFailure, detail?: string, options: ErrorOptions = {}) {
+    const [message, hint] = BROWSER_FAILURES[reason];
+    super(detail ? `${message}\n${detail}` : message, { ...options, hint });
   }
 }
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import chalk from "chalk";
+import { BROWSER_EXECUTABLE_ENV, browserInfo, installChromium, resolveBrowserSelection } from "./auth/browserLauncher.js";
 import cliProgress from "cli-progress";
 import { Command, CommanderError } from "commander";
 import ora from "ora";
@@ -259,8 +260,19 @@ program
   .version(
     preParsedJson ? JSON.stringify({ version: readOwnPackageVersion() }, null, 2) : readOwnPackageVersion(),
   )
+  .option("--browser-executable <path>", "absolute browser path (overrides ICLOUD_MD_BROWSER_EXECUTABLE)")
   .option("--json", "emit machine-readable JSON on stdout instead of human-readable text")
   .exitOverride();
+
+// Set only the CLI process's environment so every authentication path,
+// including automatic headless recovery, sees the same explicit selection.
+program.hook("preAction", () => {
+  const executable = program.opts<{ browserExecutable?: string }>().browserExecutable;
+  if (executable !== undefined) {
+    resolveBrowserSelection(executable);
+    process.env[BROWSER_EXECUTABLE_ENV] = executable;
+  }
+});
 
 // In `--json` mode, commander's own plain-text usage-error output would land
 // on stdout's neighbor stream unstructured; suppressed here so the top-level
@@ -271,6 +283,32 @@ program
 if (preParsedJson) {
   program.configureOutput({ writeErr: () => {} });
 }
+
+program.command("browser-info")
+  .description("Show browser selection and display diagnostics without signing in or launching a browser")
+  .action(async (_opts: unknown, command: Command) => {
+    const executable = program.opts<{ browserExecutable?: string }>().browserExecutable;
+    const result = await browserInfo(resolveBrowserSelection(executable));
+    emitResult(contextFor(command), result, (r) => {
+      console.log(`Browser source: ${r.source}`);
+      console.log(`Executable: ${r.executablePath} (${r.exists ? "exists" : "missing"})`);
+      console.log(`Playwright: ${r.playwrightVersion}`);
+      console.log(`Playwright CLI: ${r.installerPath}`);
+      console.log("Chromium sandbox: enabled; certificate verification: enabled");
+      for (const [key, value] of Object.entries(r.display)) console.log(`${key}: ${value ?? "(unset)"}`);
+      console.log("System browser candidates (not selected automatically):");
+      for (const candidate of r.systemBrowserCandidates) console.log(`  ${candidate}`);
+      if (!r.systemBrowserCandidates.length) console.log("  none found in standard locations / PATH");
+    });
+  });
+
+program.command("install-browser")
+  .description("Install Chromium using this icloud-md installation's exact Playwright dependency")
+  .action(async (_opts: unknown, command: Command) => {
+    const context = contextFor(command);
+    await installChromium((message) => console.error(message));
+    emitResult(context, { installed: true }, () => console.log("Installed the bundled sign-in browser."));
+  });
 
 program.action(() => {
   program.help({ error: true });
