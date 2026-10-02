@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -103,4 +103,30 @@ test("persistSessionIfRotated is a no-op when the cookie jar is unchanged", () =
 
     const afterMtime = (await readFile(sessionPath, "utf8")).length;
     assert.equal(afterMtime, beforeMtime);
+  }));
+
+test("writeSessionFile leaves only the session file behind, owner-only", () =>
+  withTempSessionPath(async (sessionPath) => {
+    await writeSessionFile(makeSession("A=1"), sessionPath);
+    await chmod(sessionPath, 0o644);
+
+    await writeSessionFile(makeSession("A=2"), sessionPath);
+
+    assert.deepEqual(await readdir(path.dirname(sessionPath)), [path.basename(sessionPath)]);
+    assert.equal((await stat(sessionPath)).mode & 0o777, 0o600);
+    assert.equal((await loadSession(sessionPath)).cookie, "A=2");
+  }));
+
+test("a session read during a rewrite sees the old or the new session, never a partial one", () =>
+  withTempSessionPath(async (sessionPath) => {
+    const big = (n: number) => makeSession(`A=${String(n).repeat(200_000)}`);
+    await writeSessionFile(big(1), sessionPath);
+
+    const writes = [2, 3, 4, 5].map((n) => writeSessionFile(big(n), sessionPath));
+    const reads = Array.from({ length: 40 }, () => loadSession(sessionPath));
+    await Promise.all(writes);
+
+    for (const session of await Promise.all(reads)) {
+      assert.match(session.cookie, /^A=(1+|2+|3+|4+|5+)$/);
+    }
   }));
