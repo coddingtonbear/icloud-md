@@ -6,6 +6,7 @@ import { DEFAULT_LAST_ERROR_PATH, readLastError, type LastErrorRecord } from "..
 import { readAliasStore, resolveAlias, writeAliasStore } from "../notes/bugReportAliases.js";
 import { buildContentPreview, renderContentPreview } from "../notes/bugReportContentPreview.js";
 import { buildTextReplacements, discoverAccountScalars, redactCloneState, redactDebugLogEntries, redactLastError } from "../notes/bugReportRedaction.js";
+import { resolveBugReportScope, scopeCloneState, scopeDebugLogEntries, type BugReportScope } from "../notes/bugReportScope.js";
 import { readCloneState, STATE_DIR_NAME, STATE_FILE_NAME, type CloneState } from "../notes/cloneState.js";
 import { resolveTrackedNote } from "../notes/trackedFile.js";
 import { getEnvironmentInfo, type EnvironmentInfo } from "../version.js";
@@ -13,6 +14,10 @@ import { getEnvironmentInfo, type EnvironmentInfo } from "../version.js";
 export interface BugReportSummary {
   outputPath: string;
   logEntryCount: number;
+  /** Set when `noteFiles` narrowed the report: the aliases the scoped notes
+   * carry in it, and how many records from the log window were left out
+   * for being about something else. */
+  scope?: { noteAliases: string[]; recordsOmitted: number };
   /** Set only when at least one debug-log entry decoded to readable note/
    * table content - see buildContentPreview. This file is local-only and
    * deliberately not part of the report itself. */
@@ -22,6 +27,19 @@ export interface BugReportSummary {
 export interface BugReportOptions {
   debugLogPath?: string;
   lastErrorPath?: string;
+  /**
+   * Tracked note files to narrow the report to (`--note <file>`). The state
+   * section then carries only those notes (plus what's needed to place
+   * them - see scopeCloneState), and every record about any other note is
+   * removed from the captured log bodies before they're bundled. This is
+   * the answer for "the problem is in this one note, and I just cloned":
+   * without it the export carries the whole account.
+   */
+  noteFiles?: readonly string[];
+  /** Leave the `state.json` section out entirely (`--no-state`) - for a
+   * report that isn't about any particular note, where the inventory adds
+   * exposure and nothing else. */
+  omitState?: boolean;
   /** Routes the disclosure warning (always stderr - the CLI wires this to
    * `console.error` in both human and `--json` mode); defaults to silent. */
   onDisclosure?: (message: string) => void;
@@ -60,6 +78,7 @@ export function parseSinceDuration(value: string): Date | undefined {
 }
 
 type StateForReport = { status: "ok"; state: CloneState } | { status: "missing" } | { status: "corrupt"; message: string };
+type StateSection = StateForReport | { status: "omitted" };
 
 /**
  * Wraps `readCloneState` so a corrupt `state.json` degrades to a reportable
@@ -88,13 +107,33 @@ async function readStateForReport(targetDir: string): Promise<StateForReport> {
 export async function runBugReport(targetDir: string, since: Date, options: BugReportOptions = {}): Promise<BugReportSummary> {
   options.onDisclosure?.(DISCLOSURE_WARNING);
 
-  const [lastError, state, logEntries] = await Promise.all([
+  const [lastError, fullState, allLogEntries] = await Promise.all([
     readLastError(options.lastErrorPath ?? DEFAULT_LAST_ERROR_PATH),
     readStateForReport(targetDir),
     readDebugLogSince(since, options.debugLogPath ?? DEFAULT_DEBUG_LOG_PATH),
   ]);
   const environment = getEnvironmentInfo();
   const generatedAt = new Date();
+
+  // Scoping happens on the raw inputs, before redaction and before the
+  // content preview is built from them, so that everything downstream -
+  // the report and the local preview of what it exposes - sees the same
+  // narrowed set. A file that isn't a tracked note is refused outright
+  // rather than silently widening the report back to everything.
+  let scope: BugReportScope | undefined;
+  let state = fullState;
+  let logEntries = allLogEntries;
+  let recordsOmitted = 0;
+  if (options.noteFiles && options.noteFiles.length > 0) {
+    if (fullState.status !== "ok") {
+      throw new NotClonedDirectoryError(targetDir);
+    }
+    scope = resolveBugReportScope(fullState.state, options.noteFiles, targetDir);
+    state = { status: "ok", state: scopeCloneState(fullState.state, scope) };
+    const scopedLog = scopeDebugLogEntries(allLogEntries, scope);
+    logEntries = scopedLog.entries;
+    recordsOmitted = scopedLog.recordsOmitted;
+  }
 
   const aliasStore = await readAliasStore(targetDir);
   const rawState = state.status === "ok" ? state.state : undefined;
@@ -118,8 +157,23 @@ export async function runBugReport(targetDir: string, since: Date, options: BugR
     redactedState = { status: "ok", state: redacted.state };
     fileReplacements = redacted.fileReplacements;
   }
+  // `lastError` is free text that can quote any tracked file's real path
+  // (AmbiguousTrackedFileError, AccountMismatchError), including one this
+  // report's scope just dropped - and dropping a note from the inventory
+  // is not what keeps its title out of the report, aliasing is. So the
+  // replacement map it gets scrubbed against is always built from the full
+  // inventory, never the narrowed copy: otherwise narrowing would stop
+  // redacting precisely the notes it had removed. Only the map is taken
+  // from this pass - the redacted state it also produces is discarded.
+  if (scope && fullState.status === "ok") {
+    fileReplacements = redactCloneState(fullState.state, aliasStore).fileReplacements;
+  }
   const redactedLogEntries = redactDebugLogEntries(logEntries, accountAliasMap);
   const redactedLastError = redactLastError(lastError, buildTextReplacements(fileReplacements, accountAliasMap));
+
+  const scopeSummary = scope
+    ? { noteAliases: scope.noteRecordNames.map((recordName) => resolveAlias(aliasStore, "notes", recordName)), recordsOmitted }
+    : undefined;
 
   await writeAliasStore(targetDir, aliasStore);
 
@@ -127,7 +181,16 @@ export async function runBugReport(targetDir: string, since: Date, options: BugR
   const outputPath = path.join(targetDir, `icloud-md-bug-report-${timestamp}.md`);
   await writeFile(
     outputPath,
-    renderBundle({ environment, lastError: redactedLastError, state: redactedState, logEntries: redactedLogEntries, since, targetDir, generatedAt }),
+    renderBundle({
+      environment,
+      lastError: redactedLastError,
+      state: options.omitState ? { status: "omitted" } : redactedState,
+      logEntries: redactedLogEntries,
+      since,
+      targetDir,
+      generatedAt,
+      scope: scopeSummary,
+    }),
     "utf-8",
   );
 
@@ -142,7 +205,12 @@ export async function runBugReport(targetDir: string, since: Date, options: BugR
     await writeFile(contentPreviewPath, renderContentPreview(contentPreview, generatedAt), "utf-8");
   }
 
-  return { outputPath, logEntryCount: logEntries.length, ...(contentPreviewPath ? { contentPreviewPath } : {}) };
+  return {
+    outputPath,
+    logEntryCount: logEntries.length,
+    ...(contentPreviewPath ? { contentPreviewPath } : {}),
+    ...(scopeSummary ? { scope: scopeSummary } : {}),
+  };
 }
 
 /**
@@ -173,13 +241,14 @@ export async function runBugReportIdentify(targetDir: string, fileArg: string): 
 function renderBundle(input: {
   environment: EnvironmentInfo;
   lastError: LastErrorRecord | undefined;
-  state: StateForReport;
+  state: StateSection;
   logEntries: DebugLogRecord[];
   since: Date;
   targetDir: string;
   generatedAt: Date;
+  scope: BugReportSummary["scope"];
 }): string {
-  const { environment, lastError, state, logEntries, since, targetDir, generatedAt } = input;
+  const { environment, lastError, state, logEntries, since, targetDir, generatedAt, scope } = input;
   const lines: string[] = [];
 
   lines.push("# icloud-md bug report", "", `Generated: ${generatedAt.toISOString()}`, "");
@@ -198,6 +267,17 @@ function renderBundle(input: {
     "",
   );
 
+  if (scope) {
+    lines.push("## Scope");
+    lines.push(
+      `This report was narrowed with \`--note\` to ${scope.noteAliases.map((alias) => `\`${alias}\``).join(", ")}: the local state below ` +
+        "carries only those notes (with the folders they sit in and the attachments they own), and " +
+        `${scope.recordsOmitted} record${scope.recordsOmitted === 1 ? "" : "s"} about other notes ${scope.recordsOmitted === 1 ? "was" : "were"} ` +
+        "removed from the debug-log entries (each trimmed list carries a `...OmittedByScope` count beside it).",
+      "",
+    );
+  }
+
   lines.push("## Last recorded error");
   if (lastError) {
     lines.push(`- Timestamp: ${lastError.timestamp}`);
@@ -214,6 +294,8 @@ function renderBundle(input: {
   lines.push(`## Local state (\`${stateFilePath}\`)`);
   if (state.status === "ok") {
     lines.push("```json", JSON.stringify(state.state, null, 2), "```");
+  } else if (state.status === "omitted") {
+    lines.push("Left out at the reporter's request (`--no-state`).");
   } else if (state.status === "corrupt") {
     lines.push(`\`${stateFilePath}\` exists but couldn't be read: ${state.message}`);
   } else {

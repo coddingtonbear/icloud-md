@@ -311,3 +311,118 @@ test("parseSinceDuration rejects malformed or unsupported input", () => {
   assert.equal(parseSinceDuration("1w"), undefined);
   assert.equal(parseSinceDuration("-1h"), undefined);
 });
+
+test("--note narrows the state to the named note and strips other notes' records from the log, in the report and the preview alike", () =>
+  withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
+    const state: CloneState = {
+      syncToken: "token",
+      account: { appleId: "person@example.com", dsid: "123" },
+      notes: {
+        REC1: { file: "Recipes/Soup.md", recordChangeTag: "1a", modificationDate: 100, folderRecordName: "FOLDER1" },
+        REC2: { file: "Bank Statement.md", recordChangeTag: "1b", modificationDate: 100 },
+      },
+      folders: { FOLDER1: { name: "Recipes", dirName: "Recipes" }, FOLDER2: { name: "Private", dirName: "Private" } },
+      tableAttachments: { TABLE1: { noteRecordName: "REC1" } },
+    };
+    await writeCloneState(targetDir, state);
+    await appendDebugLog(
+      {
+        note: "changes/zone",
+        response: {
+          status: 200,
+          headers: {},
+          body: {
+            zones: [
+              {
+                syncToken: "z",
+                records: [
+                  ...(encodedNoteRecordBody("REC1", "Soup", "Carrots and stock") as { records: unknown[] }).records,
+                  ...(encodedNoteRecordBody("REC2", "Bank Statement", "Balance: $42") as { records: unknown[] }).records,
+                ],
+              },
+            ],
+          },
+        },
+      },
+      debugLogPath,
+    );
+
+    const summary = await runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath, noteFiles: [path.join(targetDir, "Recipes/Soup.md")] });
+
+    assert.deepEqual(summary.scope, { noteAliases: ["note-1"], recordsOmitted: 1 });
+    const report = await readFile(summary.outputPath, "utf-8");
+    assert.match(report, /## Scope/);
+    assert.match(report, /narrowed with `--note` to `note-1`/);
+    assert.match(report, /1 record about other notes was removed/);
+    assert.match(report, /"REC1"/);
+    assert.match(report, /"TABLE1"/);
+    assert.match(report, /"recordsOmittedByScope": 1/);
+    assert.doesNotMatch(report, /REC2/);
+    assert.doesNotMatch(report, /FOLDER2/);
+    assert.doesNotMatch(report, /Bank Statement/);
+    // The kept note's folder chain survives so its redacted path still carries a folder alias.
+    assert.match(report, /"file": "folder-1\/note-1\.md"/);
+
+    assert.ok(summary.contentPreviewPath);
+    const preview = await readFile(summary.contentPreviewPath ?? "", "utf-8");
+    assert.match(preview, /Carrots and stock/);
+    assert.doesNotMatch(preview, /Balance: \$42/);
+  }));
+
+test("--note still aliases a dropped note's real filename out of lastError's message", () =>
+  withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
+    // Narrowing removes the other note from the inventory, but what keeps
+    // its title out of the report is aliasing - and lastError is free text
+    // that can quote it regardless of scope.
+    const state: CloneState = {
+      syncToken: "token",
+      account: { appleId: "person@example.com", dsid: "123" },
+      notes: {
+        REC1: { file: "Recipes/Soup.md", recordChangeTag: "1a", modificationDate: 100 },
+        REC2: { file: "Bank Statement.md", recordChangeTag: "1b", modificationDate: 100 },
+      },
+    };
+    await writeCloneState(targetDir, state);
+    await recordLastError(new Error("Bank Statement.md matches more than one tracked note."), lastErrorPath);
+
+    const summary = await runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath, noteFiles: [path.join(targetDir, "Recipes/Soup.md")] });
+    const report = await readFile(summary.outputPath, "utf-8");
+
+    assert.doesNotMatch(report, /Bank Statement/);
+    assert.match(report, /note-2\.md matches more than one tracked note\./);
+    // ...and the scoped note's own alias is still the first one minted.
+    assert.deepEqual(summary.scope?.noteAliases, ["note-1"]);
+  }));
+
+test("--note refuses a file that isn't a tracked note instead of widening back to the whole vault", () =>
+  withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
+    await writeCloneState(targetDir, STATE);
+
+    await assert.rejects(
+      runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath, noteFiles: ["Nope.md"] }),
+      (error: unknown) => error instanceof Error && /isn't a tracked note/.test(error.message),
+    );
+  }));
+
+test("--note on a directory with no state.json is refused rather than reported as 'no state found'", () =>
+  withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
+    await assert.rejects(
+      runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath, noteFiles: ["Nope.md"] }),
+      (error: unknown) => error instanceof Error && /doesn't look like a cloned notes directory/.test(error.message),
+    );
+  }));
+
+test("--no-state leaves the inventory out and says so, while the log slice is still bundled", () =>
+  withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
+    await writeCloneState(targetDir, STATE);
+    await appendDebugLog({ note: "records/modify", response: { status: 503, headers: { "retry-after": "10" }, body: { serverErrorCode: "TRY_AGAIN_LATER" } } }, debugLogPath);
+
+    const summary = await runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath, omitState: true });
+
+    const report = await readFile(summary.outputPath, "utf-8");
+    assert.match(report, /Left out at the reporter's request \(`--no-state`\)/);
+    assert.doesNotMatch(report, /"syncToken"/);
+    assert.doesNotMatch(report, /Test Note/);
+    assert.match(report, /TRY_AGAIN_LATER/);
+    assert.equal(summary.scope, undefined);
+  }));

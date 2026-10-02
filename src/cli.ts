@@ -559,17 +559,24 @@ program
   )
   .option("--since <duration>", 'how far back to bundle debug-log entries, e.g. "30m", "6h", "2d"')
   .option("--identify <file>", "print the alias a bug report would use for <file>, without writing a report")
+  .option(
+    "--note <file>",
+    "narrow the report to this tracked note (repeatable): only its state entry, and only log records about it or " +
+      "its attachments, are included",
+    (file: string, previous: string[] = []) => [...previous, file],
+  )
+  .option("--no-state", "leave the local state.json inventory out of the report entirely")
   .action(
     async (
       directory: string | undefined,
-      opts: { since?: string; identify?: string },
+      opts: { since?: string; identify?: string; note?: string[]; state: boolean },
       command: Command,
     ) => {
       const context = contextFor(command);
       const targetDir = await resolveTargetDir(directory);
 
-      if (opts.identify !== undefined && opts.since !== undefined) {
-        command.error('"--since" and "--identify" can\'t be used together.');
+      if (opts.identify !== undefined && (opts.since !== undefined || opts.note !== undefined || !opts.state)) {
+        command.error('"--identify" can\'t be combined with "--since", "--note", or "--no-state".');
         return;
       }
 
@@ -589,9 +596,19 @@ program
         return;
       }
 
-      const result = await runBugReport(targetDir, since, { onDisclosure: (message) => console.error(message) });
+      const result = await runBugReport(targetDir, since, {
+        onDisclosure: (message) => console.error(message),
+        ...(opts.note ? { noteFiles: opts.note } : {}),
+        ...(opts.state ? {} : { omitState: true }),
+      });
       emitResult(context, result, (r) => {
         console.log(`Wrote ${r.outputPath}`);
+        if (r.scope) {
+          console.log(
+            `Narrowed to ${r.scope.noteAliases.join(", ")}; ${r.scope.recordsOmitted} log record${r.scope.recordsOmitted === 1 ? "" : "s"} ` +
+              "about other notes left out.",
+          );
+        }
         if (r.contentPreviewPath) {
           console.log(
             `Wrote a decoded-content preview to ${r.contentPreviewPath} - review it before sharing ${r.outputPath} ` +
