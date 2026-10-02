@@ -297,6 +297,12 @@ resolution live.
   cleaning up notes this tool (or anything else) leaves in a broken state.
 - **`history`/`diff`/`revert`**, and push-time auto-merge via version
   history — the safety net for inspecting or undoing a bad edit.
+- **Apple's throttling is waited out, not treated as a failure.** A long
+  `push` sends hundreds of writes, and eventually one comes back
+  `TRY_AGAIN_LATER` with a `Retry-After`; that wait is honoured and the
+  request retried, so a big sync finishes in one run instead of dying
+  partway and needing a re-run. Anything that isn't a throttle still fails
+  on the first attempt, exactly as before.
 
 ## Where the title lives
 
