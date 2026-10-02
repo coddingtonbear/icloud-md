@@ -10,7 +10,7 @@ const TARGET_DIR = path.join(path.sep, "vault");
 
 const STATE: CloneState = {
   syncToken: "token",
-  sharedZoneSyncTokens: { OWNER1: "shared-token" },
+  sharedZoneSyncTokens: { OWNER1: "shared-token", OWNER2: "other-shared-token" },
   replicaId: "replica",
   account: { appleId: "person@example.com", dsid: "123" },
   notes: {
@@ -33,11 +33,14 @@ const STATE: CloneState = {
   trashed: { GONE: { file: "Gone.md", trashedAt: 5 } },
 };
 
-test("resolveBugReportScope widens each note to the attachments and tables it owns, deduplicating repeats", () => {
+test("resolveBugReportScope widens each note to the attachments, backing media, and tables it owns, deduplicating repeats", () => {
   const scope = resolveBugReportScope(STATE, [path.join(TARGET_DIR, "Work/Projects/Plan.md"), "Work/Projects/Plan.md"], TARGET_DIR);
 
   assert.deepEqual(scope.noteRecordNames, ["NOTE1"]);
-  assert.deepEqual([...scope.recordNames].sort(), ["ATT1", "NOTE1", "TABLE1"]);
+  // MEDIA1 carries the bytes ATT1 only points at - a scoped report about a
+  // failed download needs the Media response, not just the Attachment.
+  assert.deepEqual([...scope.recordNames].sort(), ["ATT1", "MEDIA1", "NOTE1", "TABLE1"]);
+  assert.equal(scope.recordNames.has("MEDIA2"), false);
 });
 
 test("resolveBugReportScope refuses a file that isn't a tracked note", () => {
@@ -57,8 +60,19 @@ test("scopeCloneState keeps only the scoped notes, their attachments, their fold
   // Vault-level scalars survive untouched.
   assert.equal(scoped.syncToken, "token");
   assert.equal(scoped.replicaId, "replica");
+  // Keyed by sharer, so it is narrowed with them: OWNER2 shares nothing in
+  // scope and its owner id has no business in the report.
   assert.deepEqual(scoped.sharedZoneSyncTokens, { OWNER1: "shared-token" });
   assert.deepEqual(scoped.account, STATE.account);
+});
+
+test("scopeCloneState drops every sharer's sync token when no scoped note is shared", () => {
+  const scope = resolveBugReportScope(STATE, ["Diary.md"], TARGET_DIR);
+  const scoped = scopeCloneState(STATE, scope);
+
+  assert.deepEqual(scoped.sharedZoneSyncTokens, {});
+  assert.deepEqual(scoped.sharerHomes, {});
+  assert.doesNotMatch(JSON.stringify(scoped), /OWNER1|OWNER2/);
 });
 
 test("scopeCloneState leaves absent optional sections absent rather than inventing empty ones", () => {
@@ -68,6 +82,7 @@ test("scopeCloneState leaves absent optional sections absent rather than inventi
   assert.equal(scoped.folders, undefined);
   assert.equal(scoped.attachments, undefined);
   assert.equal(scoped.trashed, undefined);
+  assert.equal(scoped.sharedZoneSyncTokens, undefined);
 });
 
 function entry(note: string, body: unknown): DebugLogRecord {

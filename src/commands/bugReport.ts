@@ -157,6 +157,17 @@ export async function runBugReport(targetDir: string, since: Date, options: BugR
     redactedState = { status: "ok", state: redacted.state };
     fileReplacements = redacted.fileReplacements;
   }
+  // `lastError` is free text that can quote any tracked file's real path
+  // (AmbiguousTrackedFileError, AccountMismatchError), including one this
+  // report's scope just dropped - and dropping a note from the inventory
+  // is not what keeps its title out of the report, aliasing is. So the
+  // replacement map it gets scrubbed against is always built from the full
+  // inventory, never the narrowed copy: otherwise narrowing would stop
+  // redacting precisely the notes it had removed. Only the map is taken
+  // from this pass - the redacted state it also produces is discarded.
+  if (scope && fullState.status === "ok") {
+    fileReplacements = redactCloneState(fullState.state, aliasStore).fileReplacements;
+  }
   const redactedLogEntries = redactDebugLogEntries(logEntries, accountAliasMap);
   const redactedLastError = redactLastError(lastError, buildTextReplacements(fileReplacements, accountAliasMap));
 

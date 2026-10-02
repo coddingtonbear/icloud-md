@@ -369,6 +369,31 @@ test("--note narrows the state to the named note and strips other notes' records
     assert.doesNotMatch(preview, /Balance: \$42/);
   }));
 
+test("--note still aliases a dropped note's real filename out of lastError's message", () =>
+  withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
+    // Narrowing removes the other note from the inventory, but what keeps
+    // its title out of the report is aliasing - and lastError is free text
+    // that can quote it regardless of scope.
+    const state: CloneState = {
+      syncToken: "token",
+      account: { appleId: "person@example.com", dsid: "123" },
+      notes: {
+        REC1: { file: "Recipes/Soup.md", recordChangeTag: "1a", modificationDate: 100 },
+        REC2: { file: "Bank Statement.md", recordChangeTag: "1b", modificationDate: 100 },
+      },
+    };
+    await writeCloneState(targetDir, state);
+    await recordLastError(new Error("Bank Statement.md matches more than one tracked note."), lastErrorPath);
+
+    const summary = await runBugReport(targetDir, new Date(0), { debugLogPath, lastErrorPath, noteFiles: [path.join(targetDir, "Recipes/Soup.md")] });
+    const report = await readFile(summary.outputPath, "utf-8");
+
+    assert.doesNotMatch(report, /Bank Statement/);
+    assert.match(report, /note-2\.md matches more than one tracked note\./);
+    // ...and the scoped note's own alias is still the first one minted.
+    assert.deepEqual(summary.scope?.noteAliases, ["note-1"]);
+  }));
+
 test("--note refuses a file that isn't a tracked note instead of widening back to the whole vault", () =>
   withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
     await writeCloneState(targetDir, STATE);

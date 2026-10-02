@@ -18,8 +18,9 @@ import { resolveTrackedNote } from "./trackedFile.js";
 export interface BugReportScope {
   /** recordNames of the scoped notes themselves, in `--note` order. */
   noteRecordNames: string[];
-  /** Every recordName the report may include: the notes plus their
-   * attachments and table attachments. */
+  /** Every recordName the report may include: the notes, their attachments
+   * and table attachments, and the `Media` records backing those
+   * attachments. */
   recordNames: Set<string>;
 }
 
@@ -33,11 +34,25 @@ export function resolveBugReportScope(state: CloneState, noteFiles: readonly str
   }
 
   const recordNames = new Set(noteRecordNames);
+  // An `Attachment` record names its backing `Media` record but carries
+  // neither the bytes nor the checksum, and resolution looks both of them
+  // up (see attachmentSync.ts) - so scoping to the Attachment alone would
+  // leave a report about a failed download without the half of the
+  // exchange that actually failed. Collected separately and added after
+  // both passes, since the `noteRecordName` tests below are about Note
+  // records only.
+  const mediaRecordNames: string[] = [];
   for (const [recordName, entry] of Object.entries(state.attachments ?? {})) {
-    if (recordNames.has(entry.noteRecordName)) recordNames.add(recordName);
+    if (recordNames.has(entry.noteRecordName)) {
+      recordNames.add(recordName);
+      mediaRecordNames.push(entry.mediaRecordName);
+    }
   }
   for (const [recordName, entry] of Object.entries(state.tableAttachments ?? {})) {
     if (recordNames.has(entry.noteRecordName)) recordNames.add(recordName);
+  }
+  for (const mediaRecordName of mediaRecordNames) {
+    recordNames.add(mediaRecordName);
   }
   return { noteRecordNames, recordNames };
 }
@@ -48,9 +63,13 @@ export function resolveBugReportScope(state: CloneState, noteFiles: readonly str
  * path can still be rebuilt from the record graph - see
  * `redactedNotePath`), and the sharer home of a shared note. Everything
  * else in the inventory - every other note, folder, sharer, and the trash
- * registry - is dropped. Vault-level scalars (sync tokens, replica id,
- * layout version, account) are kept: they're opaque, and they're exactly
- * what a report needs to be diagnosable.
+ * registry - is dropped. Vault-level scalars (the account's own sync
+ * token, replica id, layout version, account) are kept: they're opaque,
+ * and they're exactly what a report needs to be diagnosable.
+ * `sharedZoneSyncTokens` is the exception among them - it is keyed by
+ * sharer, so keeping it whole would re-expose the owner ids of exactly the
+ * sharers the pass just dropped, and it is narrowed to the same set as
+ * `sharerHomes`.
  */
 export function scopeCloneState(state: CloneState, scope: BugReportScope): CloneState {
   const notes: CloneState["notes"] = {};
@@ -80,6 +99,7 @@ export function scopeCloneState(state: CloneState, scope: BugReportScope): Clone
   return {
     ...state,
     notes,
+    sharedZoneSyncTokens: pick(state.sharedZoneSyncTokens, (key) => sharerOwners.has(key)),
     folders: pick(state.folders, (key) => folderRecordNames.has(key)),
     sharerHomes: pick(state.sharerHomes, (key) => sharerOwners.has(key)),
     attachments: pick(state.attachments, (key) => scope.recordNames.has(key)),
