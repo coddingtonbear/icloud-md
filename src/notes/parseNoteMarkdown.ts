@@ -61,6 +61,9 @@ export type ParseNoteMarkdownResult =
 class Unsupported extends Error {}
 
 export function parseNoteMarkdown(markdown: string): ParseNoteMarkdownResult {
+  // Normalize before parsing so remark positions, raw slices, code blocks,
+  // and our per-line bookkeeping all refer to the same source.
+  markdown = markdown.replace(/\r\n?|\n/g, "\n");
   const lines = markdown.split("\n");
   const root = processor.parse(markdown);
   const parser = new Parser(markdown, lines);

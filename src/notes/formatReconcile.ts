@@ -90,7 +90,7 @@ export function reconcileNoteFormat(doc: NoteDocument, desired: readonly FormatP
     if (paragraph.kind !== "todoList" || desired[i]!.kind !== "todoList") {
       continue;
     }
-    const uuid = todoUuidOfParagraph(doc, paragraph, i === current.paragraphs.length - 1);
+    const uuid = todoUuidOfParagraph(doc, paragraph, current.paragraphs[i + 1]?.start);
     if (uuid === undefined || uuid.length === 0) {
       continue;
     }
@@ -111,7 +111,7 @@ export function reconcileNoteFormat(doc: NoteDocument, desired: readonly FormatP
   const needsStartRepair = new Set<number>();
   for (let i = 0; i < current.paragraphs.length; i += 1) {
     const paragraph = current.paragraphs[i]!;
-    if (paragraph.kind === "numberedList" && desired[i]!.kind === "numberedList" && hasExplicitZeroStart(doc, paragraph, i === current.paragraphs.length - 1)) {
+    if (paragraph.kind === "numberedList" && desired[i]!.kind === "numberedList" && hasExplicitZeroStart(doc, paragraph, current.paragraphs[i + 1]?.start)) {
       needsStartRepair.add(i);
     }
   }
@@ -131,7 +131,12 @@ export function reconcileNoteFormat(doc: NoteDocument, desired: readonly FormatP
   }
 
   const plans = changedIndexes.map((index) =>
-    buildParagraphPlan(current.paragraphs[index]!, desired[index]!, index === desired.length - 1, needsFreshTodoUuid.has(index)),
+    buildParagraphPlan(
+      current.paragraphs[index]!,
+      desired[index]!,
+      current.paragraphs[index + 1]?.start,
+      needsFreshTodoUuid.has(index),
+    ),
   );
   doc.attributeRuns = rewriteAttributeRuns(doc.attributeRuns, plans);
   applyFormattingOp(
@@ -145,7 +150,7 @@ export function reconcileNoteFormat(doc: NoteDocument, desired: readonly FormatP
 // --- per-paragraph rewrite plans ---------------------------------------------
 
 /** Everything needed to overlay one changed paragraph: its absolute char
- * range (including the trailing newline, which carries paragraph style),
+ * range (including the actual trailing separator, which carries paragraph style),
  * both sides' normalized spans as absolute intervals, and the todo uuid to
  * use if the paragraph is (or becomes) a checklist item. */
 interface ParagraphPlan {
@@ -170,18 +175,21 @@ interface SpanInterval {
 function buildParagraphPlan(
   current: FormatParagraph,
   desired: FormatParagraph,
-  isLastParagraph: boolean,
+  nextStart: number | undefined,
   forceFreshTodoUuid: boolean,
 ): ParagraphPlan {
   const start = current.start;
-  const end = start + current.text.length + (isLastParagraph ? 0 : 1);
+  // `decodeNoteFormat` retains wire offsets, so this also covers both code
+  // units of CRLF and any final empty paragraph. The last paragraph has no
+  // separator range after it.
+  const end = nextStart ?? start + current.text.length;
   return {
     current,
     desired,
     start,
     end,
     currentSpans: spanIntervals(current, end),
-    desiredSpans: spanIntervals(desired, end),
+    desiredSpans: spanIntervals({ ...desired, start }, end),
     todoUuid: uuidBytes(),
     forceFreshTodoUuid,
   };
@@ -190,9 +198,9 @@ function buildParagraphPlan(
 /** Whether any run overlapping the paragraph carries an explicit
  * startingListItemNumber of 0 - the shape this tool's early Step 2 writes
  * produced and Apple renders as a 0-numbered list (see the repair scan). */
-function hasExplicitZeroStart(doc: NoteDocument, paragraph: FormatParagraph, isLastParagraph: boolean): boolean {
+function hasExplicitZeroStart(doc: NoteDocument, paragraph: FormatParagraph, nextStart: number | undefined): boolean {
   const start = paragraph.start;
-  const end = start + paragraph.text.length + (isLastParagraph ? 0 : 1);
+  const end = nextStart ?? start + paragraph.text.length;
   let offset = 0;
   for (const run of doc.attributeRuns) {
     const runStart = offset;
@@ -208,9 +216,9 @@ function hasExplicitZeroStart(doc: NoteDocument, paragraph: FormatParagraph, isL
 
 /** The todo uuid carried by the first run overlapping the paragraph's range
  * (all of a paragraph's runs share one), or undefined when none does. */
-function todoUuidOfParagraph(doc: NoteDocument, paragraph: FormatParagraph, isLastParagraph: boolean): Uint8Array | undefined {
+function todoUuidOfParagraph(doc: NoteDocument, paragraph: FormatParagraph, nextStart: number | undefined): Uint8Array | undefined {
   const start = paragraph.start;
-  const end = start + paragraph.text.length + (isLastParagraph ? 0 : 1);
+  const end = nextStart ?? start + paragraph.text.length;
   let offset = 0;
   for (const run of doc.attributeRuns) {
     const runStart = offset;
@@ -224,8 +232,8 @@ function todoUuidOfParagraph(doc: NoteDocument, paragraph: FormatParagraph, isLa
 }
 
 /** A paragraph's normalized spans as absolute [start, end) intervals; the
- * trailing newline (and any uncovered tail) extends the last span, or a
- * plain span if the paragraph is empty - the newline belongs to the
+ * trailing separator (and any uncovered tail) extends the last span, or a
+ * plain span if the paragraph is empty - the separator belongs to the
  * paragraph and takes its final inline styling, matching captured runs. */
 function spanIntervals(paragraph: FormatParagraph, paragraphEnd: number): SpanInterval[] {
   const out: SpanInterval[] = [];

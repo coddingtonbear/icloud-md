@@ -85,9 +85,9 @@ test("decode tolerates under-covering runs (uncovered tail is plain Body) but re
   assert.equal(over.status, "unsupported");
 });
 
-test("a paragraph's attributes come from the run covering its newline; a run may span lines", () => {
-  // One run covers "one\ntwo\n" (both lines heading), a second covers the
-  // last line without a newline (subheading via last character).
+test("a paragraph's attributes come from its start; a run may span lines", () => {
+  // One run covers both the first paragraph and the start of the second;
+  // the second run covers only the last paragraph.
   const result = decodeNoteFormat(
     "one\ntwo\nthree",
     runs({ length: 8, paragraphStyle: { style: 1 } }, { length: 5, paragraphStyle: { style: 2 } }),
@@ -173,4 +173,83 @@ test("projection equality: numbered start matters only at a group's first item",
 
   const c = [paragraph("one", { kind: "numberedList", startNumber: 4 }), paragraph("two", { kind: "numberedList", startNumber: 0 })];
   assert.equal(formatsRoundTripEqual(a, c), false);
+});
+
+test("CR and CRLF boundaries preserve UTF-16 offsets and paragraph-start attributes", () => {
+  const text = "😀A\r\nB\r\rC\n";
+  const result = decodeNoteFormat(text, runs(
+    { length: 4, fontHints: 1, paragraphStyle: { style: 0 } },
+    { length: 1, paragraphStyle: { style: 1 } },
+    { length: 2, fontHints: 2, paragraphStyle: { style: 2 } },
+    { length: 1, paragraphStyle: { style: 3 } },
+    { length: 2, paragraphStyle: { style: 3 } },
+  ));
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.deepEqual(result.paragraphs.map(p => p.text), ["😀A", "B", "", "C", ""]);
+  assert.deepEqual(result.paragraphs.map(p => p.start), [0, 5, 7, 8, 10]);
+  assert.deepEqual(result.paragraphs.map(p => p.kind), ["title", "subheading", "body", "body", "body"]);
+  assert.deepEqual(result.paragraphs[0]?.spans, [{ ...PLAIN_STYLE, bold: true, length: 3 }]);
+  assert.deepEqual(result.paragraphs[1]?.spans, [{ ...PLAIN_STYLE, italic: true, length: 1 }]);
+  for (const p of result.paragraphs) assert.equal(text.slice(p.start, p.start + p.text.length), p.text);
+});
+
+test("conflicting CRLF styles follow Apple's paragraph-start rule", () => {
+  // Retained Test 3 probe: Apple's Notes web client renders each text style
+  // despite the conflicting CR and LF styles (see the retained evidence in PR #35).
+  const result = decodeNoteFormat(
+    "A\r\nB\r\nC",
+    runs(
+      { length: 1, paragraphStyle: { style: 1 } },
+      { length: 1, paragraphStyle: { style: 1 } },
+      { length: 1, paragraphStyle: { style: 2 } },
+      { length: 1, paragraphStyle: { style: 2 } },
+      { length: 1, paragraphStyle: { style: 2 } },
+      { length: 1, paragraphStyle: { style: 1 } },
+      { length: 1, paragraphStyle: { style: 3 } },
+    ),
+  );
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.deepEqual(result.paragraphs.map((p) => p.kind), ["heading", "subheading", "body"]);
+  assert.deepEqual(result.paragraphs.map((p) => p.start), [0, 3, 6]);
+});
+
+test("list indentation, quote level, numbering, and checklist state come from paragraph starts", () => {
+  const todoUuid = new Uint8Array(16).fill(9);
+  const result = decodeNoteFormat(
+    "A\r\nB",
+    runs(
+      { length: 1, paragraphStyle: { style: 102, indent: 2, blockQuoteLevel: 2, startingListItemNumber: 7 } },
+      { length: 1, paragraphStyle: { style: 3, indent: 0, blockQuoteLevel: 0 } },
+      { length: 1, paragraphStyle: { style: 0 } },
+      { length: 1, paragraphStyle: { style: 103, indent: 1, todo: { todoUUID: todoUuid, done: 1 } } },
+    ),
+  );
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.deepEqual(
+    result.paragraphs.map((p) => [p.kind, p.indent, p.blockQuoteLevel, p.startNumber, p.done]),
+    [
+      ["numberedList", 2, 2, 7, undefined],
+      ["todoList", 1, 0, 0, true],
+    ],
+  );
+});
+
+test("empty paragraphs use attributes at their start and final empty paragraphs use defaults", () => {
+  const result = decodeNoteFormat(
+    "A\r\n\r\n",
+    runs(
+      { length: 3, paragraphStyle: { style: 3 } },
+      { length: 2, paragraphStyle: { style: 103, todo: { todoUUID: new Uint8Array(16).fill(7), done: 1 } } },
+    ),
+  );
+  assert.equal(result.status, "ok");
+  if (result.status !== "ok") return;
+  assert.deepEqual(result.paragraphs.map((p) => [p.text, p.start, p.kind, p.done]), [
+    ["A", 0, "body", undefined],
+    ["", 3, "todoList", true],
+    ["", 5, "body", undefined],
+  ]);
 });

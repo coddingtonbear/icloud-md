@@ -140,3 +140,38 @@ test("two tables reconstruct in document order", () => {
     ["TABLE-1", "TABLE-2"],
   );
 });
+
+test("mixed local separators normalize before locating multiple tables and markers", () => {
+  const firstTable = renderMarkdownTable([["First", "Value"]]);
+  const secondTable = renderMarkdownTable([["Second"]]);
+  const secondTableSlot: EmbedSlot = {
+    kind: "attachment",
+    ref: { attachmentIdentifier: "TABLE-2", typeUti: "com.apple.notes.table" },
+  };
+  const localText = [
+    "Intro",
+    GALLERY_MARKER,
+    "between marker and table",
+    firstTable,
+    "between tables",
+    UNKNOWN_MARKER,
+    secondTable,
+    "Outro",
+  ].join("\r\n").replace("Intro\r\n", "Intro\r").replace("\r\nOutro", "\nOutro");
+  for (const input of [localText, localText.replace(/\r\n?|\n/g, "\r"), localText.replace(/\r\n?|\n/g, "\r\n")]) {
+    const plan = expectOk(planEmbedRepresentations(
+      input,
+      [GALLERY_SLOT, TABLE_SLOT, UNKNOWN_SLOT, secondTableSlot],
+      NO_FILES,
+    ));
+    assert.equal(
+      plan.reconstructedBodyText,
+      ["Intro", OBJECT_REPLACEMENT_CHARACTER, "between marker and table", OBJECT_REPLACEMENT_CHARACTER,
+        "between tables", OBJECT_REPLACEMENT_CHARACTER, OBJECT_REPLACEMENT_CHARACTER, "Outro"].join("\n"),
+    );
+    assert.deepEqual(
+      plan.tables.map(({ ref, block }) => [ref.attachmentIdentifier, block.grid]),
+      [["TABLE-1", [["First", "Value"]]], ["TABLE-2", [["Second"]]]],
+    );
+  }
+});

@@ -56,6 +56,10 @@ export function planEmbedRepresentations(
   slots: readonly EmbedSlot[],
   trackedFileAttachmentIds: ReadonlySet<string>,
 ): EmbedRepresentationPlan {
+  // Marker and table parsers use LF line positions. Normalize once before
+  // discovery and splicing so every offset refers to the same string that
+  // the Markdown parser and push reconciler will consume.
+  localText = localText.replace(/\r\n?|\n/g, "\n");
   const markers = parseEmbedMarkers(localText);
   const markerIds = new Set(
     markers.map((marker) => marker.attachmentIdentifier).filter((id): id is string => id !== undefined),

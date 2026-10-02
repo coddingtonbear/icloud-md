@@ -109,7 +109,7 @@ export function classifyNoteRecord(record: CloudKitRecord, options: ClassifyNote
   // cosmetic display metadata that devices re-derive and that Apple truncates
   // at ~76 characters, so it's the wrong thing to name a file after when the
   // file name has to carry the title faithfully.
-  const titleLine = bodyText.split("\n")[0] ?? "";
+  const titleLine = bodyText.split(/\r\n?|\n/)[0] ?? "";
   const embedSlots = decodeNoteEmbedSlots(compressed);
   if (embedSlots === undefined) {
     // The embed structure defies the model verified against real captures
