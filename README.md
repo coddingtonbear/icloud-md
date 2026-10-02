@@ -31,8 +31,10 @@ icloud-md push
   * [Platform & direction](#platform--direction)
   * [Fidelity & content types (read / write)](#fidelity--content-types-read--write)
 - [Reporting bugs](#reporting-bugs)
-  * [Getting a Bug Report Export](#getting-a-bug-report-export)
   * [Reproduction Steps](#reproduction-steps)
+  * [When an export is the right thing](#when-an-export-is-the-right-thing)
+  * [What to send instead](#what-to-send-instead)
+  * [Getting a Bug Report Export](#getting-a-bug-report-export)
   * [File Identities](#file-identities)
 - [Contributing / development](#contributing--development)
 - [License](#license)
@@ -505,13 +507,12 @@ reconciles changes made on both sides.
 
 ## Reporting bugs
 
-Every reported issue must include three things:
-
-- A bug report export
-- Reproduction steps
-- File Identities
-
-For each of these, read more below.
+A report needs enough for someone else to see the problem without your account.
+Precise reproduction steps are always required. The other two items below, a bug
+report export and file identities, are how to describe a *particular note* that
+came back wrong; they are the right tool for that case and the wrong one for
+several others, so read "When an export is the right thing" before generating
+one.
 
 > [!WARNING]
 > It is strongly recommended that, instead of submitting
@@ -520,50 +521,6 @@ For each of these, read more below.
 > whatever bug and generating a bug report. Owing to how
 > notes work, we must know the content of the note you are
 > submitting a report for!
-
-### Getting a Bug Report Export
-
-Run
-
-```bash
-icloud-md bug-report --since <duration>
-```
-
-(e.g. `--since 10m`, run against the affected directory).
-
-This will generate a markdown document outlining the state
-of your note clone as well as any recent log messages.
-
-> [!WARNING]
-> The bug report intends to remove the most dangerous of PII
-> (e.g. your apple ID, name, email, and internal IDs like
-> your dsid), but it **does not redact the underlying content
-> of a note or table touched by a recent `push`/`pull`/`diff`/`revert`**.
->
-> Users reviewing your report can at least:
-> - See the content you changed in any notes you changed during
->   the time window you selected your bug report to span.
-> - See the content of any attachments (via a signed URL) in those notes.
-> - Possibly other things, too!
->
-> As part of the bug report creation process, we create a file
-> of the same name but with a `content-preview.md` extension.
-> That file will include decompressed versions of the logged
-> information above so you can have a better understanding
-> of what content can be decoded from the bug report you may
-> choose to submit.
->
-> If you have recently cloned your repository, that export
-> might expose the full content of every single file in
-> your notes! It is recommended that you instead reproduce
-> whatever problem in isolation (a few minutes after
-> doing anything else with your icloud notes on any device)
-> and then narrowly generate a bug report for just the range
-> of time during which your problem occurred.
->
-> **Be careful to review the `content-preview.md` file created
-> alongside your bug report to ensure that you are not leaking
-> private information!**
 
 ### Reproduction Steps
 
@@ -585,6 +542,108 @@ For example:
 Where X and Y are two files you've attached as part of your
 bug report.
 
+### When an export is the right thing
+
+Include a bug report export and file identities when the problem is *about a
+specific note*: its text or formatting came out wrong after a `pull` or `push`,
+it was refused and the refusal doesn't make sense to you, or a `push` changed
+something you didn't edit. In those cases the export is usually the only way to
+diagnose it, because the diagnosis needs the note's actual bytes.
+
+Don't generate one when:
+
+- **The problem showed up during, or right after, `clone`.** The export always
+  includes this vault's full sync-state inventory (every tracked note, with
+  titles and paths replaced by aliases), and a `--since` window that covers a
+  clone includes the content of every note that clone downloaded. No time range
+  makes that safe to share.
+- **It reproduces without an account.** A parser or formatter bug that a short
+  script against a checkout of this repo can demonstrate needs no export at
+  all; the script *is* the report.
+- **It's not about a note.** A rate limit, a network error, a hang, a crash on
+  startup, or anything about the session file needs the error text and the
+  relevant debug-log lines, not the vault inventory.
+
+In any of those situations, use the substitutes below instead.
+
+### What to send instead
+
+Any of these is a complete substitute for an export:
+
+- **A script.** A few lines run against a source checkout (`npm install`, then
+  `node --import tsx` against the module in `src/` you think is at fault),
+  with the input, the actual output, and the expected output.
+- **A synthetic note.** Create a throwaway note containing nothing but filler
+  that shows the problem, reproduce against *it*, and report its identity
+  (`icloud-md bug-report --identify <file>`). If the maintainer needs the
+  record, `icloud-md object show <record id>` prints a derived summary of it;
+  the raw record itself only appears under `--json`. Neither form carries your
+  note content, but both name the note's path inside your vault - and so the
+  folder it sits in - along with every record referencing it, so read it over
+  before pasting.
+- **A debug-log excerpt.** `~/.config/icloud-md/debug.log` holds every request
+  and response this tool makes. Only cookies, session tokens, and login
+  secrets are redacted as entries are written; your identity is not.
+  (`bug-report` drops those when it builds a bundle, which is why the log
+  inside a generated report is cleaner than the one on disk.) Before pasting
+  a raw excerpt, remove your `dsid` (it appears in request URLs as well as in
+  bodies), your `appleId`, and any `fullName`, `primaryEmail`, or Apple ID
+  alias fields, then cut any response body that carries note content; the
+  status, headers, `serverErrorCode`, and timing are what matter for a
+  network or throttling report.
+
+Whatever you send, say which of the above it is, and say explicitly if you
+looked at an export and decided not to attach it. That is a perfectly good
+answer, and it tells the maintainer where to look for the rest.
+
+### Getting a Bug Report Export
+
+Run
+
+```bash
+icloud-md bug-report --since <duration>
+```
+
+(e.g. `--since 10m`, run against the affected directory).
+
+This will generate a markdown document outlining the state
+of your note clone as well as any recent log messages.
+
+> [!WARNING]
+> The bug report intends to remove the most dangerous of PII
+> (e.g. your apple ID, name, email, and internal IDs like
+> your dsid), but it **does not redact the underlying content
+> of a note or table touched by a recent `push`/`pull`/`diff`/`revert`**,
+> and it **always includes this vault's whole sync-state inventory**
+> (aliased, but complete) regardless of the `--since` window.
+>
+> Users reviewing your report can at least:
+> - See the content you changed in any notes you changed during
+>   the time window you selected your bug report to span.
+> - See the content of any attachments (via a signed URL) in those notes.
+> - See how many notes, folders, and sharers this vault tracks, and the
+>   sync metadata for each of them.
+> - Possibly other things, too!
+>
+> As part of the bug report creation process, we create a file
+> of the same name but with a `content-preview.md` extension.
+> That file will include decompressed versions of the logged
+> information above so you can have a better understanding
+> of what content can be decoded from the bug report you may
+> choose to submit.
+>
+> If you have recently cloned your repository, that export
+> might expose the full content of every single file in
+> your notes! It is recommended that you instead reproduce
+> whatever problem in isolation (a few minutes after
+> doing anything else with your icloud notes on any device)
+> and then narrowly generate a bug report for just the range
+> of time during which your problem occurred.
+>
+> **Be careful to review the `content-preview.md` file created
+> alongside your bug report to ensure that you are not leaking
+> private information!**
+
 ### File Identities
 
 The bug report export above intentionally does not include the names
@@ -595,8 +654,8 @@ to get the bug report identity for any relevant files; to do that, you can run:
 icloud-md bug-report --identify FILENAME
 ```
 
-identities for each file you discuss in your reproduction steps must be included
-for any report to be accepted.
+Include the identity of every file you discuss in your reproduction steps
+whenever you attach an export.
 
 For example:
 
