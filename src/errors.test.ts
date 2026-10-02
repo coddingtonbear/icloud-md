@@ -87,7 +87,7 @@ test("MissingSessionFileError preserves the underlying fs error as `cause`", () 
 
 test("ChromiumNotInstalledError points at the playwright install command", () => {
   const error = new ChromiumNotInstalledError();
-  assert.match(error.hint ?? "", /playwright install chromium/);
+  assert.match(error.hint ?? "", /icloud-md install-browser/);
 });
 
 test("NotesUnavailableError has a fixed message about the account not reporting a ckdatabasews host", () => {

@@ -1,12 +1,12 @@
 import { mkdir } from "node:fs/promises";
-import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
 import path from "node:path";
-import { chromium, type BrowserContext, type Page, type Response as PlaywrightResponse } from "playwright";
+import type { BrowserContext, Page, Response as PlaywrightResponse } from "playwright";
 import { DEFAULT_CLIENT_BUILD_NUMBER, DEFAULT_CLIENT_MASTERING_NUMBER } from "./clientConstants.js";
 import { CONFIG_DIR } from "../configDir.js";
-import { ChromiumNotInstalledError, SignInIncompleteError } from "../errors.js";
+import { SignInIncompleteError } from "../errors.js";
 import type { IcloudSession } from "../session.js";
+import { classifyBrowserError, launchLoginBrowser, resolveBrowserSelection } from "./browserLauncher.js";
+export { isMissingChromiumError, resolvePlaywrightCli } from "./browserLauncher.js";
 
 /**
  * Browser-driven login: open a real (headed) browser window on www.icloud.com,
@@ -187,6 +187,8 @@ export function sessionFromBrowserCapture(
 }
 
 export interface BrowserLoginOptions {
+  /** Absolute executable path; overrides ICLOUD_MD_BROWSER_EXECUTABLE. */
+  browserExecutable?: string;
   profileDir?: string;
   onStatus?: (message: string) => void;
   /**
@@ -249,81 +251,6 @@ function keepMeSignedInWatcher(page: Page, isDone: () => boolean, status: (messa
   })();
 }
 
-/** Playwright's own message when a browser's binary hasn't been downloaded yet (matched the same way Playwright's CLI itself detects this failure). */
-export function isMissingChromiumError(error: unknown): boolean {
-  return error instanceof Error && error.message.includes("Executable doesn't exist");
-}
-
-/**
- * Absolute path to the bundled Playwright package's own CLI entrypoint
- * (`cli.js`, the target of its "bin" field). It isn't in playwright's exports
- * map, so it can't be resolved by specifier - but `playwright/package.json`
- * is exported, and `cli.js` sits beside it.
- */
-export function resolvePlaywrightCli(): string {
-  const require = createRequire(import.meta.url);
-  return path.join(path.dirname(require.resolve("playwright/package.json")), "cli.js");
-}
-
-/**
- * Runs the bundled Playwright CLI's `install chromium` as a child process,
- * streaming its progress output straight through. Deliberately not
- * `npx playwright`: with a globally-installed icloud-md, npx (run from the
- * user's cwd) can't see the bundled playwright package at all, so it stops at
- * an interactive "Ok to proceed? (y)" download prompt - invisible under the
- * sync spinner, which looked like a silent hang (observed 2026-07-18). It
- * would also fetch playwright@latest, whose browser build can drift from the
- * pinned library version. Spawning our own copy has neither problem.
- */
-function installChromium(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [resolvePlaywrightCli(), "install", "chromium"], { stdio: "inherit" });
-    child.on("error", reject);
-    child.on("exit", (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`"playwright install chromium" exited with code ${code}`));
-      }
-    });
-  });
-}
-
-/**
- * Launches the persistent login browser, transparently downloading Chromium
- * on first use rather than requiring a separate manual install step. Only the
- * specific "browser executable doesn't exist" failure triggers an install
- * attempt; any other launch failure (or a failure of the install itself)
- * falls back to `ChromiumNotInstalledError`, which still points the user at
- * running the command by hand.
- */
-async function launchWithLazyChromiumInstall(
-  profileDir: string,
-  headless: boolean,
-  status: (message: string) => void,
-): Promise<BrowserContext> {
-  try {
-    return await chromium.launchPersistentContext(profileDir, { headless, viewport: null });
-  } catch (cause) {
-    if (!isMissingChromiumError(cause)) {
-      throw new ChromiumNotInstalledError({ cause });
-    }
-  }
-
-  status("First-time setup: downloading the sign-in browser (~150MB, one-time)...");
-  try {
-    await installChromium();
-  } catch (cause) {
-    throw new ChromiumNotInstalledError({ cause });
-  }
-
-  try {
-    return await chromium.launchPersistentContext(profileDir, { headless, viewport: null });
-  } catch (cause) {
-    throw new ChromiumNotInstalledError({ cause });
-  }
-}
-
 /**
  * Opens the login window and resolves with a captured session once sign-in
  * completes. Rejects if the user closes the window first (interactive mode)
@@ -337,9 +264,10 @@ export async function performBrowserLogin(options: BrowserLoginOptions = {}): Pr
   const status = options.onStatus ?? ((message: string) => console.log(message));
   const headless = options.headless ?? false;
   const timeoutMs = options.timeoutMs ?? 0;
+  const selection = resolveBrowserSelection(options.browserExecutable);
   await mkdir(profileDir, { recursive: true, mode: 0o700 });
 
-  const context = await launchWithLazyChromiumInstall(profileDir, headless, status);
+  const context = await launchLoginBrowser(profileDir, headless, status, selection);
 
   try {
     const page = context.pages()[0] ?? (await context.newPage());
@@ -347,8 +275,16 @@ export async function performBrowserLogin(options: BrowserLoginOptions = {}): Pr
     // Start listening before navigating: if the persistent profile is still
     // logged in, the success signal is the page-load /validate itself.
     const successPromise = waitForFullSignIn(context, timeoutMs);
+    // Navigation can fail before we await sign-in. Closing the context below
+    // rejects this waiter too; mark it handled immediately to avoid a second,
+    // unhandled rejection masking the useful navigation/certificate error.
+    void successPromise.catch(() => {});
 
-    await page.goto(ICLOUD_HOME);
+    try {
+      await page.goto(ICLOUD_HOME);
+    } catch (cause) {
+      throw classifyBrowserError(cause);
+    }
     if (!headless) {
       status("Complete the sign-in in the browser window (password + any 2FA prompt).");
       status("Waiting for sign-in to finish... (close the window to abort)");

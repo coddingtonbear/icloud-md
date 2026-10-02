@@ -42,3 +42,24 @@ test("the vault-shape flags are reachable from the commands that own them", asyn
   assert.match(pull.stdout, /--defer-renames/);
   assert.doesNotMatch(pull.stdout, /--filename-as-title/);
 });
+
+
+test("browser-info works without an account in human and JSON modes, before or after global flags", async () => {
+  const human = await runCli(["browser-info"]);
+  assert.match(human.stdout, /Browser source:/);
+  assert.match(human.stdout, /Chromium sandbox: enabled/);
+  assert.match(human.stdout, /Playwright:/);
+  for (const args of [
+    ["--browser-executable", process.execPath, "--json", "browser-info"],
+    ["browser-info", "--browser-executable", process.execPath, "--json"],
+  ]) {
+    const { stdout, stderr } = await execFileAsync(tsxBin, [cliPath, ...args], {
+      env: { ...process.env, ICLOUD_MD_BROWSER_EXECUTABLE: "/ignored/environment/browser" },
+    });
+    const result = JSON.parse(stdout);
+    assert.equal(result.source, "option");
+    assert.equal(result.executablePath, process.execPath);
+    assert.equal(result.exists, true);
+    assert.equal(stderr, "");
+  }
+});
