@@ -41,8 +41,12 @@ depends on it even though the capture itself is not in the repository.
 
 1. Open www.icloud.com/notes in a desktop browser. Open the developer tools' Network panel,
    tick *Preserve log* and *Disable cache*, then clear the log.
-2. Do exactly one thing, on a throwaway note created for the purpose: create it, type a
-   line, restyle a cell, delete it. One action per capture keeps the entries attributable.
+2. Do exactly one thing to a throwaway note, and nothing else - *one* of: create a note,
+   type a line, restyle a table cell, delete a note. One action per capture is what makes
+   an entry attributable; a capture spanning four of them is four captures' worth of
+   traffic with no way to tell which request came from which action. If the action under
+   capture is not the creation itself, create the throwaway note first and clear the log
+   again afterwards, so its creation traffic stays out of the capture.
 3. Wait for network activity to settle, then export the whole log as a HAR into this
    directory and write the `.md` beside it.
 
