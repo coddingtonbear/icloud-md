@@ -575,15 +575,22 @@ Any of these is a complete substitute for an export:
   with the input, the actual output, and the expected output.
 - **A synthetic note.** Create a throwaway note containing nothing but filler
   that shows the problem, reproduce against *it*, and report its identity
-  (`icloud-md bug-report --identify <file>`). If the maintainer needs the raw
-  record, `icloud-md object show <record id>` on that note is safe to paste in
-  full, since it contains nothing of yours.
+  (`icloud-md bug-report --identify <file>`). If the maintainer needs the
+  record, `icloud-md object show <record id>` prints a derived summary of it;
+  the raw record itself only appears under `--json`. Neither form carries your
+  note content, but both name the note's path inside your vault - and so the
+  folder it sits in - along with every record referencing it, so read it over
+  before pasting.
 - **A debug-log excerpt.** `~/.config/icloud-md/debug.log` holds every request
-  and response this tool makes. Cookies and tokens are already redacted when
-  entries are written. Before pasting an excerpt, replace your `dsid` (it
-  appears in request URLs) and cut any response body that carries note
-  content; the status, headers, `serverErrorCode`, and timing are what matter
-  for a network or throttling report.
+  and response this tool makes. Only cookies, session tokens, and login
+  secrets are redacted as entries are written; your identity is not.
+  (`bug-report` drops those when it builds a bundle, which is why the log
+  inside a generated report is cleaner than the one on disk.) Before pasting
+  a raw excerpt, remove your `dsid` (it appears in request URLs as well as in
+  bodies), your `appleId`, and any `fullName`, `primaryEmail`, or Apple ID
+  alias fields, then cut any response body that carries note content; the
+  status, headers, `serverErrorCode`, and timing are what matter for a
+  network or throttling report.
 
 Whatever you send, say which of the above it is, and say explicitly if you
 looked at an export and decided not to attach it. That is a perfectly good
