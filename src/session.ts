@@ -45,10 +45,50 @@ export async function writeSessionFile(session: IcloudSession, sessionPath: stri
   const tempPath = `${sessionPath}.${randomUUID()}.tmp`;
   try {
     await writeFile(tempPath, JSON.stringify(session, null, 2) + "\n", { mode: 0o600 });
-    await rename(tempPath, sessionPath);
+    await renameReplacing(tempPath, sessionPath);
   } catch (err) {
-    await rm(tempPath, { force: true });
+    // Best-effort: a throw here would replace the error already being thrown
+    // (a leftover temp file is harmless; a masked write failure is not).
+    await rm(tempPath, { force: true }).catch(() => {});
     throw err;
+  }
+}
+
+/** Error codes Windows gives a rename onto a file another process holds open. */
+const TRANSIENT_WINDOWS_RENAME_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+const RENAME_ATTEMPTS = 10;
+const RENAME_RETRY_STEP_MS = 20;
+
+export interface RenameReplacingOptions {
+  platform?: NodeJS.Platform;
+  renameFile?: (from: string, to: string) => Promise<void>;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * `rename`, retried briefly on Windows. There Node's rename does replace an
+ * existing file (libuv uses `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`),
+ * but it fails with EPERM, EACCES or EBUSY while another process - a virus
+ * scanner, or another reader of the same session - has the target open.
+ * Those clear within moments, so it retries for up to about a second, as
+ * `write-file-atomic` and `graceful-fs` do. Elsewhere a rename is atomic and
+ * those codes mean a real problem, so they're thrown straight away.
+ */
+export async function renameReplacing(from: string, to: string, options: RenameReplacingOptions = {}): Promise<void> {
+  const platform = options.platform ?? process.platform;
+  const renameFile = options.renameFile ?? rename;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await renameFile(from, to);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      if (platform !== "win32" || attempt >= RENAME_ATTEMPTS || code === undefined || !TRANSIENT_WINDOWS_RENAME_CODES.has(code)) {
+        throw err;
+      }
+      await sleep(RENAME_RETRY_STEP_MS * attempt);
+    }
   }
 }
 
