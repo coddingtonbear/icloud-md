@@ -1,6 +1,14 @@
 import { resolveFolderAccount } from "../auth/folderAuth.js";
-import { lookupRecords, noteZone, updateRecords, type NoteZone, type RecordUpdate } from "../cloudkit/databaseClient.js";
+import {
+  lookupRecords,
+  noteZone,
+  updateRecords,
+  type CloudKitRecord,
+  type NoteZone,
+  type RecordUpdate,
+} from "../cloudkit/databaseClient.js";
 import { NotClonedDirectoryError, NotesUnavailableError, UnknownVersionSnapshotError, VersionContentUnavailableError } from "../errors.js";
+import { storesTextAsAsset, TEXT_AS_ASSET_REASON } from "../notes/decodeNoteRecord.js";
 import { decodeTableMarkdown } from "../notes/decodeTableRecord.js";
 import { type CloneState } from "../notes/cloneState.js";
 import { migrationReporter, openVault } from "../notes/vaultMigrations.js";
@@ -130,6 +138,7 @@ export async function runRevert(targetDir: string, fileArg: string, id: string, 
   if (!record || record.deleted === true) {
     throw new VersionContentUnavailableError(`"${snapshot.recordName}" no longer exists remotely`);
   }
+  verifyRecordRevertible(record, fileArg);
 
   const targetDescription =
     snapshot.recordType === "Note" ? `${fileArg}'s own text` : `a table in ${fileArg} (${snapshot.recordName})`;
@@ -237,6 +246,19 @@ function verifySnapshotRevertible(snapshot: VersionSnapshot, id: string): void {
   }
 }
 
+/**
+ * Refuses to write a snapshot onto a Note that now keeps its text in a
+ * `TextDataAsset`: revert sends `TextDataEncrypted` alone, which would leave
+ * the record carrying both - a shape no client has been seen to write. The
+ * snapshot itself may well be readable (pull records one from the inlined
+ * asset bytes), so this is a check on the live record, not the snapshot.
+ */
+export function verifyRecordRevertible(record: CloudKitRecord, fileArg: string): void {
+  if (record.recordType === "Note" && storesTextAsAsset(record)) {
+    throw new Error(`"${fileArg}" can't be reverted: this note ${TEXT_AS_ASSET_REASON}.`);
+  }
+}
+
 function recordLabel(recordName: string, noteRecordName: string): string {
   return recordName === noteRecordName ? "the note's own text" : `table ${recordName}`;
 }
@@ -333,6 +355,9 @@ async function runEpochRevert(
       notices.push(`${recordLabel(recordName, noteRecordName)}: no longer exists remotely - skipped`);
       continue;
     }
+    // Refuses the whole epoch, not just this record: reverting the tables
+    // alone would leave the note half at the epoch.
+    verifyRecordRevertible(record, fileArg);
     updates.push({
       recordName: record.recordName,
       recordType: record.recordType,

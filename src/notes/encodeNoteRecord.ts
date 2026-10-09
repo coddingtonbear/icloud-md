@@ -151,6 +151,17 @@ function buildNoteRelocationFields(
   nowMs: number,
   options: { markDeleted: boolean },
 ): Record<string, UpdateFieldValue> {
+  // The captured relocations send `TextDataAsset: {}`, but only ever on notes
+  // whose asset was null; whether CloudKit reads `{}` as "leave alone" or
+  // "clear" on a note that keeps its text there is unknown, and "clear" would
+  // empty the note. Callers refuse these notes up front (see
+  // `storesTextAsAsset`); this is the backstop.
+  if (current.fields.TextDataAsset?.value != null) {
+    throw new Error(
+      `Note ${current.recordName} keeps its text in a separate file (a very large note); moving or deleting one ` +
+        "isn't supported yet - do it in Notes instead.",
+    );
+  }
   // Field order and echo-vs-override choices match the captured requests.
   // Echoed fields are copied value-verbatim, never decoded - a deletion must
   // work on a note too broken to parse; echo-if-present tolerates a broken

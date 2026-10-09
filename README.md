@@ -365,9 +365,11 @@ integration never gets to it.
 - **Very large notes are read-only.** Past some size (seen on a note of
   ~830 KB compressed, most of it edit history) Apple moves a note's text
   out of the record and into a separate file. `clone` and `pull` download
-  it and write the note like any other, but `push` refuses to edit it:
-  writing one back means uploading a new file, a path that hasn't been
-  captured from a real client yet.
+  it and write the note like any other, but `push` and `revert` refuse to
+  edit it, and `push` and `delete` refuse to move or delete it: writing one
+  back means uploading a new file, a path that hasn't been captured from a
+  real client yet. `diff` and `object show` don't fetch that file, so they
+  still report such a note as having no text.
 - **Attachment upload is not supported, and isn't planned.** The iCloud web
   Notes editor itself has no way to attach a new file to a note, so there's
   no legitimate client behavior to reverse-engineer here.

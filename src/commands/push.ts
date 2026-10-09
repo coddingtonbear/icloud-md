@@ -24,7 +24,7 @@ import { pendingRenameTarget, settlePendingRenames } from "../notes/pendingRenam
 import { NOTE_ID_KEY, NOTE_TITLE_KEY, readNoteId, readNoteTitle, setNoteId } from "../notes/noteIdFrontmatter.js";
 import { carriedTitleSpelling, representabilityProblem, titleIsRepresentable } from "../notes/titleFilename.js";
 import { resolveNoteIds } from "../notes/noteIdPairing.js";
-import { classifyNoteRecord, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
+import { classifyNoteRecord, storesTextAsAsset, TEXT_AS_ASSET_REASON, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { buildNoteCreateFields, buildNoteMoveFields, buildNoteTrashFields, buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
 import { noteDirOf, stateDirIndex, type StateDirInfo } from "../notes/folderLayout.js";
@@ -849,6 +849,15 @@ export async function buildPushPlan(
       entries.push({ ...base, resolution: "conflict", reason: 'changed remotely since the last pull - run "pull" first' });
       continue;
     }
+    if (storesTextAsAsset(record)) {
+      // A move sends `TextDataAsset: {}` (see `buildNoteRelocationFields`),
+      // never captured on a note that actually keeps its text there.
+      entries.push({
+        ...base,
+        reason: `this note ${TEXT_AS_ASSET_REASON}, so it can't be moved from here - rename the file back to ${pair.entry.file}, or move the note in Notes instead`,
+      });
+      continue;
+    }
 
     // Built during planning, like every other write, so `status` shows a
     // retitle that can't be applied as a refusal instead of discovering it
@@ -965,6 +974,16 @@ export async function buildPushPlan(
         file: entry.file,
         resolution: "conflict",
         reason: 'changed remotely since the last pull - run "pull" first',
+      });
+      continue;
+    }
+    if (storesTextAsAsset(record)) {
+      // Same unknown as a move: the trash-move sends `TextDataAsset: {}`.
+      entries.push({
+        kind: "delete",
+        file: entry.file,
+        resolution: "refused",
+        reason: `this note ${TEXT_AS_ASSET_REASON}, so it can't be deleted from here - delete it in Notes, or run "icloud-md restore ${entry.file}" to bring the file back`,
       });
       continue;
     }
@@ -1485,6 +1504,15 @@ async function prepareUpdate(
   // The mode has to reach the classifier, not just this function: it decides
   // whether `markdownText` (which the local file is a copy of) omits the
   // title, and the round-trip gate has to run on that same projection.
+  if (storesTextAsAsset(record)) {
+    // Checked before classifying: the record re-read here has no inline
+    // text, so it would otherwise be refused as "(missing-body)".
+    summary.refused.push(
+      `${entry.file}: this note ${TEXT_AS_ASSET_REASON} - it can't be safely edited. ` +
+        `Run "icloud-md restore ${entry.file}" to discard your local edit.`,
+    );
+    return undefined;
+  }
   const classified = classifyNoteRecord(record, { titleMode });
   if (classified.status !== "ok") {
     const reason = classified.status === "unsyncable" ? classified.reason : classified.status;
@@ -1911,8 +1939,12 @@ type NoteTextUpdate = { status: "ok"; payloadBase64: string } | { status: "uncha
  * placeholder, and the rebuilt document must decode to the same slots it
  * started with. The rebuilt document must also decode to the desired
  * formatting projection - the write-side half of Step 2's round-trip gate.
+ *
+ * Exported for its test: the `TextDataAsset` refusal below is the last gate
+ * every note-text write passes through, and must hold even for a record
+ * that also carries inline text.
  */
-function prepareNoteTextUpdate(
+export function prepareNoteTextUpdate(
   record: CloudKitRecord,
   currentBodyText: string,
   desired: { text: string; paragraphs: FormatParagraph[] },
@@ -1926,9 +1958,11 @@ function prepareNoteTextUpdate(
     summary.refused.push(`${entry.file}: remote note has no readable text data`);
     return undefined;
   }
-  if (record.fields.TextDataAsset?.value != null) {
+  if (storesTextAsAsset(record)) {
     // Very large notes move their text into a separate asset; that write
-    // path is completely unexplored, so leave those alone.
+    // path is completely unexplored, so leave those alone - even when the
+    // record also carries inline text, as one with its asset body inlined
+    // (see `inlineAssetBodies`) would.
     summary.refused.push(`${entry.file}: remote note stores its text as an asset - refusing to edit`);
     return undefined;
   }
