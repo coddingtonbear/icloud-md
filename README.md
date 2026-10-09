@@ -19,6 +19,7 @@ icloud-md push
 - [Why](#why)
 - [Install](#install)
 - [Quick start](#quick-start)
+  * [Signing in with a browser you already have](#signing-in-with-a-browser-you-already-have)
 - [Using Obsidian?](#using-obsidian)
 - [Commands](#commands)
 - [What works today](#what-works-today)
@@ -167,6 +168,29 @@ folder itself (a vault is exactly the kind of thing that gets copied,
 zipped, or synced elsewhere); a cloned folder's own
 `.icloud-md/state.json` only records *which* account it's bound to.
 
+### Signing in with a browser you already have
+
+If the automatic Chromium download can't run on your machine (a locked-down
+VM, a proxy that blocks it) but a Chromium-based browser is already
+installed, point sign-in at it instead:
+
+```bash
+icloud-md --browser-executable /usr/bin/chromium clone ./my-notes
+# or set it once, for every command:
+export ICLOUD_MD_BROWSER_EXECUTABLE=/usr/bin/chromium
+```
+
+It must be the full path to the browser binary, and it is checked up front —
+a path that doesn't exist or isn't executable fails the command before any
+work starts. icloud-md still gives it its own sign-in profile rather than
+touching your everyday one, and if it fails to launch you get that error,
+including anything the browser printed on the way down — nothing is
+downloaded behind your back.
+Playwright is only tested against its own bundled build, so other versions
+are best-effort. Without either setting, nothing changes: the bundled
+browser is downloaded on first use, as above (or ahead of time with
+`icloud-md install-browser`).
+
 ## Using Obsidian?
 
 Good news: I use this tool with Obsidian, too! There are two things you can do to make your experience of using this tool with Obsidian a little more polished:
@@ -222,6 +246,7 @@ freely; they stay on your machine and never look like a note change.
 | `reauthenticate [directory]` | Force a fresh sign-in for a directory's already-bound account. Useful if a session goes stale and silent recovery can't get back in on its own. Refuses if you sign into a different Apple ID than the one the directory was cloned for. |
 | `verify-auth [directory]` | Check whether a directory's bound account session is still valid. |
 | `bug-report --since <duration> [directory]` | Bundle version info, the last error, local sync state, and recent debug-log entries into a file to attach to a GitHub issue (e.g. `--since 2h`). `--note <file>` narrows it to one note; `--no-state` leaves the sync-state inventory out. |
+| `install-browser` | Download the bundled sign-in browser now instead of on first sign-in — for setting up ahead of time, or retrying a download that failed. |
 
 No `commit`/`branch`/`merge` equivalents exist — the working directory *is*
 the local state, and the git repo you presumably wrapped around it (or the

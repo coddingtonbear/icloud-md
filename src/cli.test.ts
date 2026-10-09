@@ -4,6 +4,8 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { readOwnPackageVersion } from "./version.js";
 
 const execFileAsync = promisify(execFile);
@@ -12,8 +14,17 @@ const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const cliPath = path.join(packageRoot, "src", "cli.ts");
 const tsxBin = path.join(packageRoot, "node_modules", ".bin", "tsx");
 
-async function runCli(args: string[]): Promise<{ stdout: string; stderr: string }> {
-  return execFileAsync(tsxBin, [cliPath, ...args]);
+async function runCli(args: string[], env: NodeJS.ProcessEnv = {}): Promise<{ stdout: string; stderr: string }> {
+  return execFileAsync(tsxBin, [cliPath, ...args], { env: { ...process.env, ...env } });
+}
+
+function failsWith(pattern: RegExp): (error: unknown) => boolean {
+  return (error: unknown) => {
+    const { code, stderr } = error as { code: number; stderr: string };
+    assert.equal(code, 1);
+    assert.match(stderr, pattern);
+    return true;
+  };
 }
 
 test("--version prints the package version", async () => {
@@ -41,4 +52,52 @@ test("the vault-shape flags are reachable from the commands that own them", asyn
   const pull = await runCli(["pull", "--help"]);
   assert.match(pull.stdout, /--defer-renames/);
   assert.doesNotMatch(pull.stdout, /--filename-as-title/);
+});
+
+test("--browser-executable rejects a non-absolute path before the command runs", async () => {
+  await assert.rejects(
+    runCli(["--browser-executable", "chromium", "verify-auth", "/nonexistent"]),
+    failsWith(/must be an absolute path/),
+  );
+});
+
+test("an inherited ICLOUD_MD_BROWSER_EXECUTABLE is validated up front just like the flag", async () => {
+  await assert.rejects(
+    runCli(["verify-auth", "/nonexistent"], { ICLOUD_MD_BROWSER_EXECUTABLE: "chromium" }),
+    failsWith(/must be an absolute path/),
+  );
+  await assert.rejects(
+    runCli(["verify-auth", "/nonexistent"], { ICLOUD_MD_BROWSER_EXECUTABLE: "/nonexistent/chromium" }),
+    failsWith(/\/nonexistent\/chromium does not exist/),
+  );
+});
+
+test("--browser-executable fails fast on a path with nothing runnable at it, in either argument position", async () => {
+  for (const args of [
+    ["--browser-executable", "/nonexistent/chromium", "verify-auth", "/nonexistent"],
+    ["verify-auth", "--browser-executable", "/nonexistent/chromium", "/nonexistent"],
+  ]) {
+    await assert.rejects(runCli(args), failsWith(/\/nonexistent\/chromium does not exist/));
+  }
+});
+
+test("--browser-executable accepts a real executable and lets the command run", async () => {
+  // The command is pointed at an empty directory so it fails for its own
+  // reason - "not a clone" - which is only reachable once the hook has
+  // accepted the executable. Node's own binary stands in for a browser;
+  // nothing is launched before that failure.
+  const dir = await mkdtemp(path.join(tmpdir(), "icloud-md-cli-"));
+  try {
+    await assert.rejects(
+      runCli(["--browser-executable", process.execPath, "verify-auth", dir]),
+      failsWith(/doesn.t look like a cloned notes directory/),
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("install-browser is a listed command", async () => {
+  const { stdout } = await runCli(["install-browser", "--help"]);
+  assert.match(stdout, /bundled sign-in browser/);
 });

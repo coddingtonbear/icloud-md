@@ -1,5 +1,5 @@
 import { checkAuthentication, type AuthCheckResult } from "../cloudkit/setupClient.js";
-import { AuthenticationExpiredError, SilentReauthFailedError } from "../errors.js";
+import { AuthenticationExpiredError, SilentReauthFailedError, isBrowserUnavailableError } from "../errors.js";
 import { persistSessionIfRotated, writeSessionFile, type IcloudSession } from "../session.js";
 
 export type AuthCheckOk = Extract<AuthCheckResult, { ok: true }>;
@@ -52,6 +52,12 @@ export async function ensureAuthenticated(
   try {
     recovered = await recover({ headless: true, timeoutMs: HEADLESS_RECOVERY_TIMEOUT_MS });
   } catch (cause) {
+    // A browser that can't start isn't a profile that needs a human, and
+    // the "run reauthenticate" hint would fail the same way; let the launch
+    // error, which names the executable and why, through as-is.
+    if (isBrowserUnavailableError(cause)) {
+      throw cause;
+    }
     throw new SilentReauthFailedError(
       "Session expired, and silent (headless) re-authentication failed - this profile likely needs a human for " +
         "this sign-in.",

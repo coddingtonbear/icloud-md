@@ -114,9 +114,82 @@ export class ChromiumNotInstalledError extends IcloudNotesSyncError {
   constructor(options: ErrorOptions = {}) {
     super("Could not launch the login browser.", {
       ...options,
-      hint: 'Playwright\'s Chromium may not be installed yet - run "npx playwright install chromium" and retry.',
+      hint:
+        'The bundled Chromium may not be installed yet - run "icloud-md install-browser" and retry, ' +
+        "or sign in with a browser that's already installed via --browser-executable <path>.",
     });
   }
+}
+
+const BROWSER_EXECUTABLE_HINT =
+  "Check that --browser-executable (or ICLOUD_MD_BROWSER_EXECUTABLE) points at an installed Chromium-based " +
+  "browser such as Chromium, Chrome, or Edge - or unset it to use the bundled browser.";
+
+/** `--browser-executable` / `ICLOUD_MD_BROWSER_EXECUTABLE` was set to something that isn't an absolute path. */
+export class InvalidBrowserExecutableError extends IcloudNotesSyncError {
+  constructor(value: string) {
+    super(`The browser executable must be an absolute path (got ${JSON.stringify(value)}).`, {
+      hint: "Pass the browser binary's full path, e.g. --browser-executable /usr/bin/chromium, with no arguments.",
+    });
+  }
+}
+
+/** The chosen browser path is absolute but there's nothing runnable there: missing, a directory, or not executable. */
+export class BrowserExecutableNotFoundError extends IcloudNotesSyncError {
+  constructor(executablePath: string, problem: "does not exist" | "is not a file" | "is not executable") {
+    super(`The browser executable ${executablePath} ${problem}.`, { hint: BROWSER_EXECUTABLE_HINT });
+  }
+}
+
+/**
+ * Condenses Playwright's launch error into the lines a user can act on. The
+ * first line is Playwright's own summary; when the browser started and then
+ * died it is generic ("Target page, context or browser has been closed") and
+ * the real reason - a missing shared library, a sandbox refusal, a locked
+ * profile - is in the browser's stderr, which Playwright appends as
+ * `[pid=N][err] ...` lines. Those are kept (deduplicated, capped); the rest of
+ * the call log is noise.
+ */
+export function summarizeBrowserLaunchFailure(message: string): string {
+  const lines = message.split("\n");
+  const first = lines.find((line) => line.trim() !== "")?.trim() ?? "";
+  const stderr: string[] = [];
+  for (const line of lines) {
+    const match = /\[err\]\s*(.*)$/.exec(line);
+    const text = match?.[1]?.trim();
+    if (text && !stderr.includes(text)) {
+      stderr.push(text);
+    }
+  }
+  const kept = stderr.slice(0, 5);
+  return kept.length === 0 ? first : `${first}\nBrowser output:\n${kept.map((line) => `  ${line}`).join("\n")}`;
+}
+
+/** The explicitly chosen browser failed to launch. Never followed by a download or a fallback to the bundled browser. */
+export class BrowserExecutableLaunchError extends IcloudNotesSyncError {
+  constructor(executablePath: string, options: ErrorOptions = {}) {
+    const reason = options.cause instanceof Error ? summarizeBrowserLaunchFailure(options.cause.message) : "";
+    super(`Could not launch the browser at ${executablePath}${reason ? `: ${reason}` : "."}`, {
+      ...options,
+      hint: BROWSER_EXECUTABLE_HINT,
+    });
+  }
+}
+
+/**
+ * True when the failure is the browser itself - not installed, not found,
+ * refused to start - rather than anything about the sign-in. Callers that
+ * would otherwise retry with a different strategy (a visible window, a
+ * "needs a human" hint) should rethrow these untouched: no retry can succeed
+ * and wrapping them hides the only actionable message.
+ */
+export function isBrowserUnavailableError(error: unknown): boolean {
+  return (
+    error instanceof ChromiumNotInstalledError ||
+    error instanceof InvalidBrowserExecutableError ||
+    error instanceof BrowserExecutableNotFoundError ||
+    error instanceof BrowserExecutableLaunchError
+  );
 }
 
 /** Covers every way an interactive/headless browser login can end without a usable session: no cookies captured, the wait timed out, or the window was closed early. */

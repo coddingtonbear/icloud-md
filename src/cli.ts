@@ -3,6 +3,7 @@ import chalk from "chalk";
 import cliProgress from "cli-progress";
 import { Command, CommanderError } from "commander";
 import ora from "ora";
+import { BROWSER_EXECUTABLE_ENV, installChromium, resolveBrowserExecutable } from "./auth/browserLogin.js";
 import { reauthenticateFolder, resolveFolderAccount } from "./auth/folderAuth.js";
 import { DISCLOSURE_WARNING, parseSinceDuration, runBugReport, runBugReportIdentify } from "./commands/bugReport.js";
 import { runClone, type CloneSummary } from "./commands/clone.js";
@@ -259,8 +260,25 @@ program
   .version(
     preParsedJson ? JSON.stringify({ version: readOwnPackageVersion() }, null, 2) : readOwnPackageVersion(),
   )
+  .option(
+    "--browser-executable <path>",
+    `sign in with this already-installed Chromium-based browser instead of the bundled one (or set ${BROWSER_EXECUTABLE_ENV})`,
+  )
   .option("--json", "emit machine-readable JSON on stdout instead of human-readable text")
   .exitOverride();
+
+// `--browser-executable` is handed to sign-in through the environment variable
+// rather than threaded through every command: sign-in can start from deep
+// inside any command (silent recovery on a stale session), and this way they
+// all see the same choice. Validated up front - the flag and an inherited
+// ICLOUD_MD_BROWSER_EXECUTABLE alike, and that the file is really there - so
+// a bad path fails before any work starts, not halfway through a pull.
+program.hook("preAction", () => {
+  const executable = resolveBrowserExecutable(program.opts<{ browserExecutable?: string }>().browserExecutable);
+  if (executable !== undefined) {
+    process.env[BROWSER_EXECUTABLE_ENV] = executable;
+  }
+});
 
 // In `--json` mode, commander's own plain-text usage-error output would land
 // on stdout's neighbor stream unstructured; suppressed here so the top-level
@@ -271,6 +289,18 @@ program
 if (preParsedJson) {
   program.configureOutput({ writeErr: () => {} });
 }
+
+program
+  .command("install-browser")
+  .description(
+    "Download the bundled sign-in browser now (normally fetched automatically on first sign-in); " +
+      "for setting up ahead of time or retrying a failed download",
+  )
+  .action(async (_opts: unknown, command: Command) => {
+    const context = contextFor(command);
+    await installChromium();
+    emitResult(context, { installed: true }, () => console.log("Installed the bundled sign-in browser."));
+  });
 
 program.action(() => {
   program.help({ error: true });

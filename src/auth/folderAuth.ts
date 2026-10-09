@@ -7,6 +7,7 @@ import {
   RequestedAccountMismatchError,
   UnboundAccountError,
   UnknownAccountError,
+  isBrowserUnavailableError,
 } from "../errors.js";
 import { readCloneState, type CloneStateAccount } from "../notes/cloneState.js";
 import { loadSession, persistSessionIfRotated, writeSessionFile } from "../session.js";
@@ -221,6 +222,12 @@ export async function bindKnownAccount(reference: string, deps: CommonDeps & Int
   try {
     captured = await login({ profileDir, headless: true, timeoutMs: SILENT_BIND_TIMEOUT_MS, onStatus });
   } catch (cause) {
+    // No browser means no visible window either; the launch error is the
+    // whole story, so don't announce a retry that can't work or bury it
+    // under a non-interactive refusal.
+    if (isBrowserUnavailableError(cause)) {
+      throw cause;
+    }
     if (deps.interactive === false) {
       throw new InteractiveSignInRefusedError(
         `${account.appleId}'s saved session and saved sign-in could not be reused, and --non-interactive was given.`,

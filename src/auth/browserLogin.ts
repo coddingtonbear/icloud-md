@@ -1,3 +1,4 @@
+import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
@@ -5,7 +6,13 @@ import path from "node:path";
 import { chromium, type BrowserContext, type Page, type Response as PlaywrightResponse } from "playwright";
 import { DEFAULT_CLIENT_BUILD_NUMBER, DEFAULT_CLIENT_MASTERING_NUMBER } from "./clientConstants.js";
 import { CONFIG_DIR } from "../configDir.js";
-import { ChromiumNotInstalledError, SignInIncompleteError } from "../errors.js";
+import {
+  BrowserExecutableLaunchError,
+  BrowserExecutableNotFoundError,
+  ChromiumNotInstalledError,
+  InvalidBrowserExecutableError,
+  SignInIncompleteError,
+} from "../errors.js";
 import type { IcloudSession } from "../session.js";
 
 /**
@@ -207,6 +214,14 @@ export interface BrowserLoginOptions {
    * of hanging the calling command indefinitely.
    */
   timeoutMs?: number;
+  /**
+   * An already-installed Chromium-based browser to launch instead of
+   * Playwright's bundled one; see `resolveBrowserExecutable`. Defaults to
+   * `ICLOUD_MD_BROWSER_EXECUTABLE`, which is how the CLI's
+   * `--browser-executable` reaches every sign-in path, including the ones
+   * that start deep inside another command.
+   */
+  executablePath?: string;
 }
 
 /**
@@ -274,10 +289,15 @@ export function resolvePlaywrightCli(): string {
  * sync spinner, which looked like a silent hang (observed 2026-07-18). It
  * would also fetch playwright@latest, whose browser build can drift from the
  * pinned library version. Spawning our own copy has neither problem.
+ *
+ * The child's stdout is pointed at our stderr: the progress is for a human,
+ * and `--json` callers need stdout to carry nothing but the result.
  */
-function installChromium(): Promise<void> {
+export function installChromium(): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [resolvePlaywrightCli(), "install", "chromium"], { stdio: "inherit" });
+    const child = spawn(process.execPath, [resolvePlaywrightCli(), "install", "chromium"], {
+      stdio: ["inherit", 2, "inherit"],
+    });
     child.on("error", reject);
     child.on("exit", (code) => {
       if (code === 0) {
@@ -289,6 +309,64 @@ function installChromium(): Promise<void> {
   });
 }
 
+/** Names an already-installed Chromium-based browser to sign in with, instead of Playwright's bundled one. `--browser-executable` sets it for the CLI process, so every sign-in path - including silent headless recovery - sees the same choice. */
+export const BROWSER_EXECUTABLE_ENV = "ICLOUD_MD_BROWSER_EXECUTABLE";
+
+/**
+ * Throws unless `executablePath` names an existing, executable file. A path
+ * that merely looks right would otherwise fail only when Playwright finally
+ * spawns it - possibly minutes into a pull, inside silent session recovery -
+ * so the check runs where the value is read.
+ */
+export function assertBrowserExecutable(executablePath: string): void {
+  let isFile: boolean;
+  try {
+    isFile = statSync(executablePath).isFile();
+  } catch {
+    throw new BrowserExecutableNotFoundError(executablePath, "does not exist");
+  }
+  if (!isFile) {
+    throw new BrowserExecutableNotFoundError(executablePath, "is not a file");
+  }
+  try {
+    accessSync(executablePath, fsConstants.X_OK);
+  } catch {
+    throw new BrowserExecutableNotFoundError(executablePath, "is not executable");
+  }
+}
+
+/**
+ * The browser executable sign-in should launch, or `undefined` for
+ * Playwright's bundled Chromium. Exists for machines where the bundled
+ * download is blocked but a system Chromium is already installed (a
+ * locked-down VM, behind a proxy). Must be an absolute path: Playwright
+ * spawns it directly, with no PATH lookup or shell, so a bare `chromium`
+ * would only fail later with a less obvious error. The file is also checked
+ * to exist and be executable (`verify`, a seam for tests), for the same
+ * reason: better to fail here than halfway through a command.
+ */
+export function resolveBrowserExecutable(
+  explicit?: string,
+  env: NodeJS.ProcessEnv = process.env,
+  verify: (executablePath: string) => void = assertBrowserExecutable,
+): string | undefined {
+  const value = explicit ?? env[BROWSER_EXECUTABLE_ENV];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!value.trim() || !path.isAbsolute(value)) {
+    throw new InvalidBrowserExecutableError(value);
+  }
+  verify(value);
+  return value;
+}
+
+/** Injection seams for tests; production uses Playwright and `installChromium`. */
+export interface BrowserLaunchDeps {
+  launch?: typeof chromium.launchPersistentContext;
+  install?: () => Promise<void>;
+}
+
 /**
  * Launches the persistent login browser, transparently downloading Chromium
  * on first use rather than requiring a separate manual install step. Only the
@@ -296,14 +374,32 @@ function installChromium(): Promise<void> {
  * attempt; any other launch failure (or a failure of the install itself)
  * falls back to `ChromiumNotInstalledError`, which still points the user at
  * running the command by hand.
+ *
+ * An explicitly chosen `executablePath` is never second-guessed: if it fails
+ * to launch, that's the error - no download, no falling back to the bundled
+ * browser the user deliberately opted out of. The profile is still
+ * icloud-md's own either way, never the system browser's everyday one.
  */
-async function launchWithLazyChromiumInstall(
+export async function launchWithLazyChromiumInstall(
   profileDir: string,
   headless: boolean,
   status: (message: string) => void,
+  executablePath: string | undefined,
+  deps: BrowserLaunchDeps = {},
 ): Promise<BrowserContext> {
+  const launch = deps.launch ?? chromium.launchPersistentContext.bind(chromium);
+  const install = deps.install ?? installChromium;
+
+  if (executablePath !== undefined) {
+    try {
+      return await launch(profileDir, { headless, viewport: null, executablePath });
+    } catch (cause) {
+      throw new BrowserExecutableLaunchError(executablePath, { cause });
+    }
+  }
+
   try {
-    return await chromium.launchPersistentContext(profileDir, { headless, viewport: null });
+    return await launch(profileDir, { headless, viewport: null });
   } catch (cause) {
     if (!isMissingChromiumError(cause)) {
       throw new ChromiumNotInstalledError({ cause });
@@ -312,13 +408,13 @@ async function launchWithLazyChromiumInstall(
 
   status("First-time setup: downloading the sign-in browser (~150MB, one-time)...");
   try {
-    await installChromium();
+    await install();
   } catch (cause) {
     throw new ChromiumNotInstalledError({ cause });
   }
 
   try {
-    return await chromium.launchPersistentContext(profileDir, { headless, viewport: null });
+    return await launch(profileDir, { headless, viewport: null });
   } catch (cause) {
     throw new ChromiumNotInstalledError({ cause });
   }
@@ -332,14 +428,18 @@ async function launchWithLazyChromiumInstall(
  * heartbeat can't race the captured token the way a live tab raced
  * HAR-imported sessions.
  */
-export async function performBrowserLogin(options: BrowserLoginOptions = {}): Promise<IcloudSession> {
+export async function performBrowserLogin(
+  options: BrowserLoginOptions = {},
+  launchDeps: BrowserLaunchDeps = {},
+): Promise<IcloudSession> {
   const profileDir = options.profileDir ?? DEFAULT_BROWSER_PROFILE_DIR;
   const status = options.onStatus ?? ((message: string) => console.log(message));
   const headless = options.headless ?? false;
   const timeoutMs = options.timeoutMs ?? 0;
+  const executablePath = resolveBrowserExecutable(options.executablePath);
   await mkdir(profileDir, { recursive: true, mode: 0o700 });
 
-  const context = await launchWithLazyChromiumInstall(profileDir, headless, status);
+  const context = await launchWithLazyChromiumInstall(profileDir, headless, status, executablePath, launchDeps);
 
   try {
     const page = context.pages()[0] ?? (await context.newPage());
@@ -347,6 +447,11 @@ export async function performBrowserLogin(options: BrowserLoginOptions = {}): Pr
     // Start listening before navigating: if the persistent profile is still
     // logged in, the success signal is the page-load /validate itself.
     const successPromise = waitForFullSignIn(context, timeoutMs);
+    // If the navigation below throws, the `finally` closes the context and
+    // this waiter rejects with nobody awaiting it yet - an unhandled
+    // rejection that would bury the navigation error. The real `await`
+    // further down still sees the rejection.
+    void successPromise.catch(() => {});
 
     await page.goto(ICLOUD_HOME);
     if (!headless) {
