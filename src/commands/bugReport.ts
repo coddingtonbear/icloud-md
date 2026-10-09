@@ -268,10 +268,17 @@ function renderBundle(input: {
   );
 
   if (scope) {
+    // With `--no-state` there is no state section to describe - the scope
+    // then narrows the debug log alone, and saying otherwise would have
+    // the report contradict its own state section a few lines down.
+    const stateClause =
+      state.status === "omitted"
+        ? "the local state is left out entirely (`--no-state`), and "
+        : "the local state below carries only those notes (with the folders they sit in and the attachments they own), and ";
     lines.push("## Scope");
     lines.push(
-      `This report was narrowed with \`--note\` to ${scope.noteAliases.map((alias) => `\`${alias}\``).join(", ")}: the local state below ` +
-        "carries only those notes (with the folders they sit in and the attachments they own), and " +
+      `This report was narrowed with \`--note\` to ${scope.noteAliases.map((alias) => `\`${alias}\``).join(", ")}: ` +
+        stateClause +
         `${scope.recordsOmitted} record${scope.recordsOmitted === 1 ? "" : "s"} about other notes ${scope.recordsOmitted === 1 ? "was" : "were"} ` +
         "removed from the debug-log entries (each trimmed list carries a `...OmittedByScope` count beside it).",
       "",

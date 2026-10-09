@@ -175,6 +175,38 @@ function redactedTrashedPath(store: BugReportAliasStore, recordName: string, ent
   return `${resolveAlias(store, "trashed", recordName)}${ext}`;
 }
 
+/** A note entry's `file` isn't the only field that carries its real
+ * title: `frontmatterTitle` is the title itself, and `pendingRename` is the
+ * file name a remote retitle wants. Both are aliased off the note's own
+ * alias. A pending rename keeps the one distinction worth diagnosing - a
+ * rename still owed versus one already moot because the file has that name
+ * (see `pendingRenameTarget`) - by aliasing to the file's own alias only in
+ * the moot case, and its real name joins `fileReplacements` so `lastError`
+ * is scrubbed of it too. */
+function redactedTitleFields(
+  store: BugReportAliasStore,
+  recordName: string,
+  entry: CloneStateNoteEntry,
+  aliasedPath: string,
+  fileReplacements: Map<string, string>,
+): Pick<CloneStateNoteEntry, "frontmatterTitle" | "pendingRename"> {
+  const alias = resolveAlias(store, "notes", recordName);
+  const out: Pick<CloneStateNoteEntry, "frontmatterTitle" | "pendingRename"> = {};
+  if (entry.frontmatterTitle !== undefined) {
+    out.frontmatterTitle = alias;
+  }
+  if (entry.pendingRename !== undefined) {
+    const aliasedBase = path.posix.basename(aliasedPath);
+    const aliasedRename =
+      entry.pendingRename === path.posix.basename(entry.file)
+        ? aliasedBase
+        : `${alias}-pending-rename${path.posix.extname(entry.pendingRename) || path.posix.extname(aliasedBase)}`;
+    fileReplacements.set(path.posix.join(path.posix.dirname(entry.file), entry.pendingRename), path.posix.join(path.posix.dirname(aliasedPath), aliasedRename));
+    out.pendingRename = aliasedRename;
+  }
+  return out;
+}
+
 /**
  * Replaces every note/folder/sharer/attachment/trashed real name and the
  * account's dsid/appleId with stable aliases from `store` (minting new ones
@@ -189,7 +221,7 @@ export function redactCloneState(state: CloneState, store: BugReportAliasStore):
   for (const [recordName, entry] of Object.entries(state.notes)) {
     const aliasedPath = redactedNotePath(state, store, recordName, entry);
     fileReplacements.set(entry.file, aliasedPath);
-    notes[recordName] = { ...entry, file: aliasedPath };
+    notes[recordName] = { ...entry, file: aliasedPath, ...redactedTitleFields(store, recordName, entry, aliasedPath, fileReplacements) };
   }
 
   let folders: CloneState["folders"];

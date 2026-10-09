@@ -426,3 +426,20 @@ test("--no-state leaves the inventory out and says so, while the log slice is st
     assert.match(report, /TRY_AGAIN_LATER/);
     assert.equal(summary.scope, undefined);
   }));
+
+test("--note with --no-state says the scope narrowed only the log, rather than describing a state section that isn't there", () =>
+  withTempDirs(async ({ targetDir, debugLogPath, lastErrorPath }) => {
+    await writeCloneState(targetDir, STATE);
+
+    const summary = await runBugReport(targetDir, new Date(0), {
+      debugLogPath,
+      lastErrorPath,
+      omitState: true,
+      noteFiles: [path.join(targetDir, "Test Note.md")],
+    });
+
+    const report = await readFile(summary.outputPath, "utf-8");
+    assert.match(report, /narrowed with `--note` to `note-1`: the local state is left out entirely \(`--no-state`\)/);
+    assert.doesNotMatch(report, /the local state below carries/);
+    assert.match(report, /Left out at the reporter's request \(`--no-state`\)/);
+  }));
