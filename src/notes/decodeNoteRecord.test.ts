@@ -2,10 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { create, toBinary, type MessageInitShape } from "@bufbuild/protobuf";
 import { classifyNoteRecord } from "./decodeNoteRecord.js";
-import { compressNoteDocument } from "./noteText.js";
+import { compressNoteDocument, decompressNoteDocument } from "./noteText.js";
 import { StringSchema } from "./gen/topotext_pb.js";
 import { DocumentSchema as VersionedDocumentSchema, VersionSchema } from "./gen/versioned_document_pb.js";
 import { UNKNOWN_CONTENT_BANNER } from "./unknownContent.js";
+import { applyTextEdit, parseNoteDocument, encodeNoteDocument, validateDocumentInvariants, noteDocumentRoundTrips } from "./noteDocument.js";
+import { parseNoteMarkdown } from "./parseNoteMarkdown.js";
+import { restoreTitleParagraphText } from "./noteTitleParagraph.js";
+import { reconcileNoteFormat } from "./formatReconcile.js";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 
 function makeRecord(fields: CloudKitRecord["fields"]): CloudKitRecord {
@@ -305,3 +309,58 @@ test("bodyText is the note's raw text in both modes - what history comparisons a
     "the title mode is a projection choice; it never changes what the note says",
   );
 });
+
+for (const ending of ["\r", "\r\n", "\n"]) {
+  for (const titleMode of ["filename", "in-body"] as const) {
+    test(`CR line model: ${JSON.stringify(ending)} is publishable with ${titleMode} titles`, () => {
+      const text = ["Title", "", "Para one", "", "Alpha", "", "Beta", "", "Gamma"].join(ending);
+      const result = classifyNoteRecord(makeRecord({ TextDataEncrypted: encodeTextField(text) }), { titleMode });
+      assert.equal(result.status, "ok");
+      if (result.status !== "ok") return;
+      assert.equal(result.publishable, true);
+      assert.equal(result.titleLine, "Title");
+      assert.equal(result.bodyText, text);
+      assert.equal(result.format?.at(-1)?.text, "Gamma");
+      assert.match(result.markdownText, /Gamma$/);
+      assert.equal(result.markdownText.includes("\r"), false);
+    });
+  }
+}
+
+// Captured 2026-09-29 from the synthetic CR reproducer after an iOS edit.
+// Only TextDataEncrypted is retained; no account or vault state is included.
+const CR_REPRODUCER_TEXT_DATA = "H4sIAAAAAAAAE32Rz2vUQBTHN7Ntzabd7mwqVdYiTy9uS9ujh95SXarS1mL3LGQ3s5vBbLLMzlqLN0FQhF6kgqAgCP4BHrx4bP2JFw/ij4toQam2tPXmRX1JJ7VgbC6ZfD7feW/mRU+ZdzJ6iqYKixlznZRLs2WYPlsuwQicOAeCNUXgtKtMQNFhHpMMGmzQMGbnfekyyavgB8hqgQD8hqotBLfrbEQw2RY+iKDtOyNS8CZU2vVRmA6wou1BNfAl8yVwH7gcNQxrMGzWtLkYDuv4YEPFs/0L4HGfjYE1OXPKymbHS2XLMMoub2FU2HVhN11s7XnBXCtq/3cP1hz/t2ZoIKiBZJcktKSwed2VYNckE2MwYU1NYZOTpUnsEjWJ4nF93mgwh9uSefPDMMelizff1RAqDIfAtq8T7ebbZ2K+cwQsx2EO1ETQAD7jBhifxrG1CtToCEePw4/eRa2QR0KQLJFCtCgSRJ26hoBqiDREaYWWY6QVOwp9EXoSIwO0YqeCT2PYjbBLwWcx7EG4T8HnMdQR6qrNC0JzEewtZlTuXZzLYs5QufeEZlWuW+W+EJqOUD/mehRcjWEKYVbBtbhiDmGvguuEkp1kTsGN3Umq4ObOdBDmFdzanTTVKX8Q2qPm2FfoN3Sc+298cvgPdtZHx4xDBl08dmNi5eHphYX7x2/Rr1ddM63/IibRD4Ty9ePLj6y35C69ef7nRn75A8qlUGpD4WJoQNdM8wzVveHrV16NX7s38eDiy+btdffjytabrqHDaPcf1P7rB/RM4u5PyqYT7ec97YqyJNGuKtuZaL/tab8rm3zjNWX1RLuhbEei3QztH/3U75ehBAAA";
+
+for (const edit of [false, true]) {
+  test(`captured CR note survives ${edit ? "a body edit" : "separator normalization"} through the write pipeline`, () => {
+    const record = makeRecord({ TextDataEncrypted: { value: CR_REPRODUCER_TEXT_DATA, type: "ENCRYPTED_BYTES" } });
+    const original = classifyNoteRecord(record, { titleMode: "filename" });
+    assert.equal(original.status, "ok");
+    if (original.status !== "ok") return;
+    assert.equal(original.publishable, true);
+    assert.equal(original.bodyText.split("\r").length - 1, 4);
+    assert.equal(original.format?.length, 16);
+    const parsed = parseNoteMarkdown(original.markdownText + (edit ? "\nCR regression edit" : ""));
+    assert.equal(parsed.status, "ok");
+    if (parsed.status !== "ok") return;
+    const desired = restoreTitleParagraphText(original.format![0]!, parsed.paragraphs);
+    assert.equal(desired.text, original.bodyText.replace(/\r\n?|\n/g, "\n") + (edit ? "\nCR regression edit" : ""));
+    const capturedRaw = decompressNoteDocument(Buffer.from(CR_REPRODUCER_TEXT_DATA, "base64"));
+    assert.equal(noteDocumentRoundTrips(capturedRaw), true);
+    const doc = parseNoteDocument(capturedRaw);
+    const replicaId = new Uint8Array(16).fill(0xab);
+    assert.equal(applyTextEdit(doc, desired.text, { replicaId }), true);
+    assert.equal(reconcileNoteFormat(doc, desired.paragraphs, replicaId).ok, true);
+    validateDocumentInvariants(doc);
+    const raw = encodeNoteDocument(doc);
+    assert.equal(noteDocumentRoundTrips(raw), true);
+    const rebuilt = classifyNoteRecord(makeRecord({ TextDataEncrypted: {
+      value: Buffer.from(compressNoteDocument(raw)).toString("base64"), type: "ENCRYPTED_BYTES",
+    } }), { titleMode: "filename" });
+    assert.equal(rebuilt.status, "ok");
+    if (rebuilt.status !== "ok") return;
+    assert.equal(rebuilt.publishable, true);
+    assert.equal(rebuilt.bodyText, desired.text);
+    assert.equal(rebuilt.format?.length, desired.paragraphs.length);
+  });
+}

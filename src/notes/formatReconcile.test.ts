@@ -197,6 +197,23 @@ test("formatting-only reconcile after a text edit composes with applyTextEdit", 
   assert.equal(decoded.paragraphs[0]?.kind, "heading");
 });
 
+test("reconcile ranges use the full CRLF separator width in the decoded document", () => {
+  const doc = docWith("keep\r\nold", [
+    { length: 6 },
+    { length: 3 },
+  ]);
+  const result = reconcileNoteFormat(doc, desired("keep\n## old").paragraphs, REPLICA_A);
+  assert.deepEqual(result, { ok: true, changed: true });
+  assert.equal(doc.text, "keep\r\nold");
+  assert.equal(doc.attributeRuns[0]?.paragraphStyle, undefined);
+  assert.equal(doc.attributeRuns[1]?.paragraphStyle?.style, 1);
+  const decoded = decodeNoteFormat(doc.text, doc.attributeRuns);
+  assert.equal(decoded.status, "ok");
+  if (decoded.status === "ok") {
+    assert.deepEqual(decoded.paragraphs.map((p) => [p.start, p.kind]), [[0, "body"], [6, "heading"]]);
+  }
+});
+
 test("two checklist items sharing an inherited todo uuid get the later one re-minted", () => {
   // The exact live-verification finding from 2026-07-18: an inserted line
   // inherits its neighbor's run wholesale, todo uuid included.

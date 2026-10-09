@@ -96,6 +96,34 @@ this one.
 `npm test`: a planter that quietly produced a malformed body would make the
 live tests fail for a reason unrelated to the write path.
 
+## Carriage returns
+
+Apple Notes keeps the bare CRs in pasted text (issue #34), but `push` can
+never write one: every local file is normalized to LF before it is parsed. So
+`plantSeparators.ts` plants them. It pushes an ordinary LF note, then swaps
+chosen LFs for CR or CRLF through the production codec (`applyTextEdit`) and
+the ordinary `records/modify` call, the way `tiedAnchorDeletion.ts` writes
+its negative control.
+
+The LF original is the control at every step. The planted note must pull as
+the same markdown, stay untouched by a push with no edit, and survive a real
+edit, which stores it as LF and shows in Apple's web client with every
+paragraph and style intact.
+
+Apple's own clients disagree about bare CR. macOS and iOS Notes draw it as a
+paragraph boundary, which is the model this tool decodes with. The web client
+draws nothing for it, so "ALPHA\rBETA" reads "ALPHABETA" (observed
+2026-10-08). The planted-note oracle check therefore requires CRLF to split
+exactly like LF, and pins the web client's bare-CR behaviour as observed, so
+a change on Apple's side shows up as a failure.
+
+`plantSeparators.test.ts` covers the planter offline under plain `npm test`.
+To run only this block:
+
+```bash
+npm run build && ICLOUD_MD_ITEST=1 npx tsx --test --test-name-pattern="carriage-return" integration/live.test.ts
+```
+
 ## Containment
 
 Fixtures are confined to a dedicated Notes folder, and two independent keys
