@@ -1,5 +1,4 @@
 import chalk from "chalk";
-import { diagnosticMessage, redactDiagnostic } from "../errorDiagnostics.js";
 import { IcloudNotesSyncError } from "../errors.js";
 
 /** Created once per invocation from the global `--json` flag - threads
@@ -47,26 +46,26 @@ interface ErrorPayload {
  * `IcloudNotesSyncError`; `70` (`EX_SOFTWARE`) for anything else, a genuine
  * bug whose stack trace stays visible so it's debuggable. */
 export function emitError(context: OutputContext, error: unknown): number {
-  const message = diagnosticMessage(error);
   if (error instanceof IcloudNotesSyncError) {
     if (context.json) {
       const payload: ErrorPayload = {
         error: error.name,
-        message,
+        message: error.message,
         exitCode: 1,
-        ...(error.hint !== undefined ? { hint: redactDiagnostic(error.hint) } : {}),
+        ...(error.hint !== undefined ? { hint: error.hint } : {}),
       };
       console.error(JSON.stringify(payload, null, 2));
     } else {
-      console.error(chalk.red(message));
+      console.error(chalk.red(error.message));
       if (error.hint) {
-        console.error(chalk.red(redactDiagnostic(error.hint)));
+        console.error(chalk.red(error.hint));
       }
     }
     return 1;
   }
 
-  const stack = error instanceof Error && error.stack ? redactDiagnostic(error.stack + (error.cause !== undefined ? `\n${message}` : "")) : undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  const stack = error instanceof Error ? error.stack : undefined;
   if (context.json) {
     const payload: ErrorPayload = {
       error: "InternalError",

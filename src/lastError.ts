@@ -1,6 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { diagnosticMessage, redactDiagnostic } from "./errorDiagnostics.js";
 import { CONFIG_DIR } from "./configDir.js";
 import { IcloudNotesSyncError } from "./errors.js";
 import { isEnoent } from "./fsUtil.js";
@@ -22,13 +21,13 @@ export interface LastErrorRecord {
  * latest failure matters for troubleshooting.
  */
 export async function recordLastError(error: unknown, filePath: string = DEFAULT_LAST_ERROR_PATH): Promise<void> {
-  const message = diagnosticMessage(error);
+  const message = error instanceof Error ? error.message : String(error);
   const hint = error instanceof IcloudNotesSyncError ? error.hint : undefined;
 
   const record: LastErrorRecord = {
     timestamp: new Date().toISOString(),
     message,
-    ...(hint !== undefined ? { hint: redactDiagnostic(hint) } : {}),
+    ...(hint !== undefined ? { hint } : {}),
   };
 
   await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });

@@ -8,10 +8,14 @@ import {
   isFullySignedInBody,
   isIcloudDomain,
   isMissingChromiumError,
+  launchWithLazyChromiumInstall,
+  resolveBrowserExecutable,
   resolvePlaywrightCli,
   sessionFromBrowserCapture,
   type CapturedCookie,
 } from "./browserLogin.js";
+import { BrowserExecutableLaunchError, ChromiumNotInstalledError, InvalidBrowserExecutableError } from "../errors.js";
+import type { BrowserContext } from "playwright";
 import { DEFAULT_CLIENT_BUILD_NUMBER, DEFAULT_CLIENT_MASTERING_NUMBER } from "./clientConstants.js";
 
 const ACCOUNT_LOGIN_URL =
@@ -149,4 +153,96 @@ test("resolvePlaywrightCli points at the installed playwright package's real CLI
   // Would fail if a playwright upgrade moved/renamed its bin target - the
   // lazy-install path would then break only on fresh machines, so catch it here.
   assert.equal(existsSync(cli), true);
+});
+
+test("resolveBrowserExecutable defaults to the bundled browser, and the explicit value beats the environment", () => {
+  assert.equal(resolveBrowserExecutable(undefined, {}), undefined);
+  assert.equal(resolveBrowserExecutable(undefined, { ICLOUD_MD_BROWSER_EXECUTABLE: "/env/chromium" }), "/env/chromium");
+  assert.equal(
+    resolveBrowserExecutable("/flag/chromium", { ICLOUD_MD_BROWSER_EXECUTABLE: "/env/chromium" }),
+    "/flag/chromium",
+  );
+});
+
+test("resolveBrowserExecutable refuses empty and non-absolute values rather than falling back to the bundled browser", () => {
+  for (const value of ["", " ", "chromium", "./chrome"]) {
+    assert.throws(() => resolveBrowserExecutable(value, {}), InvalidBrowserExecutableError);
+    assert.throws(
+      () => resolveBrowserExecutable(undefined, { ICLOUD_MD_BROWSER_EXECUTABLE: value }),
+      InvalidBrowserExecutableError,
+    );
+  }
+});
+
+const fakeContext = {} as BrowserContext;
+const missingExecutable = () => new Error("Executable doesn't exist at /home/user/.cache/ms-playwright/chromium/chrome");
+
+test("without a chosen browser, launch passes no executablePath and installs only on a missing executable", async () => {
+  const launches: Array<string | undefined> = [];
+  let installs = 0;
+  const context = await launchWithLazyChromiumInstall("/profile", false, () => {}, undefined, {
+    launch: async (_profile, options) => {
+      launches.push(options?.executablePath);
+      if (launches.length === 1) {
+        throw missingExecutable();
+      }
+      return fakeContext;
+    },
+    install: async () => {
+      installs++;
+    },
+  });
+  assert.equal(context, fakeContext);
+  assert.deepEqual(launches, [undefined, undefined]);
+  assert.equal(installs, 1);
+});
+
+test("a chosen browser is launched with icloud-md's own profile, and a failure never downloads or falls back", async () => {
+  let installs = 0;
+  const launched = await launchWithLazyChromiumInstall("/dedicated/profile", true, () => {}, "/usr/bin/chromium", {
+    launch: async (profile, options) => {
+      assert.equal(profile, "/dedicated/profile");
+      assert.equal(options?.executablePath, "/usr/bin/chromium");
+      assert.equal(options?.headless, true);
+      return fakeContext;
+    },
+    install: async () => {
+      installs++;
+    },
+  });
+  assert.equal(launched, fakeContext);
+
+  let launches = 0;
+  await assert.rejects(
+    launchWithLazyChromiumInstall("/profile", false, () => {}, "/usr/bin/chromium", {
+      launch: async () => {
+        launches++;
+        throw missingExecutable();
+      },
+      install: async () => {
+        installs++;
+      },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof BrowserExecutableLaunchError);
+      assert.match(error.message, /\/usr\/bin\/chromium: Executable doesn't exist/);
+      return true;
+    },
+  );
+  assert.equal(launches, 1);
+  assert.equal(installs, 0);
+});
+
+test("a failed bundled install still surfaces as ChromiumNotInstalledError, pointing at install-browser", async () => {
+  await assert.rejects(
+    launchWithLazyChromiumInstall("/profile", false, () => {}, undefined, {
+      launch: async () => {
+        throw missingExecutable();
+      },
+      install: async () => {
+        throw new Error("download failed");
+      },
+    }),
+    (error: unknown) => error instanceof ChromiumNotInstalledError && /install-browser/.test(error.hint ?? ""),
+  );
 });

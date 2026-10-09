@@ -19,7 +19,7 @@ icloud-md push
 - [Why](#why)
 - [Install](#install)
 - [Quick start](#quick-start)
-  * [Browser selection and troubleshooting](#browser-selection-and-troubleshooting)
+  * [Signing in with a browser you already have](#signing-in-with-a-browser-you-already-have)
 - [Using Obsidian?](#using-obsidian)
 - [Commands](#commands)
 - [What works today](#what-works-today)
@@ -168,73 +168,25 @@ folder itself (a vault is exactly the kind of thing that gets copied,
 zipped, or synced elsewhere); a cloned folder's own
 `.icloud-md/state.json` only records *which* account it's bound to.
 
-### Browser selection and troubleshooting
+### Signing in with a browser you already have
 
-By default, sign-in uses the Chromium build matched to icloud-md's own Playwright
-version, downloading it on first use if it is missing. If the download is blocked
-but you already have a Chromium-based browser installed, select its executable:
+If the automatic Chromium download can't run on your machine (a locked-down
+VM, a proxy that blocks it) but a Chromium-based browser is already
+installed, point sign-in at it instead:
 
-```sh
+```bash
 icloud-md --browser-executable /usr/bin/chromium clone ./my-notes
-# Or persist the choice in the environment, including for unattended recovery:
+# or set it once, for every command:
 export ICLOUD_MD_BROWSER_EXECUTABLE=/usr/bin/chromium
-icloud-md reauthenticate ./my-notes
 ```
 
-The command-line option wins over the environment variable; with neither set,
-the bundled browser remains the default. The value must be an absolute executable
-path, not a command with arguments. Empty or relative values are errors. A failed
-explicit choice never downloads or silently selects a different browser. The
-browser still uses icloud-md's dedicated per-account/temporary profile, never your
-normal browser profile. Arbitrary system-browser versions are **not guaranteed
-compatible** with Playwright: opening a window alone does not prove login works.
-Named channels and attaching to an already-running browser are not supported.
-
-These commands need no Apple account, saved sign-in, or cloned directory:
-
-```sh
-icloud-md browser-info            # read-only: no launch or download
-icloud-md --json browser-info     # same information for scripts
-icloud-md install-browser        # explicitly download the matched Chromium
-```
-
-`browser-info` shows the selected source and executable path, whether it exists,
-Playwright's version and CLI path, Linux display settings, and installed-browser
-candidates found on PATH (plus standard macOS application paths). Candidates are
-suggestions only: none is selected automatically. The default path describes the
-headed sign-in browser; Playwright may use its matching headless shell for silent
-recovery. `install-browser` always installs the bundled version, even when an
-executable override is set. It invokes this installation's exact Playwright CLI,
-so it also works for global npm installs; do not substitute `npx playwright`,
-which can resolve a different version from your current directory. Download
-output is shown after the installer exits.
-
-Interactive sign-in needs a usable graphical desktop. Start it from a terminal
-**in the same GUI environment the person signing in can see and control**. A VM
-can work with a shared desktop, but an SSH/headless shell does not necessarily
-inherit that desktop's DISPLAY/Wayland connection or permissions. `browser-info`
-reports those settings but does not prove the desktop is reachable.
-
-Chromium sandboxing is enabled, including for silent recovery. Run as an
-unprivileged user; if your Linux host/container blocks user namespaces or needs
-sandbox/runtime packages, fix that configuration rather than disabling the
-sandbox. Missing shared libraries need the browser's OS dependencies. For the
-bundled browser, `browser-info` identifies the exact Playwright CLI whose
-`install-deps chromium` command your administrator can use. icloud-md never
-silently retries without sandboxing.
-
-Certificate verification remains enabled. For `ERR_CERT_AUTHORITY_INVALID` or
-other trust errors, check the system clock, browser/OS CA trust store, and any
-network-inspecting proxy's trusted root certificate. A browser-download failure
-may involve Node's CA trust configuration instead. Fix the environment's trust
-configuration; do not bypass certificate checks. A successful launch followed by
-a certificate error is not evidence that the iCloud login flow works.
-
-Known launch errors get specific recovery guidance; unrecognized errors retain
-their original message and stack. Terminal output and saved error reports include
-nested causes with credential/header/URL redaction. Installer output is bounded
-in saved diagnostics. Review diagnostics before sharing: free-text redaction
-cannot promise to recognize every possible secret or private path.
+It must be the full path to the browser binary. icloud-md still gives it its
+own sign-in profile rather than touching your everyday one, and if it fails
+to launch you get that error — nothing is downloaded behind your back.
+Playwright is only tested against its own bundled build, so other versions
+are best-effort. Without either setting, nothing changes: the bundled
+browser is downloaded on first use, as above (or ahead of time with
+`icloud-md install-browser`).
 
 ## Using Obsidian?
 
@@ -291,6 +243,7 @@ freely; they stay on your machine and never look like a note change.
 | `reauthenticate [directory]` | Force a fresh sign-in for a directory's already-bound account. Useful if a session goes stale and silent recovery can't get back in on its own. Refuses if you sign into a different Apple ID than the one the directory was cloned for. |
 | `verify-auth [directory]` | Check whether a directory's bound account session is still valid. |
 | `bug-report --since <duration> [directory]` | Bundle version info, the last error, local sync state, and recent debug-log entries into a file to attach to a GitHub issue (e.g. `--since 2h`). `--note <file>` narrows it to one note; `--no-state` leaves the sync-state inventory out. |
+| `install-browser` | Download the bundled sign-in browser now instead of on first sign-in — for setting up ahead of time, or retrying a download that failed. |
 
 No `commit`/`branch`/`merge` equivalents exist — the working directory *is*
 the local state, and the git repo you presumably wrapped around it (or the

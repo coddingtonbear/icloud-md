@@ -43,23 +43,16 @@ test("the vault-shape flags are reachable from the commands that own them", asyn
   assert.doesNotMatch(pull.stdout, /--filename-as-title/);
 });
 
+test("--browser-executable rejects a non-absolute path before the command runs", async () => {
+  await assert.rejects(runCli(["--browser-executable", "chromium", "verify-auth", "/nonexistent"]), (error: unknown) => {
+    const { code, stderr } = error as { code: number; stderr: string };
+    assert.equal(code, 1);
+    assert.match(stderr, /must be an absolute path/);
+    return true;
+  });
+});
 
-test("browser-info works without an account in human and JSON modes, before or after global flags", async () => {
-  const human = await runCli(["browser-info"]);
-  assert.match(human.stdout, /Browser source:/);
-  assert.match(human.stdout, /Chromium sandbox: enabled/);
-  assert.match(human.stdout, /Playwright:/);
-  for (const args of [
-    ["--browser-executable", process.execPath, "--json", "browser-info"],
-    ["browser-info", "--browser-executable", process.execPath, "--json"],
-  ]) {
-    const { stdout, stderr } = await execFileAsync(tsxBin, [cliPath, ...args], {
-      env: { ...process.env, ICLOUD_MD_BROWSER_EXECUTABLE: "/ignored/environment/browser" },
-    });
-    const result = JSON.parse(stdout);
-    assert.equal(result.source, "option");
-    assert.equal(result.executablePath, process.execPath);
-    assert.equal(result.exists, true);
-    assert.equal(stderr, "");
-  }
+test("install-browser is a listed command", async () => {
+  const { stdout } = await runCli(["install-browser", "--help"]);
+  assert.match(stdout, /bundled sign-in browser/);
 });

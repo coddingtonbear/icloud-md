@@ -112,39 +112,34 @@ export class CorruptSessionFileError extends IcloudNotesSyncError {
 
 export class ChromiumNotInstalledError extends IcloudNotesSyncError {
   constructor(options: ErrorOptions = {}) {
-    super("The bundled login browser executable is missing.", {
+    super("Could not launch the login browser.", {
       ...options,
-      hint: 'Run "icloud-md install-browser" to install Chromium using this icloud-md installation\'s Playwright dependency.',
+      hint:
+        'The bundled Chromium may not be installed yet - run "icloud-md install-browser" and retry, ' +
+        "or sign in with a browser that's already installed via --browser-executable <path>.",
     });
   }
 }
 
-export type BrowserFailure = "executable" | "installation" | "display" | "dependencies" | "sandbox" | "certificate";
+/** `--browser-executable` / `ICLOUD_MD_BROWSER_EXECUTABLE` was set to something that isn't an absolute path. */
+export class InvalidBrowserExecutableError extends IcloudNotesSyncError {
+  constructor(value: string) {
+    super(`The browser executable must be an absolute path (got ${JSON.stringify(value)}).`, {
+      hint: "Pass the browser binary's full path, e.g. --browser-executable /usr/bin/chromium, with no arguments.",
+    });
+  }
+}
 
-const BROWSER_FAILURES: Record<BrowserFailure, [string, string]> = {
-  executable: ["The selected browser executable is missing or cannot be executed.",
-    "Check --browser-executable or ICLOUD_MD_BROWSER_EXECUTABLE. No alternate browser was selected or downloaded."],
-  installation: ["Could not install the bundled login browser.",
-    'Check network/proxy access and certificate trust, then retry "icloud-md install-browser". ' +
-    "Alternatively select an installed browser with --browser-executable."],
-  display: ["The login browser could not connect to a graphical display.",
-    "Run sign-in from a terminal in the desktop session you share with the person signing in. " +
-    'Check DISPLAY/Wayland access with "icloud-md browser-info"; SSH/headless shells may not share that session.'],
-  dependencies: ["The login browser is missing operating-system runtime dependencies.",
-    'Run "icloud-md browser-info" to locate this installation\'s Playwright CLI. ' +
-    'Use that CLI\'s "install-deps chromium" command with your administrator, or install your system browser\'s dependencies.'],
-  sandbox: ["The login browser could not start with Chromium sandboxing enabled.",
-    "Use an unprivileged desktop user and check your host/container's user-namespace and sandbox configuration. " +
-    "icloud-md does not retry without the sandbox."],
-  certificate: ["The browser could not verify a server certificate.",
-    "Check the system clock, browser/OS CA trust store, and any inspecting proxy's trusted root certificate. " +
-    "Keep certificate verification enabled; do not bypass the error."],
-};
-
-export class BrowserLaunchError extends IcloudNotesSyncError {
-  constructor(readonly reason: BrowserFailure, detail?: string, options: ErrorOptions = {}) {
-    const [message, hint] = BROWSER_FAILURES[reason];
-    super(detail ? `${message}\n${detail}` : message, { ...options, hint });
+/** The explicitly chosen browser failed to launch. Never followed by a download or a fallback to the bundled browser. */
+export class BrowserExecutableLaunchError extends IcloudNotesSyncError {
+  constructor(executablePath: string, options: ErrorOptions = {}) {
+    const reason = options.cause instanceof Error ? options.cause.message.split("\n")[0] : undefined;
+    super(`Could not launch the browser at ${executablePath}${reason ? `: ${reason}` : "."}`, {
+      ...options,
+      hint:
+        "Check that --browser-executable (or ICLOUD_MD_BROWSER_EXECUTABLE) points at an installed Chromium-based " +
+        "browser such as Chromium, Chrome, or Edge - or unset it to use the bundled browser.",
+    });
   }
 }
 
