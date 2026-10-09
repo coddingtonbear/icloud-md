@@ -259,7 +259,7 @@ export async function fetchZoneNoteRecords(
       onPage?.(pageRecords.length);
     }
 
-    await inlineAssetBodies(records);
+    await inlineAssetBodies(records, { session, ckDatabaseHost, dsid, database, zoneID });
     return { records, syncToken };
   };
 
@@ -546,7 +546,7 @@ export async function fetchSharedNoteRecords(
           missingBody.map((record) => record.recordName),
         );
         mergeLookedUpRecords(records, lookedUp);
-        await inlineAssetBodies(records);
+        await inlineAssetBodies(records, { session, ckDatabaseHost, dsid, database: "shared", zoneID });
       }
 
       // A body still missing after the lookup means this zone's fetch is
@@ -576,6 +576,15 @@ export async function fetchSharedNoteRecords(
   return { zones, skippedZones };
 }
 
+/** Where a zone's records came from - enough to `lookup` one again. */
+interface ZoneSource {
+  session: IcloudSession;
+  ckDatabaseHost: string;
+  dsid: string;
+  database: CloudKitDatabase;
+  zoneID: CloudKitZoneID;
+}
+
 /**
  * Moves a very large note's text inline, where every reader expects it.
  * Past some size Apple stores a note's text as a `TextDataAsset` instead of
@@ -586,22 +595,73 @@ export async function fetchSharedNoteRecords(
  * so its download is inlined as-is and decodes on the normal path.
  *
  * Only the in-memory record changes. Push re-reads the record before any
- * write and still refuses a note stored as an asset. A failed download
- * propagates rather than leaving the note body-less: that would read as a
- * clean sync while the syncToken moved past the note.
+ * write and still refuses a note stored as an asset.
+ *
+ * A download that fails even after a fresh `lookup` (see
+ * `downloadTextAsset`) must not read as a clean sync while the syncToken
+ * moves past the note. In the private zone it throws: there's only the one
+ * zone, so holding it back and failing are the same thing. In a shared zone
+ * the body is left missing, and `fetchSharedNoteRecords`' existing
+ * missing-note-bodies check holds that zone (and its token) back while every
+ * other zone syncs.
  */
-export async function inlineAssetBodies(records: CloudKitRecord[]): Promise<void> {
+async function inlineAssetBodies(records: CloudKitRecord[], source: ZoneSource): Promise<void> {
   for (const record of records) {
-    if (!needsBodyLookup(record)) {
+    if (!needsBodyLookup(record) || record.fields.TextDataAsset?.value == null) {
       continue;
     }
-    const asset = record.fields.TextDataAsset?.value;
-    if (!isRecord(asset) || typeof asset.downloadURL !== "string") {
+    let bytes: Buffer;
+    try {
+      bytes = await downloadTextAsset(record, source);
+    } catch (error) {
+      if (source.database === "private") {
+        throw error;
+      }
+      await appendDebugLog({
+        note:
+          `inlineAssetBodies: couldn't download the text of shared note ${record.recordName} ` +
+          `(${error instanceof Error ? error.message : String(error)}) - leaving its body missing`,
+      });
       continue;
     }
-    const bytes = await fetchAssetBytes(asset.downloadURL);
     record.fields.TextDataEncrypted = { value: bytes.toString("base64"), type: "ENCRYPTED_BYTES" };
   }
+}
+
+/**
+ * Downloads a note's `TextDataAsset`, retrying once against a fresh `lookup`
+ * of the record if the first attempt fails. The download URLs expire, and
+ * `inlineAssetBodies` runs only after a zone's whole paged walk, so on a big
+ * clone the listing's URL can already be minutes old. A record with no
+ * usable `downloadURL` takes the same path rather than passing as body-less.
+ */
+async function downloadTextAsset(record: CloudKitRecord, source: ZoneSource): Promise<Buffer> {
+  try {
+    return await fetchAssetBytes(textAssetDownloadURL(record));
+  } catch (firstError) {
+    const [fresh] = await lookupRecords(source.session, source.ckDatabaseHost, source.dsid, source.database, source.zoneID, [
+      record.recordName,
+    ]);
+    if (!fresh) {
+      throw firstError;
+    }
+    try {
+      return await fetchAssetBytes(textAssetDownloadURL(fresh));
+    } catch (retryError) {
+      const detail = retryError instanceof Error ? retryError.message : String(retryError);
+      throw new CloudKitRequestFailedError(
+        `Couldn't download the text of note ${record.recordName}, which Apple keeps in a separate file: ${detail}`,
+      );
+    }
+  }
+}
+
+function textAssetDownloadURL(record: CloudKitRecord): string {
+  const asset = record.fields.TextDataAsset?.value;
+  if (!isRecord(asset) || typeof asset.downloadURL !== "string" || asset.downloadURL === "") {
+    throw new CloudKitRequestFailedError(`note ${record.recordName}'s TextDataAsset has no download URL`);
+  }
+  return asset.downloadURL;
 }
 
 function needsBodyLookup(record: CloudKitRecord): boolean {
