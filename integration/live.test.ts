@@ -16,6 +16,8 @@ import { RunContext } from "./harness.js";
 import { plantTableOnNote } from "./plantTable.js";
 import { TABLE_REV_BASELINE } from "../src/notes/realFixtures.js";
 import { plantTiedAnchorDeletion } from "./tiedAnchorDeletion.js";
+import { plantSeparators, readStoredNoteText, type SeparatorReplacement } from "./plantSeparators.js";
+import type { WebNote } from "./webOracle.js";
 import {
   parseMarkdownTable,
   readFrontmatterField,
@@ -752,5 +754,207 @@ describe("tables", { concurrency: 1, skip: enabled ? false : "set ICLOUD_MD_ITES
     const rebuilt = await second.findFileByNoteId(noteId);
     assert.ok(rebuilt !== undefined, `a fresh clone should contain the table note (${noteId})`);
     assert.deepEqual(parseMarkdownTable(await second.readVaultFile(rebuilt)), expected, "a fresh clone should rebuild the same table");
+  });
+});
+
+/**
+ * Notes whose text uses CR or CRLF between paragraphs (issue #34).
+ *
+ * Apple Notes keeps a pasted source's bare CRs, and its editors keep them
+ * across an edit and save, but `push` can never write one - every local file
+ * is normalized to LF first. So the fixture is planted: a note is pushed with
+ * LF, then `plantSeparators.ts` swaps chosen LFs for CR or CRLF through the
+ * production codec. The LF note is kept as its own control at every step:
+ *
+ *  - a pull must render the planted note as exactly the markdown its LF
+ *    original rendered as, and leave the vault settled;
+ *  - Apple's own client must split it into exactly the paragraphs, with
+ *    exactly the styles, it showed for the LF original - the check that a CR
+ *    inside a bullet or heading is a paragraph boundary to Apple too, and not
+ *    a line break within one paragraph;
+ *  - a push with no local edit must leave the stored CRs alone;
+ *  - a push of a real edit rewrites the separators as LF, and both Apple's
+ *    client and the vault must still show every paragraph and style.
+ */
+describe("carriage-return separators", { concurrency: 1, skip: enabled ? false : "set ICLOUD_MD_ITEST=1 to run" }, () => {
+  let run: RunContext;
+  let vault: Vault;
+  let noteId: string;
+  /** The pulled markdown of the LF original - what the planted note must keep rendering as. */
+  let lfMarkdown: string;
+  /** Apple's paragraphs for the LF original, in `paragraphShape` form. */
+  let lfShape: string[];
+  /** The stored text before and after the plant. */
+  let lfText: string;
+  let plantedText: string;
+
+  const fileName = "cr-canary.md";
+
+  // Each separator shape the decoder has to handle, inside each paragraph
+  // style the bot review asked about: a bare CR in body text and inside a
+  // bullet list, CRLF inside headings and body text, and a run of bare CRs
+  // making empty paragraphs. Every `find` names the LF it replaces.
+  const REPLACEMENTS: readonly SeparatorReplacement[] = [
+    { find: "ALPHA body\n", replace: "ALPHA body\r" },
+    { find: "bullet one\n", replace: "bullet one\r" },
+    { find: "Head one\n", replace: "Head one\r\n" },
+    { find: "CRLF one\n", replace: "CRLF one\r\n" },
+    { find: "CRLF two\n\n\ngap below", replace: "CRLF two\r\r\rgap below" },
+  ];
+
+  /**
+   * Apple's paragraphs as `kind:"text"`, one per copied span. A span's own
+   * trailing separator is dropped, whatever it is; any CR left *inside* a
+   * span stays visible (JSON-escaped), so a paragraph Apple did not split
+   * shows up as a mismatch rather than being quietly normalized away.
+   */
+  function paragraphShape(web: WebNote): string[] {
+    return web.paragraphs.map((p) => `${p.kind}:${JSON.stringify(p.text.replace(/(?:\r\n?|\n)$/, ""))}`);
+  }
+
+  /**
+   * `shape` with the `count` paragraphs starting at the one whose text is
+   * `firstText` copied as one: the first one's kind, the texts joined by LF.
+   * That is how Apple's web client copies paragraphs separated by bare CR.
+   */
+  function joinParagraphs(shape: readonly string[], firstText: string, count: number): string[] {
+    const parts = shape.map((entry) => {
+      const colon = entry.indexOf(":");
+      return { kind: entry.slice(0, colon), text: JSON.parse(entry.slice(colon + 1)) as string };
+    });
+    const start = parts.findIndex((part) => part.text === firstText);
+    assert.notEqual(start, -1, `the control should contain ${JSON.stringify(firstText)}, got ${JSON.stringify(shape)}`);
+    const joined = parts.slice(start, start + count);
+    const merged = `${joined[0]!.kind}:${JSON.stringify(joined.map((part) => part.text).join("\n"))}`;
+    return [...shape.slice(0, start), merged, ...shape.slice(start + count)];
+  }
+
+  before(async () => {
+    run = await RunContext.begin();
+    vault = run.primary;
+  });
+
+  after(async () => {
+    if (run !== undefined) {
+      await run.end();
+    }
+  });
+
+  it("pushes the LF control note and records how Apple's client shows it", async () => {
+    const title = run.title("cr canary");
+    await vault.writeNote(
+      fileName,
+      [
+        `# ${title}`,
+        "",
+        "intro line",
+        "",
+        "ALPHA body",
+        "BETA body",
+        "",
+        "- bullet one",
+        "- bullet two",
+        "",
+        "## Head one",
+        "## Head two",
+        "",
+        "CRLF one",
+        "CRLF two",
+        "",
+        "",
+        "gap below",
+        "tail line",
+        "",
+      ].join("\n"),
+    );
+    assert.equal((await vault.push()).exitCode, 0);
+    noteId = await vault.noteId(fileName);
+
+    await vault.pull();
+    lfMarkdown = await vault.readNote(fileName);
+    assert.equal((await vault.status()).exitCode, 0, "the LF control should settle after push");
+    lfText = await readStoredNoteText(vault.dir, noteId);
+    assert.doesNotMatch(lfText, /\r/, "the control must start out LF-only");
+
+    lfShape = paragraphShape(await (await run.oracle()).readNote(noteId));
+    // A sanity check that the control has the styles the CR probes sit in;
+    // without them the comparison below would prove nothing about lists or
+    // headings.
+    for (const expected of ['bulletList:"bullet one"', 'bulletList:"bullet two"', 'heading:"Head one"', 'heading:"Head two"']) {
+      assert.ok(lfShape.includes(expected), `Apple's client should show ${expected} in the control, got ${JSON.stringify(lfShape)}`);
+    }
+  });
+
+  it("plants CR and CRLF separators, and a pull renders the note as the same markdown", async () => {
+    const planted = await plantSeparators({ vaultDir: vault.dir, noteId, replacements: REPLACEMENTS });
+    assert.equal(planted.result.ok, true, `CloudKit should accept the planted note: ${JSON.stringify(planted.result)}`);
+    assert.equal(planted.oldText, lfText);
+    plantedText = await readStoredNoteText(vault.dir, noteId);
+    assert.equal(plantedText, planted.newText, "iCloud should now hold the planted text");
+    assert.match(plantedText, /\r\n/, "the plant should include CRLF");
+    assert.match(plantedText, /\r(?!\n)/, "the plant should include bare CR");
+
+    await vault.pull();
+    assert.equal(
+      await vault.readNote(fileName),
+      lfMarkdown,
+      "a CR/CRLF note should render as exactly the markdown of its LF original - not refused, not missing paragraphs",
+    );
+    assert.equal((await vault.status()).exitCode, 0, "a planted CR note must not read back as a local change");
+  });
+
+  it("shows CRLF in Apple's web client as the LF control's paragraphs, and pins how it treats bare CR", async () => {
+    // Apple's clients disagree about bare CR. macOS and iOS Notes draw it as
+    // a paragraph boundary (the PR #35 screenshots), which is the model this
+    // tool decodes with. The web client does not: observed live on
+    // 2026-10-08, it draws nothing at all for a bare CR - "ALPHA bodyBETA
+    // body", one bullet reading "bullet onebullet two" - and copies the
+    // joined paragraph with the CR turned into an LF. CRLF it splits like LF.
+    //
+    // So the CRLF probes must match the control exactly, and the bare-CR
+    // probes are pinned to the web client's own behaviour: not something
+    // this tool relies on, but a change in it would be worth knowing about.
+    const expected = joinParagraphs(
+      joinParagraphs(joinParagraphs(lfShape, "ALPHA body", 2), "bullet one", 2),
+      "CRLF two",
+      4,
+    );
+    const web = await (await run.oracle()).readNote(noteId);
+    assert.deepEqual(paragraphShape(web), expected, `Copied HTML:\n${web.html}`);
+  });
+
+  it("leaves an unedited CR note's stored separators alone on push", async () => {
+    assert.equal((await vault.push()).exitCode, 0);
+    assert.equal(
+      await readStoredNoteText(vault.dir, noteId),
+      plantedText,
+      "a push with no local edit must not rewrite the note just to normalize its separators",
+    );
+  });
+
+  it("pushes an edit to a CR note as LF text, keeping every paragraph and style", async () => {
+    await vault.writeNote(fileName, lfMarkdown.replace("tail line\n", "tail line\nadded after CR\n"));
+    const pushed = await vault.push();
+    const entry = pushed.json.entries.find((candidate) => candidate.file.endsWith(fileName));
+    assert.ok(entry !== undefined, `expected a push entry for ${fileName}, got ${JSON.stringify(pushed.json.entries)}`);
+    assert.equal(entry.resolution, "ready", `the edit was not accepted: ${entry.reason}`);
+    assert.equal(entry.outcome?.succeeded, true, `the edit failed: ${entry.outcome?.message}`);
+
+    assert.equal(
+      await readStoredNoteText(vault.dir, noteId),
+      lfText.replace("tail line\n", "tail line\nadded after CR\n"),
+      "the edited note should be stored as its LF original plus the edit",
+    );
+
+    const tailIndex = lfShape.indexOf('body:"tail line"');
+    assert.notEqual(tailIndex, -1, `the control should end with "tail line", got ${JSON.stringify(lfShape)}`);
+    const expectedShape = [...lfShape];
+    expectedShape.splice(tailIndex + 1, 0, 'body:"added after CR"');
+    const web = await (await run.oracle()).readNote(noteId);
+    assert.deepEqual(paragraphShape(web), expectedShape, `Apple's client should show every paragraph and style. Copied HTML:\n${web.html}`);
+
+    await vault.pull();
+    assert.equal(await vault.readNote(fileName), lfMarkdown.replace("tail line\n", "tail line\nadded after CR\n"));
+    assert.equal((await vault.status()).exitCode, 0, "the vault should settle after pushing the edit");
   });
 });
