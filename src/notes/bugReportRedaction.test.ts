@@ -88,6 +88,38 @@ test("redactCloneState assigns the same alias to the same recordName reused acro
   assert.equal(redacted.notes.B?.file, "folder-1/note-2.md");
 });
 
+test("redactCloneState aliases the title a note carries outside its path - frontmatterTitle and a pending rename", () => {
+  const state: CloneState = {
+    syncToken: "token",
+    notes: {
+      OWED: {
+        file: "Notes/Bank Statement.md",
+        recordChangeTag: "1a",
+        modificationDate: 100,
+        folderRecordName: "NOTES",
+        frontmatterTitle: "Bank Statement: March",
+        pendingRename: "Bank Statement March.md",
+      },
+      MOOT: { file: "Notes/Diary.md", recordChangeTag: "2b", modificationDate: 200, folderRecordName: "NOTES", pendingRename: "Diary.md" },
+    },
+    folders: { NOTES: { name: "Notes", dirName: "Notes" } },
+  };
+
+  const { state: redacted, fileReplacements } = redactCloneState(state, emptyAliasStore());
+
+  assert.equal(redacted.notes.OWED?.frontmatterTitle, "note-1");
+  assert.equal(redacted.notes.OWED?.pendingRename, "note-1-pending-rename.md", "an owed rename stays distinguishable from the file's own name");
+  assert.equal(redacted.notes.MOOT?.pendingRename, "note-2.md", "a moot rename still reads as moot");
+  assert.equal(redacted.notes.MOOT?.frontmatterTitle, undefined, "an absent title stays absent");
+  assert.doesNotMatch(JSON.stringify(redacted), /Bank|Statement|Diary/);
+
+  const scrubbed = redactLastError(
+    { timestamp: "2026-01-01T00:00:00.000Z", message: 'Rename to "Bank Statement March.md" is pending.' },
+    buildTextReplacements(fileReplacements, new Map()),
+  );
+  assert.equal(scrubbed?.message, 'Rename to "note-1-pending-rename.md" is pending.');
+});
+
 test("discoverAccountScalars finds dsid/appleId from state, a dsInfo-shaped body, and a bare dsid query param", () => {
   const state: CloneState = { syncToken: "token", account: { appleId: "person@example.com", dsid: "111" }, notes: {} };
   const logEntries: DebugLogRecord[] = [
