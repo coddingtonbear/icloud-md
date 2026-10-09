@@ -1,6 +1,7 @@
 import type { IcloudSession } from "../session.js";
-import { appendDebugLog, loggedFetch } from "../debugLog.js";
+import { appendDebugLog } from "../debugLog.js";
 import { CloudKitRequestFailedError, CloudKitZoneFetchFailedError } from "../errors.js";
+import { fetchWithThrottleRetry } from "./throttleRetry.js";
 
 export interface CloudKitFieldValue {
   value: unknown;
@@ -163,7 +164,9 @@ async function postDatabase(
     dsid,
   });
 
-  const response = await loggedFetch(
+  // Throttled responses (a long `push` sends hundreds of these) are waited out
+  // and retried rather than aborting the whole sync - see `throttleRetry.ts`.
+  const response = await fetchWithThrottleRetry(
     label,
     `${ckDatabaseHost}/database/1/com.apple.notes/production/${database}/${operation}?${params.toString()}`,
     {
@@ -177,11 +180,10 @@ async function postDatabase(
       },
       body: JSON.stringify(body),
     },
+    {
+      describeFailure: (failure) => `${operation} request failed (${database} db): HTTP ${failure.status}`,
+    },
   );
-
-  if (!response.ok) {
-    throw new CloudKitRequestFailedError(`${operation} request failed (${database} db): HTTP ${response.status}`);
-  }
 
   return response.json();
 }
@@ -607,15 +609,23 @@ export function mergeLookedUpRecords(records: CloudKitRecord[], lookedUp: CloudK
  * both an audio and an image attachment (dev notes, 2026-07-13/14). They do
  * carry an expiry (`e=` query param), so a stored URL can go stale; re-`lookup`
  * the owning record to get a fresh one rather than retrying the same URL.
+ *
+ * That is a *stale signature*, and is not retried. Throttling is a different
+ * failure with a different answer - the URL is still good, the account just
+ * needs to wait - so those responses are retried by `fetchWithThrottleRetry`.
  */
 export async function fetchAssetBytes(downloadURL: string): Promise<Buffer> {
-  const response = await loggedFetch("fetchAssetBytes", downloadURL, {
-    method: "GET",
-    headers: { Origin: "https://www.icloud.com", Referer: "https://www.icloud.com/" },
-  });
-  if (!response.ok) {
-    throw new CloudKitRequestFailedError(`Attachment download failed: HTTP ${response.status}`);
-  }
+  const response = await fetchWithThrottleRetry(
+    "fetchAssetBytes",
+    downloadURL,
+    {
+      method: "GET",
+      headers: { Origin: "https://www.icloud.com", Referer: "https://www.icloud.com/" },
+    },
+    {
+      describeFailure: (failure) => `Attachment download failed: HTTP ${failure.status}`,
+    },
+  );
   return Buffer.from(await response.arrayBuffer());
 }
 
