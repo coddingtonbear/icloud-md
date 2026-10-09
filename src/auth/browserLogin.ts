@@ -1,3 +1,4 @@
+import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
@@ -5,7 +6,13 @@ import path from "node:path";
 import { chromium, type BrowserContext, type Page, type Response as PlaywrightResponse } from "playwright";
 import { DEFAULT_CLIENT_BUILD_NUMBER, DEFAULT_CLIENT_MASTERING_NUMBER } from "./clientConstants.js";
 import { CONFIG_DIR } from "../configDir.js";
-import { BrowserExecutableLaunchError, ChromiumNotInstalledError, InvalidBrowserExecutableError, SignInIncompleteError } from "../errors.js";
+import {
+  BrowserExecutableLaunchError,
+  BrowserExecutableNotFoundError,
+  ChromiumNotInstalledError,
+  InvalidBrowserExecutableError,
+  SignInIncompleteError,
+} from "../errors.js";
 import type { IcloudSession } from "../session.js";
 
 /**
@@ -207,6 +214,14 @@ export interface BrowserLoginOptions {
    * of hanging the calling command indefinitely.
    */
   timeoutMs?: number;
+  /**
+   * An already-installed Chromium-based browser to launch instead of
+   * Playwright's bundled one; see `resolveBrowserExecutable`. Defaults to
+   * `ICLOUD_MD_BROWSER_EXECUTABLE`, which is how the CLI's
+   * `--browser-executable` reaches every sign-in path, including the ones
+   * that start deep inside another command.
+   */
+  executablePath?: string;
 }
 
 /**
@@ -298,16 +313,42 @@ export function installChromium(): Promise<void> {
 export const BROWSER_EXECUTABLE_ENV = "ICLOUD_MD_BROWSER_EXECUTABLE";
 
 /**
+ * Throws unless `executablePath` names an existing, executable file. A path
+ * that merely looks right would otherwise fail only when Playwright finally
+ * spawns it - possibly minutes into a pull, inside silent session recovery -
+ * so the check runs where the value is read.
+ */
+export function assertBrowserExecutable(executablePath: string): void {
+  let isFile: boolean;
+  try {
+    isFile = statSync(executablePath).isFile();
+  } catch {
+    throw new BrowserExecutableNotFoundError(executablePath, "does not exist");
+  }
+  if (!isFile) {
+    throw new BrowserExecutableNotFoundError(executablePath, "is not a file");
+  }
+  try {
+    accessSync(executablePath, fsConstants.X_OK);
+  } catch {
+    throw new BrowserExecutableNotFoundError(executablePath, "is not executable");
+  }
+}
+
+/**
  * The browser executable sign-in should launch, or `undefined` for
  * Playwright's bundled Chromium. Exists for machines where the bundled
  * download is blocked but a system Chromium is already installed (a
  * locked-down VM, behind a proxy). Must be an absolute path: Playwright
  * spawns it directly, with no PATH lookup or shell, so a bare `chromium`
- * would only fail later with a less obvious error.
+ * would only fail later with a less obvious error. The file is also checked
+ * to exist and be executable (`verify`, a seam for tests), for the same
+ * reason: better to fail here than halfway through a command.
  */
 export function resolveBrowserExecutable(
   explicit?: string,
   env: NodeJS.ProcessEnv = process.env,
+  verify: (executablePath: string) => void = assertBrowserExecutable,
 ): string | undefined {
   const value = explicit ?? env[BROWSER_EXECUTABLE_ENV];
   if (value === undefined) {
@@ -316,6 +357,7 @@ export function resolveBrowserExecutable(
   if (!value.trim() || !path.isAbsolute(value)) {
     throw new InvalidBrowserExecutableError(value);
   }
+  verify(value);
   return value;
 }
 
@@ -386,15 +428,18 @@ export async function launchWithLazyChromiumInstall(
  * heartbeat can't race the captured token the way a live tab raced
  * HAR-imported sessions.
  */
-export async function performBrowserLogin(options: BrowserLoginOptions = {}): Promise<IcloudSession> {
+export async function performBrowserLogin(
+  options: BrowserLoginOptions = {},
+  launchDeps: BrowserLaunchDeps = {},
+): Promise<IcloudSession> {
   const profileDir = options.profileDir ?? DEFAULT_BROWSER_PROFILE_DIR;
   const status = options.onStatus ?? ((message: string) => console.log(message));
   const headless = options.headless ?? false;
   const timeoutMs = options.timeoutMs ?? 0;
-  const executablePath = resolveBrowserExecutable();
+  const executablePath = resolveBrowserExecutable(options.executablePath);
   await mkdir(profileDir, { recursive: true, mode: 0o700 });
 
-  const context = await launchWithLazyChromiumInstall(profileDir, headless, status, executablePath);
+  const context = await launchWithLazyChromiumInstall(profileDir, headless, status, executablePath, launchDeps);
 
   try {
     const page = context.pages()[0] ?? (await context.newPage());

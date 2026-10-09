@@ -270,12 +270,13 @@ program
 // `--browser-executable` is handed to sign-in through the environment variable
 // rather than threaded through every command: sign-in can start from deep
 // inside any command (silent recovery on a stale session), and this way they
-// all see the same choice. Validated up front so a bad path fails before any
-// work starts, not halfway through a pull.
+// all see the same choice. Validated up front - the flag and an inherited
+// ICLOUD_MD_BROWSER_EXECUTABLE alike, and that the file is really there - so
+// a bad path fails before any work starts, not halfway through a pull.
 program.hook("preAction", () => {
-  const executable = program.opts<{ browserExecutable?: string }>().browserExecutable;
+  const executable = resolveBrowserExecutable(program.opts<{ browserExecutable?: string }>().browserExecutable);
   if (executable !== undefined) {
-    process.env[BROWSER_EXECUTABLE_ENV] = resolveBrowserExecutable(executable);
+    process.env[BROWSER_EXECUTABLE_ENV] = executable;
   }
 });
 

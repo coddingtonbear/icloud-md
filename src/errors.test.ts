@@ -4,11 +4,16 @@ import {
   AccountMismatchError,
   AlreadyClonedDirectoryError,
   AuthenticationExpiredError,
+  BrowserExecutableLaunchError,
+  BrowserExecutableNotFoundError,
   ChromiumNotInstalledError,
   CloudKitRequestFailedError,
   CorruptSessionFileError,
   CorruptStateFileError,
   IcloudNotesSyncError,
+  InvalidBrowserExecutableError,
+  isBrowserUnavailableError,
+  summarizeBrowserLaunchFailure,
   MissingSessionFileError,
   NotClonedDirectoryError,
   NotesUnavailableError,
@@ -133,4 +138,45 @@ test("AccountMismatchError names the directory and both Apple IDs", () => {
   assert.match(error.message, /me@example\.com/);
   assert.match(error.message, /someone-else@example\.com/);
   assert.match(error.hint ?? "", /me@example\.com/);
+});
+
+test("summarizeBrowserLaunchFailure keeps Playwright's summary line plus the browser's own stderr", () => {
+  const message = [
+    "browserType.launchPersistentContext: Target page, context or browser has been closed",
+    "Browser logs:",
+    "",
+    "<launching> /opt/google/chrome/chrome --disable-field-trial-config",
+    "<launched> pid=4242",
+    "[pid=4242][err] /opt/google/chrome/chrome: error while loading shared libraries: libatk-1.0.so.0: cannot open",
+    "[pid=4242][err] /opt/google/chrome/chrome: error while loading shared libraries: libatk-1.0.so.0: cannot open",
+    "[pid=4242][err] ",
+    "Call log:",
+    "  - <launching> /opt/google/chrome/chrome",
+  ].join("\n");
+  assert.equal(
+    summarizeBrowserLaunchFailure(message),
+    "browserType.launchPersistentContext: Target page, context or browser has been closed\n" +
+      "Browser output:\n" +
+      "  /opt/google/chrome/chrome: error while loading shared libraries: libatk-1.0.so.0: cannot open",
+  );
+  assert.equal(summarizeBrowserLaunchFailure("Executable doesn't exist at /x\nCall log:\n  - foo"), "Executable doesn't exist at /x");
+});
+
+test("BrowserExecutableLaunchError names the executable and carries the browser's stderr into its message", () => {
+  const cause = new Error("launch failed\n[pid=1][err] sandbox: Operation not permitted");
+  const error = new BrowserExecutableLaunchError("/usr/bin/chromium", { cause });
+  assert.match(error.message, /^Could not launch the browser at \/usr\/bin\/chromium: launch failed/);
+  assert.match(error.message, /sandbox: Operation not permitted/);
+  assert.equal(error.cause, cause);
+  assert.match(error.hint ?? "", /--browser-executable/);
+});
+
+test("isBrowserUnavailableError covers every way the browser itself can be the problem, and nothing else", () => {
+  assert.equal(isBrowserUnavailableError(new ChromiumNotInstalledError()), true);
+  assert.equal(isBrowserUnavailableError(new InvalidBrowserExecutableError("chromium")), true);
+  assert.equal(isBrowserUnavailableError(new BrowserExecutableNotFoundError("/x", "does not exist")), true);
+  assert.equal(isBrowserUnavailableError(new BrowserExecutableLaunchError("/x")), true);
+  assert.equal(isBrowserUnavailableError(new SilentReauthFailedError("timed out")), false);
+  assert.equal(isBrowserUnavailableError(new Error("timed out")), false);
+  assert.equal(isBrowserUnavailableError("timed out"), false);
 });

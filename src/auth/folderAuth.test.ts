@@ -6,6 +6,7 @@ import path from "node:path";
 import { accountProfileDir, accountSessionPath, readAccountMeta, writeAccountMeta } from "./accountStore.js";
 import { bindKnownAccount, bindNewFolderAccount, reauthenticateFolder, resolveFolderAccount } from "./folderAuth.js";
 import {
+  BrowserExecutableLaunchError,
   InteractiveSignInRefusedError,
   RequestedAccountMismatchError,
   SignInIncompleteError,
@@ -307,6 +308,38 @@ test("bindKnownAccount falls back to a visible window when the silent attempt fa
 
     assert.equal(auth.dsid, "555");
     assert.deepEqual(attempts, [true, undefined], "silent attempt first, then a headed one");
+  }));
+
+test("bindKnownAccount does not retry with a window when the browser itself failed to launch, interactive or not", () =>
+  withTempRoot(async (root) => {
+    const accountsRoot = path.join(root, "accounts");
+    await writeAccountMeta({ appleId: "someone@example.com", dsid: "555" }, accountsRoot);
+    const launchFailure = new BrowserExecutableLaunchError("/usr/bin/chromium", { cause: new Error("ENOENT") });
+
+    for (const interactive of [undefined, false]) {
+      const attempts: (boolean | undefined)[] = [];
+      const statuses: string[] = [];
+      await assert.rejects(
+        () =>
+          bindKnownAccount("someone@example.com", {
+            accountsRoot,
+            ...(interactive === undefined ? {} : { interactive }),
+            onStatus: (message) => statuses.push(message),
+            performBrowserLogin: async (options) => {
+              attempts.push(options?.headless);
+              throw launchFailure;
+            },
+            checkAuthentication: async () => ({ ok: false, status: 421, error: "session expired" }),
+          }),
+        (error: unknown) => error === launchFailure,
+      );
+      assert.deepEqual(attempts, [true], "no second, visible launch of a browser that can't start");
+      assert.equal(
+        statuses.some((message) => /opening a browser window/.test(message)),
+        false,
+        "no promise of a window that will never open",
+      );
+    }
   }));
 
 test("bindKnownAccount rejects an unknown account, listing the ones that exist", () =>

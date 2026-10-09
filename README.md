@@ -180,9 +180,12 @@ icloud-md --browser-executable /usr/bin/chromium clone ./my-notes
 export ICLOUD_MD_BROWSER_EXECUTABLE=/usr/bin/chromium
 ```
 
-It must be the full path to the browser binary. icloud-md still gives it its
-own sign-in profile rather than touching your everyday one, and if it fails
-to launch you get that error — nothing is downloaded behind your back.
+It must be the full path to the browser binary, and it is checked up front —
+a path that doesn't exist or isn't executable fails the command before any
+work starts. icloud-md still gives it its own sign-in profile rather than
+touching your everyday one, and if it fails to launch you get that error,
+including anything the browser printed on the way down — nothing is
+downloaded behind your back.
 Playwright is only tested against its own bundled build, so other versions
 are best-effort. Without either setting, nothing changes: the bundled
 browser is downloaded on first use, as above (or ahead of time with

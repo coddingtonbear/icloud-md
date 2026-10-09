@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ensureAuthenticated } from "./ensureAuthenticated.js";
+import { BrowserExecutableLaunchError } from "../errors.js";
 import { loadSession, writeSessionFile, type IcloudSession } from "../session.js";
 import type { AuthCheckResult } from "../cloudkit/setupClient.js";
 
@@ -114,6 +115,20 @@ test("throws a clear error when headless recovery itself fails", async () => {
       },
     }),
     /silent \(headless\) re-authentication failed/,
+  );
+});
+
+test("lets a browser launch failure through untouched, since 'run reauthenticate' would fail the same way", async () => {
+  const launchFailure = new BrowserExecutableLaunchError("/usr/bin/chromium", { cause: new Error("ENOENT") });
+
+  await assert.rejects(
+    ensureAuthenticated(makeSession("A=expired"), "/dev/null/unused.json", {
+      checkAuth: async () => ({ ok: false, status: 421, error: "expired" }),
+      recover: async () => {
+        throw launchFailure;
+      },
+    }),
+    (error: unknown) => error === launchFailure,
   );
 });
 
