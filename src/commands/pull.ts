@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveFolderAccount } from "../auth/folderAuth.js";
 import {
@@ -10,9 +10,11 @@ import {
 } from "../cloudkit/databaseClient.js";
 import type { IcloudSession } from "../session.js";
 import {
+  ATTACHMENTS_DIR,
   removeAttachmentsForNote,
   removeTableAttachmentsForNote,
   resolveNoteAttachments,
+  untrackAttachmentsForNote,
   type AttachmentAuth,
 } from "../notes/attachmentSync.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
@@ -25,14 +27,15 @@ import { buildVaultLayout, noteDirOf, placeNote, previousLayoutDirs, type Shared
 import { reconcileNotePlacements, removeStaleDirs } from "../notes/folderReconcile.js";
 import { hasConflictMarkers, mergeNoteVersions } from "../notes/mergeConflict.js";
 import { readBaseCopy, removeBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
-import { localFileState } from "../notes/localFileState.js";
+import { localFileState, readLocalNote } from "../notes/localFileState.js";
 import { writeCloneState, type CloneState, type CloneStateNoteEntry, type TitleMode } from "../notes/cloneState.js";
 import { migrationReporter, openVault } from "../notes/vaultMigrations.js";
 import { pendingRenameTarget, settlePendingRenames } from "../notes/pendingRename.js";
-import { composeNoteFile, NOTE_TITLE_KEY } from "../notes/noteIdFrontmatter.js";
+import { clearNoteId, composeNoteFile, NOTE_TITLE_KEY, readNoteTitle, setNoteTitle } from "../notes/noteIdFrontmatter.js";
+import { decodeNoteBodyText } from "../notes/noteText.js";
 import { recordEpoch } from "../notes/noteEpoch.js";
 import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.js";
-import { recordVersion } from "../notes/versionHistory.js";
+import { listVersions, recordVersion } from "../notes/versionHistory.js";
 import type { SyncNotice, SyncProgress } from "../progress.js";
 import { isPurged } from "./delete.js";
 
@@ -42,7 +45,8 @@ export type PullNotice = SyncNotice;
 
 /** Which of the ways a pull can touch a local file this change represents.
  * "untrack" is a note left on disk but dropped from tracking (it became
- * unsyncable remotely) - the file stays, the sync relationship goes. */
+ * unsyncable remotely, or was deleted remotely while it had local edits) -
+ * the file stays, the sync relationship goes. */
 export type PullChangeKind = "add" | "update" | "merge" | "remove" | "move" | "untrack";
 
 export interface PullChangeRemark {
@@ -169,6 +173,9 @@ export async function runPull(
     // entry.file is "<noteDir>/attachments/<name>" - key by the note dir.
     usedNamesFor(usedAttachmentFileNames, noteDirOf(path.posix.dirname(entry.file))).add(path.posix.basename(entry.file));
   }
+  // Directories whose `attachments/` listing has been folded into the map
+  // above - see `usedAttachmentNamesFor`.
+  const scannedAttachmentDirs = new Set<string>();
   const attachmentAuth: AttachmentAuth = { session: auth.session, ckdatabasewsUrl: auth.ckdatabasewsUrl, dsid: auth.dsid };
   const summary: PullSummary = {
     added: 0,
@@ -370,7 +377,7 @@ export async function runPull(
             decoded.embedSlots,
             attachments,
             tableAttachments,
-            usedNamesFor(usedAttachmentFileNames, noteDir),
+            await usedAttachmentNamesFor(targetDir, usedAttachmentFileNames, scannedAttachmentDirs, noteDir),
             noteDir,
           );
           bodyText = resolved.bodyText;
@@ -796,6 +803,40 @@ function usedNamesFor(byDir: Map<string, Set<string>>, dir: string): Set<string>
 }
 
 /**
+ * The attachment file names taken next to notes in `noteDir`: every tracked
+ * attachment there, plus - listed once per directory per pull - whatever is
+ * actually sitting in its `attachments/` directory. Tracked names alone
+ * aren't enough, because not every file there is tracked: a note kept after
+ * a remote deletion leaves its attachment files behind with their tracking
+ * dropped, and `uniqueFileName` never looks at the disk, so a later download
+ * of a same-named attachment (`image.png` is the usual one) would be written
+ * right over the last copy.
+ */
+export async function usedAttachmentNamesFor(
+  targetDir: string,
+  byDir: Map<string, Set<string>>,
+  scannedDirs: Set<string>,
+  noteDir: string,
+): Promise<Set<string>> {
+  const names = usedNamesFor(byDir, noteDir);
+  if (!scannedDirs.has(noteDir)) {
+    scannedDirs.add(noteDir);
+    let onDisk: string[] = [];
+    try {
+      onDisk = await readdir(path.join(targetDir, noteDir, ATTACHMENTS_DIR));
+    } catch (cause) {
+      if (!isEnoent(cause)) {
+        throw cause;
+      }
+    }
+    for (const name of onDisk) {
+      names.add(name);
+    }
+  }
+  return names;
+}
+
+/**
  * A shared zone that disappears from the shared-database listing means its
  * owner stopped sharing with this account (or deleted their zone). That's
  * loss of *access*, not proof the notes were deleted - so local files are
@@ -840,7 +881,7 @@ async function handleVanishedSharedZones(
  * zone) whose record appears nowhere in the zone's complete listing no
  * longer exists remotely, and goes through the same remote-deletion handling
  * a tombstone would have driven - a clean local copy is removed, one with
- * local edits becomes a delete/modify conflict and stays put.
+ * local edits stays on disk, untracked, as a new note for the next push.
  *
  * `seenRecordNames` must come from the *complete* listing, every record type
  * included: matching on Note records alone would misread a record whose type
@@ -880,11 +921,11 @@ async function handleRemoteDeletion(
   summary: PullSummary,
   titleMode: TitleMode,
 ): Promise<void> {
-  const local = await localFileState(targetDir, existing, record.recordName, titleMode);
+  const local = await readLocalNote(targetDir, existing, record.recordName, titleMode);
 
-  if (local !== "modified") {
+  if (local.status !== "modified") {
     // "clean" or "missing": nothing local worth protecting.
-    if (local === "clean") {
+    if (local.status === "clean") {
       await safeUnlink(path.join(targetDir, existing.file));
     }
     delete notes[record.recordName];
@@ -900,25 +941,96 @@ async function handleRemoteDeletion(
     return;
   }
 
-  // A delete/modify conflict is never auto-resolved either direction - merge
-  // against an empty remote so the markers show exactly what local kept. The
-  // local-only frontmatter is split off first and kept above the markers.
-  const base = (await readBaseCopy(targetDir, record.recordName)) ?? "";
-  const { frontmatter, body: localContent } = splitFrontmatter(await readFile(path.join(targetDir, existing.file), "utf-8"), {
-    filenameAsTitle: titleMode === "filename",
-  });
-  const outcome = mergeNoteVersions(base, localContent, "");
-
-  await writeFile(path.join(targetDir, existing.file), joinFrontmatter(frontmatter, outcome.text), "utf-8");
-  summary.conflicts.push(`${existing.file}: deleted remotely, but has local edits - merged with conflict markers, resolve manually`);
+  // Local edits to a note deleted elsewhere are kept as a *new* note: the file
+  // stays, edits and all, but stops being tracked and loses its
+  // `apple-note-id`, so the next push creates it. Keeping it tracked behind
+  // delete/modify conflict markers (what this used to do) left it stuck for
+  // good - push can't update a record that no longer exists, and no later
+  // pull ever delivers that record again to settle it. Its attachment files
+  // stay on disk too, since the kept text still points at them and the
+  // remote copies are gone; only their tracking goes. (Nothing reserves
+  // their names once they're untracked except the files themselves - see
+  // `usedAttachmentNamesFor`.)
+  //
+  // "modified" also covers a note whose base copy is missing, where there's
+  // no telling whether it was edited at all. Keeping it is still the side to
+  // err on - a note the user deleted on purpose comes back, which they can
+  // see and undo, rather than edits they made going away - but the remark
+  // says it was a guess.
+  const baseMissing = (await readBaseCopy(targetDir, record.recordName)) === undefined;
+  const keptTitle = await titleToKeep(targetDir, existing.file, record.recordName, local.frontmatter, titleMode);
+  const frontmatter = clearNoteId(local.frontmatter);
+  await writeFile(
+    path.join(targetDir, existing.file),
+    joinFrontmatter(keptTitle === undefined ? frontmatter : setNoteTitle(frontmatter, keptTitle), local.body),
+    "utf-8",
+  );
+  delete notes[record.recordName];
+  await removeBaseCopy(targetDir, record.recordName);
+  for (const removed of untrackAttachmentsForNote(record.recordName, attachments)) {
+    delete attachments[removed];
+  }
+  for (const removed of removeTableAttachmentsForNote(record.recordName, tableAttachments)) {
+    delete tableAttachments[removed];
+  }
+  const why = baseMissing
+    ? "deleted on another device, and its last synced copy is missing, so it may have local edits"
+    : "deleted on another device, but has local edits";
+  // A note in someone else's area can only be created again inside one of
+  // their shared folders that's writable - a note shared on its own, or one
+  // in a read-only folder, gets push's create refusal instead, and the way
+  // out is moving it into one of the user's own folders.
+  const next =
+    existing.sharedZoneOwner === undefined
+      ? "the next push creates it - delete the file first if you don't want it back"
+      : "the next push creates it again in the shared folder if you can write to it (otherwise move it into one of your own folders) - delete the file first if you don't want it back";
   summary.changes.push({
-    kind: "update",
+    kind: "untrack",
     file: existing.file,
-    remarks: [{ tone: "conflict", message: "deleted remotely, but has local edits - merged with conflict markers, resolve manually" }],
+    remarks: [{ tone: "note", message: `${why} - kept as a new note; ${next}` }],
   });
-  // Keep tracking (state entry + base copy) so this doesn't silently drop
-  // out of state.json; there's no new recordChangeTag to advance to since
-  // the record no longer exists remotely.
+}
+
+/**
+ * The title a kept note should be created under, when its file name alone
+ * would get it wrong: under filename-as-title, pull's collision uniquifier
+ * can have put "Groceries" at "Groceries 2.md", and once the note is
+ * untracked push takes a new note's title from its file name. Push's move
+ * and retitle paths compare against the tracked path to avoid exactly this;
+ * a create has no tracked path, so the title has to travel in
+ * `apple-note-title` instead.
+ *
+ * The note's real title is the first line of the last version pull saw,
+ * from its version history. Undefined - the file name is right, or there's
+ * no history to tell - leaves the frontmatter as it was; an
+ * `apple-note-title` already there wins too, since push reads it first.
+ */
+async function titleToKeep(
+  targetDir: string,
+  file: string,
+  recordName: string,
+  frontmatter: string,
+  titleMode: TitleMode,
+): Promise<string | undefined> {
+  if (titleMode !== "filename" || readNoteTitle(frontmatter) !== undefined) {
+    return undefined;
+  }
+  const last = (await listVersions(targetDir, recordName))
+    .filter((snapshot) => snapshot.recordType === "Note" && snapshot.field === "TextDataEncrypted")
+    .at(-1);
+  if (last === undefined) {
+    return undefined;
+  }
+  let titleLine: string;
+  try {
+    titleLine = decodeNoteBodyText(Buffer.from(last.valueBase64, "base64")).split(/\r\n?|\n/)[0] ?? "";
+  } catch {
+    return undefined;
+  }
+  const fileName = path.posix.basename(file);
+  return fileName !== noteFileNameFor(titleLine, titleMode) && fileNameCarriesTitle(fileName, titleLine)
+    ? titleLine
+    : undefined;
 }
 
 /**
