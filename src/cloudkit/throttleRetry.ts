@@ -12,9 +12,10 @@ import { CloudKitRequestFailedError } from "../errors.js";
  * count of seconds, repeated in the `Retry-After` header (2026-09-29). Before
  * this, any non-OK response threw immediately, so a single throttled write
  * aborted an entire push partway through, and the only recovery was re-running
- * the command by hand until it happened to finish. CloudKit also uses
- * `THROTTLED` as a zone-level code inside an HTTP 200 `changes/zone` body,
- * which is a different shape handled at that layer, not here.
+ * the command by hand until it happened to finish. HTTP 429 and top-level
+ * `THROTTLED` are also accepted for compatibility, not because they were
+ * observed in those responses. Zone-level `THROTTLED` inside an HTTP 200
+ * `changes/zone` body is a different shape and is not handled here.
  *
  * Only throttling is retried. Every other failure - 401/403, a genuine
  * protocol error, the signed-URL expiry `fetchAssetBytes` documents - is
@@ -40,7 +41,7 @@ export interface ThrottleRetryOptions {
   maxAttempts?: number;
   /** Backoff before the second attempt, doubling for each one after that. */
   baseDelayMs?: number;
-  /** Ceiling for any single wait, applied after the server's own hint. */
+  /** Ceiling for exponential backoff; server hints have a separate five-minute ceiling. */
   maxDelayMs?: number;
   /** Seam for tests. */
   sleep?: (ms: number) => Promise<void>;
@@ -48,9 +49,9 @@ export interface ThrottleRetryOptions {
 }
 
 /**
- * HTTP statuses CloudKit uses to say "throttled" rather than "failed". 409 is
- * deliberately absent: on these endpoints a bare 409 can mean a changeTag
- * conflict rather than throttling, and every 409 actually observed carried
+ * 503 was observed; 429 is accepted for compatibility. 409 is deliberately
+ * absent: on these endpoints a bare 409 can mean a changeTag conflict rather
+ * than throttling, and every 409 actually observed carried
  * `TRY_AGAIN_LATER`, which the code check below catches anyway.
  */
 const THROTTLE_STATUSES = new Set([429, 503]);
@@ -61,6 +62,7 @@ const THROTTLE_SERVER_ERROR_CODES = new Set(["TRY_AGAIN_LATER", "THROTTLED"]);
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_BASE_DELAY_MS = 1_000;
 const DEFAULT_MAX_DELAY_MS = 30_000;
+const MAX_SERVER_HINT_MS = 300_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -124,28 +126,28 @@ function isThrottled(failure: { status: number; serverErrorCode: string | null }
 }
 
 /**
- * The server's own hint wins when it asks for longer than the backoff would,
- * and a ceiling keeps one throttled response from stalling a sync
- * indefinitely. Deliberately without jitter: this is one local client talking
- * to one account, so there is no herd to spread out, and a predictable wait
- * is the one that can be asserted in tests.
+ * The server's own hint wins when it asks for longer than the capped backoff,
+ * but is itself capped at five minutes per wait. Deliberately without jitter:
+ * this is one local client talking to one account, so there is no herd to
+ * spread out, and a predictable wait is the one that can be asserted in tests.
  */
 function delayMs(failure: CloudKitFailure, attempt: number, baseDelayMs: number, maxDelayMs: number): number {
-  const backoffMs = baseDelayMs * 2 ** (attempt - 1);
-  const wanted = Math.max(failure.serverHintMs ?? 0, backoffMs);
-  return Math.min(wanted, maxDelayMs);
+  const backoffMs = Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
+  const serverHintMs = Math.min(failure.serverHintMs ?? 0, MAX_SERVER_HINT_MS);
+  return Math.max(serverHintMs, backoffMs);
 }
 
 /**
  * The hint a caller sees when throttling outlasts the retries: the generic
  * "transient issue, try again" advice is technically right but unhelpful, so
- * say what happened and that the request did not go through.
+ * say what happened without assuming whether a write was applied or whether
+ * the command supports resuming.
  */
 export function throttleExhaustedHint(failure: CloudKitFailure): string {
   const code = failure.serverErrorCode === null ? "" : ` (${failure.serverErrorCode})`;
   return (
-    `iCloud throttled this request${code} and it did not go through - this tool tried it ` +
-    `${failure.attempts} times. Waiting a minute and running the command again picks up where this left off.`
+    `iCloud throttled this request${code} - this tool tried it ${failure.attempts} times. ` +
+    `Wait before trying again; check any partial results and local changes first.`
   );
 }
 

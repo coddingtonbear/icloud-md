@@ -41,13 +41,13 @@ function throttledResponse(status = 503, retryAfterSeconds: number | null = 10):
 /** Serves one canned response per call, holding the last one for any call after that. */
 function installFetchMock(respond: (call: number, url: string) => Response): {
   restore: () => void;
-  calls: string[];
+  calls: { url: string; init: RequestInit | undefined }[];
 } {
   const realFetch = globalThis.fetch;
-  const calls: string[] = [];
-  globalThis.fetch = (async (url: Parameters<typeof fetch>[0]) => {
+  const calls: { url: string; init: RequestInit | undefined }[] = [];
+  globalThis.fetch = (async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const href = String(url);
-    calls.push(href);
+    calls.push({ url: href, init: structuredClone(init) });
     return respond(calls.length, href);
   }) as typeof fetch;
   return { restore: () => (globalThis.fetch = realFetch), calls };
@@ -62,18 +62,44 @@ function recordingSleep(): { waits: number[]; sleep: (ms: number) => Promise<voi
  * each turn until the promise settles, so a retry test costs no real time. */
 async function withMockedTimers<T>(t: TestContext, start: () => Promise<T>): Promise<T> {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  let settled = false;
-  const pending = start();
-  pending.then(
-    () => (settled = true),
-    () => (settled = true),
-  );
-  for (let turn = 0; turn < 50 && !settled; turn += 1) {
-    await new Promise((resolve) => setImmediate(resolve));
-    t.mock.timers.tick(60_000);
+  try {
+    let settled = false;
+    const pending = start();
+    pending.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    const deadline = performance.now() + 5_000;
+    while (!settled) {
+      assert.ok(performance.now() < deadline, "retry promise did not settle within 5 seconds of real time");
+      await new Promise((resolve) => setImmediate(resolve));
+      t.mock.timers.tick(300_000);
+    }
+    return await pending;
+  } finally {
+    t.mock.timers.reset();
   }
-  return pending;
 }
+
+test("mocked retry timers are reset even when the operation throws or rejects", async (t) => {
+  let leakedTimerRan = false;
+  await assert.rejects(
+    withMockedTimers(t, () => {
+      setTimeout(() => (leakedTimerRan = true), 1);
+      throw new Error("start failed");
+    }),
+    /start failed/,
+  );
+  await assert.rejects(
+    withMockedTimers(t, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      throw new Error("operation failed");
+    }),
+    /operation failed/,
+  );
+  await withMockedTimers(t, () => new Promise((resolve) => setTimeout(resolve, 1)));
+  assert.equal(leakedTimerRan, false);
+});
 
 test("a throttled request is waited out and retried instead of failing the sync", async () => {
   const mock = installFetchMock((call) => (call === 1 ? throttledResponse() : jsonResponse({ ok: true })));
@@ -110,7 +136,23 @@ test("the backoff takes over when the server asks for less than it would", async
   }
 });
 
-test("a single wait is capped so one throttled response cannot stall the sync", async () => {
+test("a 120-second server hint is not shortened to the backoff cap", async () => {
+  const mock = installFetchMock((call) => (call === 1 ? throttledResponse(503, 120) : jsonResponse({ ok: true })));
+  const { waits, sleep } = recordingSleep();
+  try {
+    await fetchWithThrottleRetry(
+      "note",
+      "https://ckdatabasews.example/x",
+      { method: "POST", headers: {} },
+      { describeFailure: (failure) => `HTTP ${failure.status}`, sleep },
+    );
+    assert.deepEqual(waits, [120_000]);
+  } finally {
+    mock.restore();
+  }
+});
+
+test("a single server hint is capped at five minutes", async () => {
   const mock = installFetchMock((call) => (call === 1 ? throttledResponse(503, 600) : jsonResponse({ ok: true })));
   const { waits, sleep } = recordingSleep();
   try {
@@ -120,7 +162,26 @@ test("a single wait is capped so one throttled response cannot stall the sync", 
       { method: "POST", headers: {} },
       { describeFailure: (failure) => `HTTP ${failure.status}`, sleep },
     );
-    assert.deepEqual(waits, [30_000]);
+    assert.deepEqual(waits, [300_000]);
+  } finally {
+    mock.restore();
+  }
+});
+
+test("exponential backoff stays capped at 30 seconds without a server hint", async () => {
+  const mock = installFetchMock(() => throttledResponse(503, null));
+  const { waits, sleep } = recordingSleep();
+  try {
+    await assert.rejects(
+      fetchWithThrottleRetry(
+        "note",
+        "https://ckdatabasews.example/x",
+        { method: "POST", headers: {} },
+        { describeFailure: (failure) => `HTTP ${failure.status}`, maxAttempts: 8, sleep },
+      ),
+      /HTTP 503/,
+    );
+    assert.deepEqual(waits, [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]);
   } finally {
     mock.restore();
   }
@@ -204,7 +265,7 @@ test("a non-throttle failure is thrown on the first attempt, message and hint un
   }
 });
 
-test("giving up says the request was throttled and never went through", async () => {
+test("giving up reports throttling without promising resume or that writes were not applied", async () => {
   const mock = installFetchMock(() => throttledResponse());
   const { waits, sleep } = recordingSleep();
   try {
@@ -218,7 +279,9 @@ test("giving up says the request was throttled and never went through", async ()
       (error: unknown) =>
         error instanceof CloudKitRequestFailedError &&
         error.message === "request failed: HTTP 503" &&
-        /throttled this request \(TRY_AGAIN_LATER\).*tried it 4 times/s.test(error.hint ?? ""),
+        /throttled this request \(TRY_AGAIN_LATER\).*tried it 4 times/s.test(error.hint ?? "") &&
+        /Wait before trying again/.test(error.hint ?? "") &&
+        !/did not go through|picks up where|resume/i.test(error.hint ?? ""),
     );
     assert.equal(mock.calls.length, 4);
     assert.deepEqual(waits, [10_000, 10_000, 10_000]);
@@ -254,6 +317,12 @@ test("a push waits out a throttled records/modify call rather than aborting", as
       ]),
     );
     assert.equal(mock.calls.length, 2);
+    assert.equal(mock.calls[0]?.init?.method, "POST");
+    assert.equal(typeof mock.calls[0]?.init?.body, "string");
+    assert.ok(mock.calls[0]?.init?.headers);
+    // Snapshot the actual fetch arguments so replay cannot change the URL,
+    // method, headers, or serialized request body (including its changeTag).
+    assert.deepEqual(mock.calls[1], mock.calls[0]);
     assert.equal(results.length, 1);
     assert.equal(results[0]?.ok, true);
   } finally {
