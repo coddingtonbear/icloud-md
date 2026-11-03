@@ -346,6 +346,13 @@ resolution live.
   cleaning up notes this tool (or anything else) leaves in a broken state.
 - **`history`/`diff`/`revert`**, and push-time auto-merge via version
   history — the safety net for inspecting or undoing a bad edit.
+- **Apple's throttling is retried with bounded waits.** A long `push` can
+  receive `TRY_AGAIN_LATER` with a `Retry-After`. Database requests and
+  attachment downloads retry throttled responses up to five attempts.
+  Exponential backoff is capped at 30 seconds; longer server hints are
+  honoured up to five minutes per wait. Persistent throttling still fails
+  with advice to wait and check partial results before trying again.
+  Anything that isn't a throttle still fails on the first attempt.
 
 ## Where the title lives
 
