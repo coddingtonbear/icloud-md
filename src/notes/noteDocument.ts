@@ -31,7 +31,7 @@
  *              4: timestamp - per-replica clock table
  *                 (repeated { 1: 16-byte UUID, 2+: clocks })
  *              5: repeated AttributeRun - formatting spans over visible text
- *   Substring: 1: charID { 1: replica index, 2: clock }
+ *   Substring: 1: charID { 1: sorted UUID rank, 2: clock }
  *              2: length
  *              3: timestamp (this file's domain `anchor`; Apple calls it the
  *                 run's style timestamp)
@@ -58,8 +58,10 @@
  *  - run lengths and clocks count UTF-16 code units;
  *  - visible text == concatenation of non-tombstoned runs, in list order;
  *  - each replica's clock in the table == total length it ever inserted;
- *  - replica indexes in coords are 1-based into the table (0 is reserved for
- *    the zero-length origin run and the (0, 0xFFFFFFFF) end sentinel);
+ *  - wire replica IDs are 1-based ranks in the byte-sorted UUID set, not
+ *    clock-message row positions; this domain model translates them to
+ *    table-row indexes (0 is reserved for the zero-length origin run and
+ *    the (0, 0xFFFFFFFF) end sentinel);
  *  - attribute-run lengths sum to the visible text length.
  *
  * Everything this parser does not understand makes `parseNoteDocument` throw,
@@ -99,6 +101,8 @@ const TOMBSTONE_FIELD = SubstringSchema.fields.find((f) => f.localName === "tomb
 const SUBCLOCK_FIELD = VectorTimestamp_Clock_ReplicaClockSchema.fields.find((f) => f.localName === "subclock")!;
 
 export interface RunCoord {
+  /** Domain index: 1-based row in NoteDocument.replicas, or zero for the
+   * origin/sentinel. Wire CharID IDs instead use sorted UUID rank. */
   replica: number;
   clock: number;
 }
@@ -142,6 +146,8 @@ export interface NoteDocument {
   minimumSupportedVersion: number;
   text: string;
   runs: TextRun[];
+  /** Original clock-message order; domain run indexes refer to these rows.
+   * The wire format instead indexes the same UUIDs in sorted order. */
   replicas: ReplicaEntry[];
   attributeRuns: AttributeRun[];
 }
@@ -156,21 +162,24 @@ export function parseNoteDocument(raw: Uint8Array): NoteDocument {
     throw new Error("Note document is missing its replica clock table (String field 4)");
   }
 
+  const replicas = str.timestamp.clock.map(parseReplicaEntry);
+  const { rankToRow } = replicaRanks(replicas);
   return {
     rootSerializationVersion: wrapper.serializationVersion,
     versionSerializationVersion: version.serializationVersion,
     minimumSupportedVersion: version.minimumSupportedVersion,
     text: str.string,
-    runs: str.substring.map(parseTextRun),
-    replicas: str.timestamp.clock.map(parseReplicaEntry),
+    runs: str.substring.map(run => mapRunReplicas(parseTextRun(run), rankToRow)),
+    replicas,
     attributeRuns: str.attributeRun,
   };
 }
 
 export function encodeNoteDocument(doc: NoteDocument): Uint8Array {
+  const { rowToRank } = replicaRanks(doc.replicas);
   const str = create(StringSchema, {
     string: doc.text,
-    substring: doc.runs.map(encodeTextRun),
+    substring: doc.runs.map(run => encodeTextRun(mapRunReplicas(run, rowToRank))),
     timestamp: create(VectorTimestampSchema, { clock: doc.replicas.map(encodeReplicaEntry) }),
     attributeRun: doc.attributeRuns,
   });
@@ -185,6 +194,44 @@ export function encodeNoteDocument(doc: NoteDocument): Uint8Array {
     ],
   });
   return toBinary(VersionedDocumentSchema, wrapper);
+}
+
+/** Native persistence resolves both character and style IDs through
+ * timestamp.sortedUUIDs, not through the repeated clock-message order. Keep
+ * that archive order in our domain model for exact round trips and stable
+ * internal indexes; translate only at the note document's wire boundary.
+ * Standalone parseTextRun/encodeTextRun callers supply their own table. */
+function replicaRanks(replicas: ReplicaEntry[]): { rankToRow: number[]; rowToRank: number[] } {
+  const rows = replicas.map((entry, index) => {
+    if (entry.id.length !== 16) {
+      throw new Error("Replica identity must be a 16-byte UUID");
+    }
+    return { id: entry.id, row: index + 1 };
+  }).sort((a, b) => compareBytes(a.id, b.id));
+  const rankToRow = [0], rowToRank = [0];
+  for (let index = 0; index < rows.length; index++) {
+    const current = rows[index]!;
+    if (index > 0 && bytesEqual(rows[index - 1]!.id, current.id)) {
+      throw new Error("Duplicate replica UUID identity");
+    }
+    rankToRow.push(current.row);
+    rowToRank[current.row] = index + 1;
+  }
+  return { rankToRow, rowToRank };
+}
+
+function mapRunReplicas(run: TextRun, indexes: number[]): TextRun {
+  const translate = (index: number) => {
+    if (!Number.isInteger(index) || index < 0 || index >= indexes.length) {
+      throw new Error("Unknown replica index in character or style identity");
+    }
+    return indexes[index]!;
+  };
+  return {
+    ...run,
+    coord: { ...run.coord, replica: translate(run.coord.replica) },
+    anchor: { ...run.anchor, replica: translate(run.anchor.replica) },
+  };
 }
 
 /** The byte-for-byte round-trip gate: true only if we can reproduce `raw`
