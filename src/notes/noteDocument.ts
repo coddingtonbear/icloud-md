@@ -101,8 +101,6 @@ const TOMBSTONE_FIELD = SubstringSchema.fields.find((f) => f.localName === "tomb
 const SUBCLOCK_FIELD = VectorTimestamp_Clock_ReplicaClockSchema.fields.find((f) => f.localName === "subclock")!;
 
 export interface RunCoord {
-  /** Domain index: 1-based row in NoteDocument.replicas, or zero for the
-   * origin/sentinel. Wire CharID IDs instead use sorted UUID rank. */
   replica: number;
   clock: number;
 }
@@ -146,8 +144,6 @@ export interface NoteDocument {
   minimumSupportedVersion: number;
   text: string;
   runs: TextRun[];
-  /** Original clock-message order; domain run indexes refer to these rows.
-   * The wire format instead indexes the same UUIDs in sorted order. */
   replicas: ReplicaEntry[];
   attributeRuns: AttributeRun[];
 }
@@ -196,11 +192,6 @@ export function encodeNoteDocument(doc: NoteDocument): Uint8Array {
   return toBinary(VersionedDocumentSchema, wrapper);
 }
 
-/** Native persistence resolves both character and style IDs through
- * timestamp.sortedUUIDs, not through the repeated clock-message order. Keep
- * that archive order in our domain model for exact round trips and stable
- * internal indexes; translate only at the note document's wire boundary.
- * Standalone parseTextRun/encodeTextRun callers supply their own table. */
 function replicaRanks(replicas: ReplicaEntry[]): { rankToRow: number[]; rowToRank: number[] } {
   const rows = replicas.map((entry, index) => {
     if (entry.id.length !== 16) {
