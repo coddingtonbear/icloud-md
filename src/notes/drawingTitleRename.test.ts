@@ -1,15 +1,61 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { create, toBinary } from "@bufbuild/protobuf";
-import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
+import type { CloudKitRecord, RecordUpdateResult } from "../cloudkit/databaseClient.js";
 import { StringSchema } from "./gen/topotext_pb.js";
 import { DocumentSchema, VersionSchema } from "./gen/versioned_document_pb.js";
 import { compressNoteDocument } from "./noteText.js";
-import { prepareDrawingTitleRename } from "./drawingTitleRename.js";
+import { confirmedDrawingTitleRename, prepareDrawingTitleRename } from "./drawingTitleRename.js";
 
 const noteId = "11111111-1111-4111-8111-111111111111";
 const attachmentId = "22222222-2222-4222-8222-222222222222";
 const folderId = "33333333-3333-4333-8333-333333333333";
+
+function replyFixture() {
+  const f = fixture();
+  const prepared = prepareDrawingTitleRename(f.note, f.attachment, f.options);
+  assert.ok(prepared.ok);
+  const records: CloudKitRecord[] = prepared.updates.map(update => ({ ...update, recordChangeTag: `${update.recordChangeTag}-after`,
+    fields: { ...update.fields, Deleted: { value: 0, type: "INT64" } } }));
+  const results: RecordUpdateResult[] = records.map(record => ({ ok: true, record }));
+  return { updates: prepared.updates, records, results };
+}
+
+test("confirms the exact rename pair in either response order without mutating inputs", () => {
+  const { updates, records, results } = replyFixture();
+  const before = structuredClone({ updates, results });
+  assert.equal(confirmedDrawingTitleRename(updates, results), records[0]);
+  assert.equal(confirmedDrawingTitleRename(updates, [...results].reverse()), records[0]);
+  assert.deepEqual({ updates, results }, before);
+});
+
+const badReplies: Array<[string, (f: ReturnType<typeof replyFixture>) => void]> = [
+  ["empty reply", f => { f.results.length = 0; }],
+  ["missing record", f => { f.results.pop(); }],
+  ["extra record", f => { f.results.push({ ok: true, record: { ...f.records[0]!, recordName: folderId } }); }],
+  ["duplicate identity", f => { f.results[1] = f.results[0]!; }],
+  ["unexpected identity", f => { f.records[1]!.recordName = folderId; }],
+  ["wrong type", f => { f.records[1]!.recordType = "Note"; }],
+  ["server refusal", f => { f.results[1] = { ok: false, serverErrorCode: "CONFLICT", reason: undefined }; }],
+  ["deleted record", f => { Object.assign(f.records[1]!, { deleted: true }); }],
+  ["Deleted field", f => { f.records[1]!.fields.Deleted!.value = 1; }],
+  ["missing deletion state", f => { delete (f.records[1]!.fields as CloudKitRecord["fields"]).Deleted; }],
+  ["missing tag", f => { delete (f.records[1]! as CloudKitRecord).recordChangeTag; }],
+  ["empty tag", f => { f.records[1]!.recordChangeTag = ""; }],
+  ["unchanged tag", f => { f.records[1]!.recordChangeTag = f.updates[1].recordChangeTag; }],
+  ["missing requested field", f => { delete f.records[1]!.fields.UserTitle; }],
+  ["wrong title", f => { f.records[1]!.fields.UserTitle = { value: "wrong", type: "ENCRYPTED_BYTES" }; }],
+  ["wrong date", f => { f.records[0]!.fields.ModificationDate = { value: 201, type: "TIMESTAMP" }; }],
+  ["object-valued request", f => { f.updates[1].fields.UserTitle = { value: { text: "title" } }; f.records[1]!.fields.UserTitle = { ...f.updates[1].fields.UserTitle, type: "ENCRYPTED_BYTES" }; }],
+  ["duplicate requested identity", f => { f.updates[1].recordName = f.updates[0].recordName; }],
+];
+for (const [name, change] of badReplies) {
+  test(`does not confirm rename with ${name}`, () => {
+    const f = replyFixture();
+    change(f);
+    assert.equal(confirmedDrawingTitleRename(f.updates, f.results), undefined);
+  });
+}
 
 function fixture(text = "\uFFFC\n", count = 1) {
   const body = create(StringSchema, {

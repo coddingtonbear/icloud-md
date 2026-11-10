@@ -1,13 +1,35 @@
-import type { CloudKitRecord, RecordUpdate } from "../cloudkit/databaseClient.js";
+import type { CloudKitRecord, RecordUpdate, RecordUpdateResult } from "../cloudkit/databaseClient.js";
 import type { CloneStateNoteEntry } from "./cloneState.js";
 import { classifyNoteRecord, storesTextAsAsset } from "./decodeNoteRecord.js";
 import { hasEmbedOnlyFirstLine } from "./encodeNoteRecord.js";
 import { isNoteId } from "./noteIdFrontmatter.js";
 
-/** Offline candidate only: iOS assigns UserTitle, regenerates the containing
- * note's title, then saves its modification date. Native convergence of this
- * minimal CloudKit field set still requires verification before integration.
- * The caller owns filename/identity pairing and must revalidate before sending. */
+/** Confirms only this pair's echoed metadata, not native title convergence. */
+export function confirmedDrawingTitleRename(
+  updates: readonly [RecordUpdate, RecordUpdate], results: RecordUpdateResult[],
+): CloudKitRecord | undefined {
+  if (results.length !== 2 || new Set(updates.map(update => update.recordName)).size !== 2 ||
+      updates.filter(update => update.recordType === "Note").length !== 1 ||
+      updates.filter(update => update.recordType === "Attachment").length !== 1) return undefined;
+  const confirmed: CloudKitRecord[] = [];
+  for (const update of updates) {
+    const matches = results.filter(result => result.ok && result.record.recordName === update.recordName);
+    const result = matches[0];
+    if (matches.length !== 1 || !result?.ok) return undefined;
+    const record = result.record;
+    if (record.recordType !== update.recordType || record.deleted || record.fields.Deleted?.value !== 0 ||
+        !record.recordChangeTag?.trim() || record.recordChangeTag === update.recordChangeTag ||
+        Object.entries(update.fields).some(([key, { value }]) =>
+          (value !== null && !["string", "number", "boolean"].includes(typeof value)) || record.fields[key]?.value !== value)) return undefined;
+    confirmed.push(record);
+  }
+  return confirmed.find(record => record.recordType === "Note");
+}
+
+/** Apple's drawing rename updates the attachment's custom title and the
+ * containing note's display title/date. Prepare those fields without touching
+ * the document or assets. The caller verifies local intent before sending;
+ * confirmed cloud metadata does not imply every native app refreshed its list. */
 export function prepareDrawingTitleRename(
   note: CloudKitRecord,
   attachment: CloudKitRecord,
