@@ -349,9 +349,9 @@ resolution live.
 
 ## Where the title lives
 
-An Apple note has no title field of its own worth the name — its title *is*
-its first line. That leaves two honest ways to put a note in a file, and a
-vault picks one at `clone` time:
+Most text notes take their title from the first line. Drawing-only notes
+can have a separate title without adding text above the drawing. A vault
+chooses where to carry text titles at `clone` time:
 
 | | Default (`in-body`) | `--filename-as-title` |
 | --- | --- | --- |
@@ -367,6 +367,14 @@ one rather than seeing an unrelated new note.
 
 A few consequences worth knowing before you pick:
 
+- **Rename a drawing-only note without changing the drawing.** In a
+  filename-as-title vault, rename its `.md` file within the same folder, then
+  run `push`. This supports an unchanged private note containing one drawing.
+  Shared notes, combined content edits or folder moves, and `apple-note-title`
+  changes remain refused. One successful push confirms both cloud titles and
+  records the new filename; it does not schedule later refreshes.
+  On the tested macOS 26.6.2, Notes can still show the previous list name
+  after importing the rename. This also occurred with Apple's own iPad rename.
 - **A file name can hold more than you'd think.** Characters a file name
   can't contain (`/`, `:`, `?`, …) are substituted with visually-near
   Unicode look-alikes and substituted back on the way up, so a note titled
