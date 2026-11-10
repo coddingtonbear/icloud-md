@@ -1,6 +1,6 @@
 import type { CloudKitFieldValue, CloudKitRecord } from "../cloudkit/databaseClient.js";
 import type { TitleMode } from "./cloneState.js";
-import { TRASH_FOLDER_RECORD_NAME } from "./encodeNoteRecord.js";
+import { hasEmbedOnlyFirstLine, TRASH_FOLDER_RECORD_NAME } from "./encodeNoteRecord.js";
 import { decodeNoteEmbedSlots, OBJECT_REPLACEMENT_CHARACTER, type AttachmentReference, type EmbedSlot } from "./noteAttachments.js";
 import { decodeNoteFormat, formatsRoundTripEqual, trimTrailingWhitespace, type FormatParagraph } from "./noteFormat.js";
 import { decodeNoteString } from "./noteText.js";
@@ -12,9 +12,8 @@ import { UNKNOWN_CONTENT_BANNER } from "./unknownContent.js";
 export type OkNoteDecodeResult = {
   status: "ok";
   title: string;
-  /** The note's actual first line - what a filename-as-title vault names the
-   * file after. Distinct from `title`, which is Apple's truncated, cosmetic
-   * display metadata. */
+  /** The full first text line, or the independent display title when the
+   * first line contains only embedded objects. Used to name the file. */
   titleLine: string;
   /** The note's plain visible text - what the CRDT document stores, and
    * what push's text splice operates on. */
@@ -129,11 +128,13 @@ function classifyNoteBody(record: CloudKitRecord, options: ClassifyNoteOptions):
   }
 
   const title = decodeTitleField(record.fields.TitleEncrypted);
-  // The note's real first line, as distinct from `title`: TitleEncrypted is
-  // cosmetic display metadata that devices re-derive and that Apple truncates
-  // at ~76 characters, so it's the wrong thing to name a file after when the
-  // file name has to carry the title faithfully.
-  const titleLine = bodyText.split(/\r\n?|\n/)[0] ?? "";
+  // Keep ordinary titles in full, rather than Apple's truncated display
+  // metadata. An object-only first line instead has an independent title;
+  // its document remains intact so the attachment is never stripped.
+  const displayTitle = title.replaceAll(OBJECT_REPLACEMENT_CHARACTER, "");
+  const titleLine = hasEmbedOnlyFirstLine(bodyText)
+    ? (displayTitle.trim() ? displayTitle : "Untitled")
+    : bodyText.split(/\r\n?|\n/)[0] ?? "";
   const embedSlots = decodeNoteEmbedSlots(compressed);
   if (embedSlots === undefined) {
     // The embed structure defies the model verified against real captures
