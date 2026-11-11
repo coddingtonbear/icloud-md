@@ -115,6 +115,14 @@ test("prepares only UserTitle and note title/date with both snapshot CAS tags", 
   assert.equal(result.updates[1].recordChangeTag, "drawing-tag");
 });
 
+test("accepts the project's default Notes folder record name", () => {
+  const f = fixture();
+  f.options.entry.folderRecordName = "DefaultFolder-CloudKit";
+  f.note.parentRecordName = "DefaultFolder-CloudKit";
+  f.note.fields.Folder!.value = { recordName: "DefaultFolder-CloudKit" };
+  assert.equal(prepareDrawingTitleRename(f.note, f.attachment, f.options).ok, true);
+});
+
 const refusals: Array<[string, (f: ReturnType<typeof fixture>) => void]> = [
   ["changed local body", f => { f.options.localText += "edited"; }],
   ["missing base", f => { Object.assign(f.options, { baseText: undefined }); }],

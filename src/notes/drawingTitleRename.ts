@@ -53,7 +53,7 @@ export function prepareDrawingTitleRename(
   if (!newTitle.trim() || /[\r\n\0\uFFFC]/.test(newTitle) || !Number.isSafeInteger(modificationDateMs) || modificationDateMs < 0) {
     return refuse("Unsupported drawing title or modification date");
   }
-  if (!isNoteId(options.recordName) || !isNoteId(attachment.recordName) || !entry.folderRecordName || !isNoteId(entry.folderRecordName) ||
+  if (!isNoteId(options.recordName) || !isNoteId(attachment.recordName) || !entry.folderRecordName ||
       note.recordType !== "Note" || attachment.recordType !== "Attachment" || !sameId(note.recordName, options.recordName) ||
       sameId(note.recordName, attachment.recordName)) {
     return refuse("Invalid drawing record identity");
