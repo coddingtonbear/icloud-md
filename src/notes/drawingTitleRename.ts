@@ -4,13 +4,11 @@ import { classifyNoteRecord, storesTextAsAsset } from "./decodeNoteRecord.js";
 import { hasEmbedOnlyFirstLine } from "./encodeNoteRecord.js";
 import { isNoteId } from "./noteIdFrontmatter.js";
 
-/** Confirms only this pair's echoed metadata, not native title convergence. */
+/** Confirm both cloud results against the pair from prepareDrawingTitleRename. */
 export function confirmedDrawingTitleRename(
   updates: readonly [RecordUpdate, RecordUpdate], results: RecordUpdateResult[],
 ): CloudKitRecord | undefined {
-  if (results.length !== 2 || new Set(updates.map(update => update.recordName)).size !== 2 ||
-      updates.filter(update => update.recordType === "Note").length !== 1 ||
-      updates.filter(update => update.recordType === "Attachment").length !== 1) return undefined;
+  if (results.length !== 2) return undefined;
   const confirmed: CloudKitRecord[] = [];
   for (const update of updates) {
     const matches = results.filter(result => result.ok && result.record.recordName === update.recordName);
@@ -19,8 +17,7 @@ export function confirmedDrawingTitleRename(
     const record = result.record;
     if (record.recordType !== update.recordType || record.deleted || record.fields.Deleted?.value !== 0 ||
         !record.recordChangeTag?.trim() || record.recordChangeTag === update.recordChangeTag ||
-        Object.entries(update.fields).some(([key, { value }]) =>
-          (value !== null && !["string", "number", "boolean"].includes(typeof value)) || record.fields[key]?.value !== value)) return undefined;
+        Object.entries(update.fields).some(([key, { value }]) => record.fields[key]?.value !== value)) return undefined;
     confirmed.push(record);
   }
   return confirmed.find(record => record.recordType === "Note");

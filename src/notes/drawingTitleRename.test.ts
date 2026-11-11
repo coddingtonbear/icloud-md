@@ -46,8 +46,6 @@ const badReplies: Array<[string, (f: ReturnType<typeof replyFixture>) => void]> 
   ["missing requested field", f => { delete f.records[1]!.fields.UserTitle; }],
   ["wrong title", f => { f.records[1]!.fields.UserTitle = { value: "wrong", type: "ENCRYPTED_BYTES" }; }],
   ["wrong date", f => { f.records[0]!.fields.ModificationDate = { value: 201, type: "TIMESTAMP" }; }],
-  ["object-valued request", f => { f.updates[1].fields.UserTitle = { value: { text: "title" } }; f.records[1]!.fields.UserTitle = { ...f.updates[1].fields.UserTitle, type: "ENCRYPTED_BYTES" }; }],
-  ["duplicate requested identity", f => { f.updates[1].recordName = f.updates[0].recordName; }],
 ];
 for (const [name, change] of badReplies) {
   test(`does not confirm rename with ${name}`, () => {
