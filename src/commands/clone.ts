@@ -102,7 +102,7 @@ export async function runClone(
     fetchSharedNoteRecords(auth.session, auth.ckdatabasewsUrl, auth.dsid, {}, onPage),
     backfillNewPrivateNoteBodies(auth.session, auth.ckdatabasewsUrl, auth.dsid, records, {}),
   ]);
-  const heldBack = new Set(privateBackfill.heldBack);
+  const pendingBodies = new Set(privateBackfill.pending);
 
   const summary: CloneSummary = {
     written: 0,
@@ -116,14 +116,14 @@ export async function runClone(
   for (const skipped of skippedZones) {
     summary.notices.push({ level: "warn", message: skippedZoneNotice(skipped) });
   }
-  if (heldBack.size > 0) {
+  if (pendingBodies.size > 0) {
     const why =
       privateBackfill.lookupError === undefined
         ? "came through without their text, even when looked up"
         : `came through without their text, and looking them up failed (${privateBackfill.lookupError})`;
     summary.notices.push({
       level: "warn",
-      message: `${heldBack.size} note(s) ${why} - they weren't cloned; the first pull will look for them again`,
+      message: `${pendingBodies.size} note(s) ${why} - they weren't cloned; the next pull will look them up again`,
     });
   }
   const notes: CloneState["notes"] = {};
@@ -169,8 +169,8 @@ export async function runClone(
           continue;
         }
         if (decoded.status === "unsyncable") {
-          // A held-back note is only waiting, and has its own notice.
-          if (!heldBack.has(record.recordName)) {
+          // A pending note is only waiting, and has its own notice.
+          if (!pendingBodies.has(record.recordName)) {
             summary.skippedUndecodable += 1;
           }
           continue;
@@ -250,16 +250,14 @@ export async function runClone(
   await writeCloneState(targetDir, {
     account: { appleId: auth.appleId, dsid: auth.dsid },
     titleMode,
-    // No token while notes are held back: the first pull then walks the zone
-    // from scratch and is delivered them again (along with every other note,
-    // re-applied unchanged).
-    syncToken: heldBack.size > 0 ? undefined : syncToken,
+    syncToken,
     sharedZoneSyncTokens,
     notes,
     folders: layout.stateFolders,
     sharerHomes: layout.stateSharerHomes,
     attachments,
     tableAttachments,
+    pendingBodyLookups: pendingBodies.size > 0 ? [...pendingBodies] : undefined,
   });
 
   return summary;

@@ -86,9 +86,9 @@ test("a new private note listed without its text is looked up and filled in", as
   try {
     const records = [noteWithText("has-text"), bodylessNote("new-note")];
 
-    const { heldBack } = await backfillNewPrivateNoteBodies(session, "https://ckdatabasews.example", "12345", records, {});
+    const { pending } = await backfillNewPrivateNoteBodies(session, "https://ckdatabasews.example", "12345", records, {});
 
-    assert.deepEqual(heldBack, []);
+    assert.deepEqual(pending, []);
     assert.deepEqual(
       mock.lookups.map((lookup) => lookup.recordNames),
       [["new-note"]],
@@ -101,7 +101,7 @@ test("a new private note listed without its text is looked up and filled in", as
   }
 });
 
-test("a new note the lookup can't fill is returned, so the caller holds its sync token back", async () => {
+test("a new note the lookup can't fill is returned as pending, for the caller to store", async () => {
   const mock = installFetchMock((requested) =>
     requested.map((recordName) =>
       recordName === "still-missing"
@@ -112,9 +112,9 @@ test("a new note the lookup can't fill is returned, so the caller holds its sync
   try {
     const records = [bodylessNote("filled"), bodylessNote("still-missing")];
 
-    const { heldBack } = await backfillNewPrivateNoteBodies(session, "https://ckdatabasews.example", "12345", records, {});
+    const { pending } = await backfillNewPrivateNoteBodies(session, "https://ckdatabasews.example", "12345", records, {});
 
-    assert.deepEqual(heldBack, ["still-missing"]);
+    assert.deepEqual(pending, ["still-missing"]);
     assert.equal(records[0]?.fields.TextDataEncrypted?.value, "Ym9keQ==");
     assert.equal(records[1]?.fields.TextDataEncrypted, undefined);
   } finally {
@@ -122,25 +122,29 @@ test("a new note the lookup can't fill is returned, so the caller holds its sync
   }
 });
 
-test("a failed lookup holds every looked-up note back instead of failing the sync", async () => {
+test("a failed lookup leaves every looked-up note pending instead of failing the sync", async () => {
   const realFetch = globalThis.fetch;
   let lookupCalls = 0;
   globalThis.fetch = (async (url: Parameters<typeof fetch>[0]) => {
     const href = String(url);
     if (href.includes("/private/records/lookup")) {
       lookupCalls += 1;
-      return new Response("Service Unavailable", { status: 503 });
+      // Not a throttle status, so `fetchWithThrottleRetry` doesn't wait and retry.
+      return new Response("Internal Server Error", { status: 500 });
     }
     throw new Error(`Unexpected fetch in test: ${href}`);
   }) as typeof fetch;
   try {
     const records = [noteWithText("has-text"), bodylessNote("new-a"), bodylessNote("new-b")];
 
-    const result = await backfillNewPrivateNoteBodies(session, "https://ckdatabasews.example", "12345", records, {});
+    const result = await backfillNewPrivateNoteBodies(session, "https://ckdatabasews.example", "12345", records, {}, [
+      "carried",
+    ]);
 
     assert.equal(lookupCalls, 1);
-    assert.deepEqual(result.heldBack, ["new-a", "new-b"]);
-    assert.match(result.lookupError ?? "", /HTTP 503/);
+    assert.deepEqual(result.pending, ["new-a", "new-b", "carried"]);
+    assert.match(result.lookupError ?? "", /HTTP 500/);
+    assert.equal(records.length, 3);
     assert.equal(records[1]?.fields.TextDataEncrypted, undefined);
   } finally {
     globalThis.fetch = realFetch;
@@ -158,15 +162,15 @@ test("a successful lookup reports no lookup error", async () => {
       {},
     );
 
-    assert.deepEqual(result, { heldBack: [] });
+    assert.deepEqual(result, { pending: [] });
   } finally {
     mock.restore();
   }
 });
 
-test("a note whose text lives in a TextDataAsset is skipped, not held back for", async () => {
-  // Its text never arrives inline, so holding the token back for it would
-  // pin the vault's private sync token in place for good.
+test("a note whose text lives in a TextDataAsset is skipped, not kept pending", async () => {
+  // Its text never arrives inline, so it would be looked up on every pull
+  // for good.
   const mock = installFetchMock((requested) =>
     requested.map((recordName) => ({
       recordName,
@@ -178,9 +182,9 @@ test("a note whose text lives in a TextDataAsset is skipped, not held back for",
   try {
     const records = [bodylessNote("large-note")];
 
-    const { heldBack } = await backfillNewPrivateNoteBodies(session, "https://ckdatabasews.example", "12345", records, {});
+    const { pending } = await backfillNewPrivateNoteBodies(session, "https://ckdatabasews.example", "12345", records, {});
 
-    assert.deepEqual(heldBack, []);
+    assert.deepEqual(pending, []);
     assert.equal(mock.lookups.length, 1);
   } finally {
     mock.restore();
@@ -202,12 +206,113 @@ test("tracked, deleted, trashed and non-Note records are never looked up", async
       noteWithText("has-text"),
     ];
 
-    const { heldBack } = await backfillNewPrivateNoteBodies(session, "https://ckdatabasews.example", "12345", records, {
+    const { pending } = await backfillNewPrivateNoteBodies(session, "https://ckdatabasews.example", "12345", records, {
       tracked: { file: "Notes/Tracked.md" },
     });
 
-    assert.deepEqual(heldBack, []);
+    assert.deepEqual(pending, []);
     assert.deepEqual(mock.lookups, []);
+  } finally {
+    mock.restore();
+  }
+});
+
+test("a carried note the walk no longer lists is looked up and appended once it has its text", async () => {
+  const mock = installFetchMock((requested) => requested.map(fullLookupEntry));
+  try {
+    // An incremental walk past the note: nothing about it is listed.
+    const records = [noteWithText("unrelated")];
+
+    const { pending } = await backfillNewPrivateNoteBodies(session, "https://ckdatabasews.example", "12345", records, {}, [
+      "carried",
+    ]);
+
+    assert.deepEqual(pending, []);
+    assert.deepEqual(
+      mock.lookups.map((lookup) => lookup.recordNames),
+      [["carried"]],
+    );
+    assert.deepEqual(
+      records.map((record) => record.recordName),
+      ["unrelated", "carried"],
+    );
+    assert.equal(records[1]?.fields.TextDataEncrypted?.value, "Ym9keQ==");
+  } finally {
+    mock.restore();
+  }
+});
+
+test("a carried note that still has no text stays pending, alongside newly listed ones", async () => {
+  const mock = installFetchMock((requested) =>
+    requested.map((recordName) => (recordName === "filled" ? fullLookupEntry(recordName) : bodylessNote(recordName))),
+  );
+  try {
+    const records = [bodylessNote("filled"), bodylessNote("new")];
+
+    const { pending } = await backfillNewPrivateNoteBodies(session, "https://ckdatabasews.example", "12345", records, {}, [
+      "carried",
+    ]);
+
+    assert.deepEqual(pending, ["new", "carried"]);
+    assert.deepEqual(
+      mock.lookups.map((lookup) => lookup.recordNames),
+      [["filled", "new", "carried"]],
+    );
+  } finally {
+    mock.restore();
+  }
+});
+
+test("a carried note that is gone, trashed or tracked by now is dropped from the list", async () => {
+  const mock = installFetchMock((requested) =>
+    requested.map((recordName) =>
+      recordName === "gone"
+        ? { recordName, serverErrorCode: "NOT_FOUND", reason: "record not found" }
+        : {
+            ...bodylessNote(recordName),
+            fields: { Folder: { value: { recordName: "TrashFolder-CloudKit", action: "VALIDATE" }, type: "REFERENCE" } },
+          },
+    ),
+  );
+  try {
+    const records: CloudKitRecord[] = [];
+
+    const { pending } = await backfillNewPrivateNoteBodies(
+      session,
+      "https://ckdatabasews.example",
+      "12345",
+      records,
+      { tracked: { file: "Notes/Tracked.md" } },
+      ["gone", "trashed", "tracked"],
+    );
+
+    assert.deepEqual(pending, []);
+    // The tracked one has arrived by another route, so it isn't asked for.
+    assert.deepEqual(
+      mock.lookups.map((lookup) => lookup.recordNames),
+      [["gone", "trashed"]],
+    );
+  } finally {
+    mock.restore();
+  }
+});
+
+test("a carried note the walk lists again is looked up once, not appended a second time", async () => {
+  const mock = installFetchMock((requested) => requested.map(fullLookupEntry));
+  try {
+    const records = [bodylessNote("carried")];
+
+    const { pending } = await backfillNewPrivateNoteBodies(session, "https://ckdatabasews.example", "12345", records, {}, [
+      "carried",
+      "carried",
+    ]);
+
+    assert.deepEqual(pending, []);
+    assert.deepEqual(
+      mock.lookups.map((lookup) => lookup.recordNames),
+      [["carried"]],
+    );
+    assert.equal(records.length, 1);
   } finally {
     mock.restore();
   }

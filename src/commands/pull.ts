@@ -160,9 +160,16 @@ export async function runPull(
         return shared;
       },
     ),
-    backfillNewPrivateNoteBodies(auth.session, ckdatabasewsUrl, auth.dsid, records, state.notes),
+    backfillNewPrivateNoteBodies(
+      auth.session,
+      ckdatabasewsUrl,
+      auth.dsid,
+      records,
+      state.notes,
+      state.pendingBodyLookups,
+    ),
   ]);
-  const heldBack = new Set(privateBackfill.heldBack);
+  const pendingBodies = new Set(privateBackfill.pending);
 
   const notes: CloneState["notes"] = { ...state.notes };
   const attachments: NonNullable<CloneState["attachments"]> = { ...state.attachments };
@@ -246,7 +253,7 @@ export async function runPull(
     summary.notices.push({ level: "warn", message: skippedZoneNotice(skipped, owner) });
   }
 
-  if (heldBack.size > 0) {
+  if (pendingBodies.size > 0) {
     const why =
       privateBackfill.lookupError === undefined
         ? "came through without their text, even when looked up"
@@ -254,8 +261,8 @@ export async function runPull(
     summary.notices.push({
       level: "warn",
       message:
-        `${heldBack.size} new note(s) ${why} - they were skipped, ` +
-        "and this vault's sync token was kept where it was so the next pull looks for them again",
+        `${pendingBodies.size} new note(s) ${why} - they were skipped, ` +
+        "and the next pull will look them up again",
     });
   }
 
@@ -321,7 +328,7 @@ export async function runPull(
           // it would sever the sync relationship over a transient gap, so a
           // tracked note is left exactly as it is; the shared-database fetch
           // already holds back whole zones with missing bodies, and a new
-          // private note is looked up and held back for (see
+          // private note is looked up and kept pending (see
           // `backfillNewPrivateNoteBodies`), so this is the last line of
           // defense, not the usual path.
           if (decoded.reason === "missing-body") {
@@ -330,8 +337,8 @@ export async function runPull(
                 level: "warn",
                 message: `${existing.file}: the server sent this note without its text this run - left unchanged and still tracked`,
               });
-            } else if (!heldBack.has(record.recordName)) {
-              // A held-back note is only waiting, and has its own notice.
+            } else if (!pendingBodies.has(record.recordName)) {
+              // A pending note is only waiting, and has its own notice.
               summary.skippedNewUnsyncable += 1;
             }
             continue;
@@ -777,12 +784,7 @@ export async function runPull(
 
   await writeCloneState(targetDir, {
     account: state.account,
-    // Held back: the next pull walks from the old token and is delivered the
-    // notes still missing their text again. Everything else in that window
-    // comes again too and is re-applied - harmless, since the remote text is
-    // what this run already wrote and recorded as the base copy, but those
-    // notes show up in that pull's changes a second time.
-    syncToken: heldBack.size > 0 ? state.syncToken : syncToken,
+    syncToken,
     sharedZoneSyncTokens,
     // Carried through untouched - omitting this here used to silently wipe
     // the vault's replica identity on every pull, forcing the next push to
@@ -795,6 +797,9 @@ export async function runPull(
     attachments,
     tableAttachments,
     trashed,
+    // Replaced, not merged: the backfill was handed the stored list and
+    // returned everything still waiting.
+    pendingBodyLookups: pendingBodies.size > 0 ? [...pendingBodies] : undefined,
   });
 
   return summary;

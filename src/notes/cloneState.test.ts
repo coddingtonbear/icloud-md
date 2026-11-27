@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { CorruptStateFileError, UnsupportedVaultLayoutError } from "../errors.js";
@@ -323,6 +323,32 @@ test("throws CorruptStateFileError for a malformed trashed entry", () =>
       JSON.stringify({ layoutVersion: CURRENT_LAYOUT_VERSION, notes: {}, trashed: { "REC-1": { file: "Gone.md" } } }),
       "utf-8",
     );
+
+    await assert.rejects(readCloneState(dir), CorruptStateFileError);
+  }));
+
+test("round-trips pendingBodyLookups, so a note still waiting for its text is asked for again", () =>
+  withTempDir(async (dir) => {
+    await writeCloneState(dir, { syncToken: "token", notes: {}, pendingBodyLookups: ["REC-1", "REC-2"] });
+
+    assert.deepEqual((await readCloneState(dir))?.pendingBodyLookups, ["REC-1", "REC-2"]);
+  }));
+
+test("reads a state file with no pendingBodyLookups, or an empty one, as nothing waiting", () =>
+  withTempDir(async (dir) => {
+    await writeCloneState(dir, { syncToken: "token", notes: {} });
+    assert.equal((await readCloneState(dir))?.pendingBodyLookups, undefined);
+
+    await writeCloneState(dir, { syncToken: "token", notes: {}, pendingBodyLookups: [] });
+    assert.equal((await readCloneState(dir))?.pendingBodyLookups, undefined);
+  }));
+
+test("refuses a state file whose pendingBodyLookups isn't a list of record names", () =>
+  withTempDir(async (dir) => {
+    await writeCloneState(dir, { syncToken: "token", notes: {} });
+    const statePath = path.join(dir, ".icloud-md", "state.json");
+    const raw = JSON.parse(await readFile(statePath, "utf-8")) as Record<string, unknown>;
+    await writeFile(statePath, JSON.stringify({ ...raw, pendingBodyLookups: ["REC-1", 2] }));
 
     await assert.rejects(readCloneState(dir), CorruptStateFileError);
   }));
