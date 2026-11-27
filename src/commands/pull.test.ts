@@ -6,7 +6,7 @@ import path from "node:path";
 import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { localFileState } from "../notes/localFileState.js";
 import type { CloneStateNoteEntry } from "../notes/cloneState.js";
-import { mergeRemoteChangeIntoLocalFile } from "./pull.js";
+import { mergeRemoteChangeIntoLocalFile, newNoteFile } from "./pull.js";
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), "pull-test-"));
@@ -156,4 +156,41 @@ test("a merge preserves a user's own frontmatter keys alongside the id", () =>
     const written = await readFile(path.join(dir, "Notes/Note.md"), "utf-8");
     assert.match(written, /tags:/);
     assert.match(written, new RegExp(`apple-note-id: ${MERGE_NOTE_ID}`));
+  }));
+
+// A new remote note is named against the disk, not just tracked state: an
+// unpushed local file with the same title is untracked, and used to be
+// written straight over.
+
+test("a new remote note never lands on an untracked local file of the same name", () =>
+  withTempDir(async (dir) => {
+    await writeVaultFile(dir, "Notes/Groceries.md", "MINE, NOT PUSHED YET");
+
+    const file = await newNoteFile(dir, "Notes", "Groceries", "in-body", new Map());
+
+    assert.equal(file, "Notes/Groceries 2.md");
+    assert.equal(await readFile(path.join(dir, "Notes/Groceries.md"), "utf-8"), "MINE, NOT PUSHED YET");
+  }));
+
+test("a new remote note still takes its plain name when nothing is there", () =>
+  withTempDir(async (dir) => {
+    await mkdir(path.join(dir, "Notes"), { recursive: true });
+
+    const file = await newNoteFile(dir, "Notes", "Groceries", "filename", new Map());
+
+    assert.equal(file, "Notes/Groceries.md");
+  }));
+
+test("new notes in one pull skip both tracked names and untracked files, and claim what they take", () =>
+  withTempDir(async (dir) => {
+    // "Groceries.md" is tracked (and missing locally - still spoken for);
+    // "Groceries 2.md" is the user's own untracked file.
+    await writeVaultFile(dir, "Notes/Groceries 2.md", "untracked");
+    const usedFileNames = new Map([["Notes", new Set(["Groceries.md"])]]);
+
+    const first = await newNoteFile(dir, "Notes", "Groceries", "in-body", usedFileNames);
+    const second = await newNoteFile(dir, "Notes", "Groceries", "in-body", usedFileNames);
+
+    assert.equal(first, "Notes/Groceries 3.md");
+    assert.equal(second, "Notes/Groceries 4.md", "the first note's name is claimed before its file is written");
   }));

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { CloneState } from "./cloneState.js";
@@ -116,6 +116,45 @@ test("a basename collision in the target directory uniquifies and stays consiste
     assert.equal(notes["REC-STAY"]?.file, "Beta/Pie.md");
     assert.equal(notes["REC-MOVE"]?.file, "Beta/Pie 2.md");
     assert.equal(await readFile(path.join(root, "Beta/Pie 2.md"), "utf-8"), "moving");
+  }));
+
+test("a relocation never lands on an untracked file in the target directory", () =>
+  withTempDir(async (root) => {
+    const layout = buildVaultLayout(
+      [folderRecord("DefaultFolder-CloudKit", "Notes"), folderRecord("A", "Alpha"), folderRecord("B", "Beta")],
+      [],
+    );
+    const notes: CloneState["notes"] = {
+      REC: { file: "Alpha/Pie.md", recordChangeTag: "a", modificationDate: 1, folderRecordName: "B" },
+    };
+    await writeVaultFile(root, "Alpha/Pie.md", "moving");
+    // Not tracked - the user made it in Beta and hasn't pushed it.
+    await writeVaultFile(root, "Beta/Pie.md", "MINE, UNTRACKED");
+
+    const relocations = await reconcileNotePlacements(root, layout, notes, {});
+
+    assert.deepEqual(relocations, [{ from: "Alpha/Pie.md", to: "Beta/Pie 2.md" }]);
+    assert.equal(notes.REC?.file, "Beta/Pie 2.md");
+    assert.equal(await readFile(path.join(root, "Beta/Pie.md"), "utf-8"), "MINE, UNTRACKED");
+    assert.equal(await readFile(path.join(root, "Beta/Pie 2.md"), "utf-8"), "moving");
+  }));
+
+test("a case-only folder rename doesn't suffix the notes for colliding with themselves", () =>
+  withTempDir(async (root) => {
+    const layout = buildVaultLayout([folderRecord("DefaultFolder-CloudKit", "Notes"), folderRecord("R", "Recipes")], []);
+    const notes: CloneState["notes"] = {
+      REC: { file: "recipes/Pie.md", recordChangeTag: "a", modificationDate: 1, folderRecordName: "R" },
+    };
+    await writeVaultFile(root, "recipes/Pie.md", "moving");
+    // On APFS or NTFS, "Recipes/Pie.md" resolves to "recipes/Pie.md". A hard
+    // link reproduces that here: the target name is the source file itself.
+    await mkdir(path.join(root, "Recipes"));
+    await link(path.join(root, "recipes/Pie.md"), path.join(root, "Recipes/Pie.md"));
+
+    const relocations = await reconcileNotePlacements(root, layout, notes, {});
+
+    assert.deepEqual(relocations, [{ from: "recipes/Pie.md", to: "Recipes/Pie.md" }]);
+    assert.equal(notes.REC?.file, "Recipes/Pie.md");
   }));
 
 test("an attachment collision rewrites the note body and base copy identically", () =>

@@ -7,6 +7,7 @@ import {
   isNoteId,
   readNoteId,
   readNoteTitle,
+  readNoteTitleKey,
   setNoteId,
   setNoteTitle,
 } from "./noteIdFrontmatter.js";
@@ -147,6 +148,23 @@ test("setNoteId refuses to write an id readNoteId wouldn't accept", () => {
 // --- apple-note-title, for the title a file name can't hold ------------------
 
 const LONG_TITLE = "A title far too long to be a file name, ".repeat(3);
+
+test("readNoteTitleKey only reads a removal from an id-stamped envelope", () => {
+  assert.deepEqual(readNoteTitleKey(`---\napple-note-id: ${ID}\napple-note-title: Some title\n---\n\n`), {
+    kind: "stated",
+    title: "Some title",
+  });
+  // The envelope is there, carries the id, and the key is gone.
+  assert.deepEqual(readNoteTitleKey(`---\napple-note-id: ${ID}\ntags: [a]\n---\n\n`), { kind: "absent" });
+  // No envelope (an older restore's output), or one with no usable id:
+  // nothing says the key was ever there to remove.
+  assert.deepEqual(readNoteTitleKey(""), { kind: "unmarked" });
+  assert.deepEqual(readNoteTitleKey("---\ntags: [a]\n---\n\n"), { kind: "unmarked" });
+  assert.deepEqual(readNoteTitleKey("---\napple-note-id: not-a-uuid\n---\n\n"), { kind: "unmarked" });
+  // Mid-edit: broken YAML, or a key that isn't a title.
+  assert.deepEqual(readNoteTitleKey("---\ntags: [a\n---\n\n"), { kind: "unreadable" });
+  assert.deepEqual(readNoteTitleKey(`---\napple-note-id: ${ID}\napple-note-title: ""\n---\n\n`), { kind: "unreadable" });
+});
 
 test("readNoteTitle finds a recorded title, and treats anything unusable as absent", () => {
   assert.equal(readNoteTitle(`---\napple-note-title: Some title\n---\n\n`), "Some title");

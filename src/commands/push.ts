@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveFolderAccount } from "../auth/folderAuth.js";
 import { planFolderCreates } from "../notes/folderCreate.js";
@@ -21,10 +21,19 @@ import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
 import { writeCloneState, type CloneState, type CloneStateNoteEntry, type TitleMode } from "../notes/cloneState.js";
 import { migrationReporter, openVault } from "../notes/vaultMigrations.js";
 import { pendingRenameTarget, settlePendingRenames } from "../notes/pendingRename.js";
-import { NOTE_ID_KEY, NOTE_TITLE_KEY, readNoteId, readNoteTitle, setNoteId } from "../notes/noteIdFrontmatter.js";
+import {
+  NOTE_ID_KEY,
+  NOTE_TITLE_KEY,
+  readNoteId,
+  readNoteTitle,
+  readNoteTitleKey,
+  setNoteId,
+  type NoteTitleKey,
+} from "../notes/noteIdFrontmatter.js";
 import { carriedTitleSpelling, representabilityProblem, titleIsRepresentable } from "../notes/titleFilename.js";
 import { resolveNoteIds } from "../notes/noteIdPairing.js";
-import { classifyNoteRecord, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
+import { listUntrackedMarkdownFiles } from "../notes/untrackedFiles.js";
+import { classifyNoteRecord, storesTextAsAsset, TEXT_AS_ASSET_REASON, type NoteDecodeResult } from "../notes/decodeNoteRecord.js";
 import { CorruptStateFileError, NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { buildNoteCreateFields, buildNoteMoveFields, buildNoteTrashFields, buildNoteUpdateFields } from "../notes/encodeNoteRecord.js";
 import { noteDirOf, stateDirIndex, type StateDirInfo } from "../notes/folderLayout.js";
@@ -40,7 +49,8 @@ import { countUnchangedNotes, serializePlanEntry, stripFilePrefix, type PlanEntr
 import { decodeNoteFormat, formatsRoundTripEqual, type FormatParagraph } from "../notes/noteFormat.js";
 import { compressNoteDocument, decodeNoteBodyText, decodeNoteString, decompressNoteDocument } from "../notes/noteText.js";
 import { joinFrontmatter, splitFrontmatter } from "../notes/frontmatter.js";
-import { parseNoteMarkdown } from "../notes/parseNoteMarkdown.js";
+import { parseNoteMarkdown, type ParseNoteMarkdownResult } from "../notes/parseNoteMarkdown.js";
+import { readsBackFaithfully } from "../notes/renderNoteMarkdown.js";
 import {
   restoreTitleParagraphText,
   splitTitleParagraph,
@@ -129,8 +139,15 @@ interface PushCandidate {
   frontmatter: string;
   /** `apple-note-title` from that envelope, in a filename-as-title vault:
    * the title the file asks this note to have. Undefined whenever the file
-   * states none, which is the common case - the file name says it instead. */
+   * states none, which is the common case - the file name says it instead -
+   * except when the file has just dropped a key the last sync recorded:
+   * then it's the file name's title, which the removal asks for. */
   requestedTitle?: string | undefined;
+  /** What state records as `frontmatterTitle` once the title is settled:
+   * the `apple-note-title` the file actually carries, so a removed key leaves
+   * nothing behind to be read as a request again - or, for a key that can't
+   * be read, what state already said. See `titleKeyIntent`. */
+  statedTitle?: string | undefined;
   /** The body matches the base copy - this is a candidate solely because its
    * `apple-note-title` isn't the one state recorded, so the plan may settle
    * it against the live title alone (and refuse a shared note only if a
@@ -270,16 +287,49 @@ export async function buildPushPlan(
     /** `apple-note-title`, present only on a note whose title a file name
      * can't hold - where it outranks the name as the note's real title. */
     noteTitle?: string | undefined;
+    /** The same key read strictly enough to tell a removal from a key that
+     * can't be read - what a move needs to honor a dropped title. */
+    noteTitleKey: NoteTitleKey;
   }[] = [];
-  for (const file of await listUntrackedMarkdownFiles(targetDir, state)) {
+  const markdownFiles = await listUntrackedMarkdownFiles(targetDir, state.notes, state.attachments);
+  // `attachments/` is reserved for attachment files, so a note put there is
+  // never pushed - but it shouldn't look, from status or push, as though it
+  // had been. One notice for all of them: some tools keep markdown there on
+  // purpose (Excalidraw drawings, say), and a line per file would bury
+  // everything else `status` has to say.
+  const strays = markdownFiles.inAttachmentDirs;
+  if (strays.length > 0) {
+    notices.push({
+      level: "warn",
+      message:
+        `${strays.length === 1 ? "1 markdown file is" : `${strays.length} markdown files are`} inside an ` +
+        `"attachments" directory, which holds attachment files only, so ${strays.length === 1 ? "it isn't" : "they aren't"} ` +
+        `pushed - move a note to another folder to sync it: ${strays.join(", ")}`,
+    });
+  }
+  for (const file of markdownFiles.files) {
     // Body only for the note itself: an untracked file's local-only
     // frontmatter never reaches parse/create or move-matching (which
     // compares against body-only base copies). The envelope is still read
     // here, because in an id-recording vault it carries the one thing that
     // says which note this file *is*.
     const { frontmatter, body } = splitFrontmatter(await readFile(path.join(targetDir, file), "utf-8"), { filenameAsTitle });
-    untracked.push({ file, localText: body, noteId: readNoteId(frontmatter), noteTitle: readNoteTitle(frontmatter) });
+    untracked.push({
+      file,
+      localText: body,
+      noteId: readNoteId(frontmatter),
+      noteTitle: readNoteTitle(frontmatter),
+      noteTitleKey: readNoteTitleKey(frontmatter),
+    });
   }
+  const titleKeys = new Map(untracked.map((entry) => [entry.file, entry.noteTitleKey]));
+  const noteIds = new Map(untracked.map((entry) => [entry.file, entry.noteId]));
+  // Every name a note file holds or held, for telling a name pull numbered
+  // from one that only ends in a number - see `mayBeNumberedName`.
+  const takenFiles = new Set(
+    [...Object.values(state.notes).map((entry) => entry.file), ...markdownFiles.files].map((file) => file.toLowerCase()),
+  );
+  const nameMayBeNumbered = (file: string): boolean => mayBeNumberedName(file, takenFiles);
   // A moved/renamed file is matched by id below, and only the entry above
   // knows what its envelope said.
   const recordedTitles = new Map(
@@ -311,19 +361,26 @@ export async function buildPushPlan(
     // note's current title is settled against the live record further down,
     // which is the only non-lossy comparison there is. In an in-body vault
     // the title is the first line and the key would be a second source of
-    // truth, so it isn't read at all.
-    const requestedTitle = filenameAsTitle ? readNoteTitle(frontmatter) : undefined;
+    // truth, so it isn't read at all. A removed key is a request too - see
+    // `titleKeyIntent`.
+    const titleKey = titleKeyIntent(readNoteTitleKey(frontmatter), entry, entry.file, { filenameAsTitle, nameMayBeNumbered });
+    const { requestedTitle, recordedTitle: statedTitle } = titleKey;
+    if (titleKey.notice !== undefined) {
+      notices.push({ level: "warn", message: titleKey.notice });
+    }
     const titleOnly = local.status === "clean";
-    if (titleOnly && (requestedTitle === undefined || requestedTitle === entry.frontmatterTitle)) {
+    if (titleOnly && statedTitle === entry.frontmatterTitle) {
       continue;
     }
 
     // A title-only candidate whose state predates `frontmatterTitle` is
     // ambiguous - the key may be pull's own record of the title, not a
-    // retitle request - so its shared-note refusal waits for the live-record
-    // comparison below rather than condemning a clean note here forever.
+    // retitle request - and so is a removed key, which may ask for the title
+    // the note already has. Either way its shared-note refusal waits for the
+    // live-record comparison below rather than condemning a clean note here
+    // forever.
     const sharedRefusal = sharedNoteWriteRefusal(state, entry);
-    if (sharedRefusal !== undefined && !(titleOnly && entry.frontmatterTitle === undefined)) {
+    if (sharedRefusal !== undefined && !(titleOnly && (entry.frontmatterTitle === undefined || statedTitle === undefined))) {
       entries.push({ kind: "update", file: entry.file, resolution: "refused", reason: sharedRefusal });
       continue;
     }
@@ -381,7 +438,7 @@ export async function buildPushPlan(
       });
       continue;
     }
-    updateCandidates.push({ recordName, entry, localText, frontmatter, requestedTitle, titleOnly });
+    updateCandidates.push({ recordName, entry, localText, frontmatter, requestedTitle, statedTitle, titleOnly });
   }
 
   // --- Local-move pairing: a missing tracked file plus an untracked one
@@ -547,6 +604,13 @@ export async function buildPushPlan(
      * (and for every in-body vault), where a file name means nothing
      * remotely and the move is metadata-only. */
     newTitle?: string | undefined;
+    /** The retitle is asked for by a removed `apple-note-title`, so undoing
+     * it means putting the key back, not renaming the file. */
+    keyRemoved: boolean;
+    /** `frontmatterTitle` for state once the move lands - the moved file's
+     * `apple-note-title`, so a key dropped on the way isn't read as a
+     * request again by the next plan. */
+    recordedTitle: string | undefined;
   }> = [];
   for (const pair of movePairs) {
     const toDir = noteDirOf(pair.toFile);
@@ -607,15 +671,24 @@ export async function buildPushPlan(
     // (which is why a note can sit at "Foo 2.md" while being titled "Foo")
     // never leaks into a title.
     // The envelope travels with the file, so `apple-note-title` is still
-    // the right answer after a move - see `titleExpressedByFile`.
-    const previousTitle = titleFromNoteFileName(pair.entry.file);
-    const newTitle = titleExpressedByFile(pair.toFile, recordedTitles);
-    const retitled = titleMode === "filename" && newTitle !== previousTitle;
+    // the right answer after a move - see `titleExpressedByFile` and
+    // `moveTitleIntent`.
+    const titleIntent = moveTitleIntent(
+      pair,
+      { titleKey: titleKeys.get(pair.toFile) ?? { kind: "unmarked" }, noteId: noteIds.get(pair.toFile) },
+      recordedTitles,
+      { filenameAsTitle, nameMayBeNumbered },
+    );
+    if (titleIntent.notice !== undefined) {
+      notices.push({ level: "warn", message: titleIntent.notice });
+    }
     readyMovePairs.push({
       ...pair,
       folderRecordName: info.folderRecordName as string,
       relocated,
-      newTitle: retitled ? newTitle : undefined,
+      newTitle: titleIntent.newTitle,
+      keyRemoved: titleIntent.keyRemoved,
+      recordedTitle: titleIntent.recordedTitle,
     });
   }
 
@@ -849,6 +922,15 @@ export async function buildPushPlan(
       entries.push({ ...base, resolution: "conflict", reason: 'changed remotely since the last pull - run "pull" first' });
       continue;
     }
+    if (storesTextAsAsset(record)) {
+      // A move sends `TextDataAsset: {}` (see `buildNoteRelocationFields`),
+      // never captured on a note that actually keeps its text there.
+      entries.push({
+        ...base,
+        reason: `this note ${TEXT_AS_ASSET_REASON}, so it can't be moved from here - rename the file back to ${pair.entry.file}, or move the note in Notes instead`,
+      });
+      continue;
+    }
 
     // Built during planning, like every other write, so `status` shows a
     // retitle that can't be applied as a refusal instead of discovering it
@@ -917,6 +999,7 @@ export async function buildPushPlan(
         state.notes[pair.recordName] = {
           ...pair.entry,
           file: pair.toFile,
+          frontmatterTitle: pair.recordedTitle,
           folderRecordName,
           recordChangeTag: current.recordChangeTag ?? "",
           modificationDate: modificationDateOf(current) || Date.now(),
@@ -968,6 +1051,16 @@ export async function buildPushPlan(
       });
       continue;
     }
+    if (storesTextAsAsset(record)) {
+      // Same unknown as a move: the trash-move sends `TextDataAsset: {}`.
+      entries.push({
+        kind: "delete",
+        file: entry.file,
+        resolution: "refused",
+        reason: `this note ${TEXT_AS_ASSET_REASON}, so it can't be deleted from here - delete it in Notes, or run "icloud-md restore ${entry.file}" to bring the file back`,
+      });
+      continue;
+    }
     entries.push({
       kind: "delete",
       file: entry.file,
@@ -1004,7 +1097,7 @@ export async function buildPushPlan(
     let payloadBase64: string;
     let plainText: string;
     try {
-      const parsed = parseNoteMarkdown(localText);
+      const parsed = parseLocalMarkdown(localText);
       if (parsed.status !== "ok") {
         entries.push({ kind: "create", file, resolution: "refused", reason: parsed.reason });
         continue;
@@ -1117,7 +1210,7 @@ export async function buildPushPlan(
   }
 
   for (const candidate of updateCandidates) {
-    const { recordName, entry, localText, frontmatter, requestedTitle } = candidate;
+    const { recordName, entry, localText, frontmatter, requestedTitle, statedTitle } = candidate;
     const record = recordsByName.get(recordName);
     if (!record || record.deleted === true) {
       entries.push({
@@ -1181,11 +1274,13 @@ export async function buildPushPlan(
     // title settles which: when they agree, the key was never an edit -
     // remember that in state so the next plan doesn't need this fetch - and
     // when they differ, a shared note's refusal applies now, to the retitle
-    // it actually is.
+    // it actually is. What's remembered is the key as the file has it, so a
+    // removed key that asked for the title the note already has is settled
+    // as removed.
     if (candidate.titleOnly) {
       const classified = classifyNoteRecord(record, { titleMode });
       if (classified.status === "ok" && requestedRetitle(classified, requestedTitle) === undefined) {
-        state.notes[recordName] = { ...entry, frontmatterTitle: requestedTitle };
+        state.notes[recordName] = { ...entry, frontmatterTitle: statedTitle };
         planningMutatedState = true;
         continue;
       }
@@ -1288,7 +1383,9 @@ export async function buildPushPlan(
               // The file's `apple-note-title` (when it has one) is now the
               // note's title as far as the server is concerned - record it so
               // the next plan reads the key as synced, not as a fresh request.
-              ...(requestedTitle !== undefined ? { frontmatterTitle: requestedTitle } : {}),
+              // A key the file dropped is dropped from state too, or the
+              // removal would read as a request on every later plan.
+              ...(filenameAsTitle ? { frontmatterTitle: statedTitle } : {}),
             };
             await applyNoteFileTimes(path.join(targetDir, entry.file), noteResult.record);
           }
@@ -1421,44 +1518,6 @@ export async function runPush(targetDir: string, options: PushOptions = {}): Pro
   return { dryRun, pushed, entries: results, unchanged, notices };
 }
 
-/** Untracked `.md` files anywhere in the vault, as vault-root-relative
- * POSIX paths - the raw material for the create half, the local-move
- * pairing, and the loose-file/unknown-folder refusals. Skips
- * dot-directories (the state dir, .git) and the reserved per-folder
- * `attachments/` directories. */
-async function listUntrackedMarkdownFiles(targetDir: string, state: CloneState): Promise<string[]> {
-  const tracked = new Set(Object.values(state.notes).map((entry) => entry.file));
-  const found: string[] = [];
-
-  const walk = async (dir: string): Promise<void> => {
-    let dirents;
-    try {
-      dirents = await readdir(path.join(targetDir, dir), { withFileTypes: true });
-    } catch (cause) {
-      if (isEnoent(cause)) {
-        return;
-      }
-      throw cause;
-    }
-    for (const dirent of dirents) {
-      if (dirent.name.startsWith(".")) {
-        continue;
-      }
-      const relative = dir === "" ? dirent.name : `${dir}/${dirent.name}`;
-      if (dirent.isDirectory()) {
-        if (dirent.name.toLowerCase() !== "attachments") {
-          await walk(relative);
-        }
-      } else if (dirent.isFile() && dirent.name.endsWith(".md") && !tracked.has(relative)) {
-        found.push(relative);
-      }
-    }
-  };
-
-  await walk("");
-  return found.sort();
-}
-
 /**
  * Builds and verifies every record update one candidate needs (the Note
  * record's own text, any table attachments, or both), or undefined (with
@@ -1485,6 +1544,15 @@ async function prepareUpdate(
   // The mode has to reach the classifier, not just this function: it decides
   // whether `markdownText` (which the local file is a copy of) omits the
   // title, and the round-trip gate has to run on that same projection.
+  if (storesTextAsAsset(record)) {
+    // Checked before classifying: the record re-read here has no inline
+    // text, so it would otherwise be refused as "(missing-body)".
+    summary.refused.push(
+      `${entry.file}: this note ${TEXT_AS_ASSET_REASON} - it can't be safely edited. ` +
+        `Run "icloud-md restore ${entry.file}" to discard your local edit.`,
+    );
+    return undefined;
+  }
   const classified = classifyNoteRecord(record, { titleMode });
   if (classified.status !== "ok") {
     const reason = classified.status === "unsyncable" ? classified.reason : classified.status;
@@ -1518,7 +1586,7 @@ async function prepareUpdate(
     );
   }
 
-  const parsed = parseNoteMarkdown(localText);
+  const parsed = parseLocalMarkdown(localText);
   if (parsed.status !== "ok") {
     summary.refused.push(`${entry.file}: ${parsed.reason}. Run "icloud-md restore ${entry.file}" to discard your local edit.`);
     return undefined;
@@ -1581,7 +1649,7 @@ async function prepareEmbedCandidate(
   }
   // The placeholder-form markdown (markers and table blocks re-spliced to
   // U+FFFC) is what parses back into the desired text + formatting.
-  const parsed = parseNoteMarkdown(plan.reconstructedBodyText);
+  const parsed = parseLocalMarkdown(plan.reconstructedBodyText);
   if (parsed.status !== "ok") {
     summary.refused.push(`${entry.file}: ${parsed.reason}. Run "icloud-md restore ${entry.file}" to discard your local edit.`);
     return undefined;
@@ -1702,16 +1770,23 @@ async function prepareEmbedCandidate(
  */
 export function prepareRetitle(
   record: CloudKitRecord,
-  pair: { entry: CloneStateNoteEntry; toFile: string; newTitle?: string | undefined },
+  pair: { entry: CloneStateNoteEntry; toFile: string; newTitle?: string | undefined; keyRemoved?: boolean | undefined },
   replicaId: Uint8Array,
   titleMode: TitleMode,
 ):
   | { ok: true; retitle: { payloadBase64: string; plainText: string } | undefined }
   | { ok: false; resolution: "refused" | "conflict"; reason: string } {
+  // Undo whatever asked for the retitle: a new name, a removed key, or both.
+  const oldName = path.posix.basename(pair.entry.file);
+  const renamed = path.posix.basename(pair.toFile) !== oldName;
+  const undo =
+    pair.keyRemoved === true
+      ? `put "${NOTE_TITLE_KEY}" back${renamed ? ` and rename the file back to ${oldName}` : ""}`
+      : `rename the file back to ${oldName}`;
   const refused = (reason: string): { ok: false; resolution: "refused"; reason: string } => ({
     ok: false,
     resolution: "refused",
-    reason: `${reason} - rename the file back to ${path.posix.basename(pair.entry.file)}, or retitle the note in Notes instead`,
+    reason: `${reason} - ${undo}, or retitle the note in Notes instead`,
   });
 
   const classified = classifyNoteRecord(record, { titleMode });
@@ -1792,6 +1867,106 @@ export function titleExpressedByFile(file: string, recordedTitles: ReadonlyMap<s
 }
 
 /**
+ * What a tracked note's `apple-note-title` asks of push, in a vault where the
+ * file name is the title (an in-body vault never reads the key, and keeps
+ * whatever state recorded).
+ *
+ * `requestedTitle` is the title the file asks for: the key's value, or - when
+ * a key the last sync recorded has been removed - the title the file name
+ * spells, since that's the only other title the removal could mean, and
+ * without it there would be no way to drop a title pull had to write out.
+ * `recordedTitle` is what state should hold as `frontmatterTitle` once that's
+ * settled, so a clean note whose two agree has nothing to push.
+ *
+ * Three readings are deliberately not requests. A key that can't be read
+ * (YAML that doesn't parse, an empty value) is a file mid-edit, and a file
+ * with no id-stamped envelope never said anything about the key (see
+ * `NoteTitleKey`), so in both state's value stands and nothing is asked.
+ * And a removal from a file whose name may be one pull numbered
+ * (`nameMayBeNumbered`) isn't taken as a title anyone chose: the title is
+ * left alone, state keeps the old key so the question stays open, and the
+ * `notice` says why - without holding back the rest of the note's push.
+ */
+export function titleKeyIntent(
+  key: NoteTitleKey,
+  entry: CloneStateNoteEntry,
+  file: string,
+  options: { filenameAsTitle: boolean; nameMayBeNumbered: (file: string) => boolean },
+): { requestedTitle?: string | undefined; recordedTitle: string | undefined; keyRemoved?: true; notice?: string | undefined } {
+  if (!options.filenameAsTitle) {
+    return { recordedTitle: entry.frontmatterTitle };
+  }
+  switch (key.kind) {
+    case "stated":
+      return { requestedTitle: key.title, recordedTitle: key.title };
+    case "unmarked":
+    case "unreadable":
+      return { recordedTitle: entry.frontmatterTitle };
+    case "absent":
+      if (entry.frontmatterTitle === undefined) {
+        return { recordedTitle: undefined };
+      }
+      if (options.nameMayBeNumbered(file)) {
+        return {
+          recordedTitle: entry.frontmatterTitle,
+          notice:
+            `${file}: its "${NOTE_TITLE_KEY}" was removed, which asks for the title the file name spells - but ` +
+            `"${titleFromNoteFileName(file)}" may carry a number pull added to keep two names apart, so the ` +
+            `note keeps its title. Rename the file to the title you want, set "${NOTE_TITLE_KEY}" to it, or put the old key back.`,
+        };
+      }
+      return { requestedTitle: titleFromNoteFileName(file), recordedTitle: undefined, keyRemoved: true };
+  }
+}
+
+/**
+ * The title side of a local move: what the moved file asks the note to be
+ * called, and what state records as `frontmatterTitle` afterwards.
+ *
+ * A rename asks for the title the new name (or the file's
+ * `apple-note-title`) spells. A key the last sync recorded that the moved
+ * file no longer carries asks for the name's title even when the name didn't
+ * change, exactly as it does for a note left in place (see
+ * `titleKeyIntent`) - and, as there, not when the name may be one pull
+ * numbered. That's judged against where pull put it, `entry.file`, and only
+ * when the move kept the name: a name the move changed is one the user
+ * chose. Only a pair matched by id has an envelope whose missing key means
+ * anything; the fallbacks pair files that carry no usable id, and such a
+ * file never recorded a title.
+ */
+export function moveTitleIntent(
+  pair: { recordName: string; entry: CloneStateNoteEntry; toFile: string },
+  file: { titleKey: NoteTitleKey; noteId?: string | undefined },
+  recordedTitles: ReadonlyMap<string, string>,
+  options: { filenameAsTitle: boolean; nameMayBeNumbered: (file: string) => boolean },
+): { newTitle?: string | undefined; keyRemoved: boolean; recordedTitle: string | undefined; notice?: string | undefined } {
+  const renamed = path.posix.basename(pair.toFile) !== path.posix.basename(pair.entry.file);
+  const intent = titleKeyIntent(
+    file.titleKey.kind === "absent" && file.noteId !== pair.recordName ? { kind: "unmarked" } : file.titleKey,
+    pair.entry,
+    pair.toFile,
+    { filenameAsTitle: options.filenameAsTitle, nameMayBeNumbered: () => !renamed && options.nameMayBeNumbered(pair.entry.file) },
+  );
+  const keyRemoved = intent.keyRemoved === true;
+  const newTitle = titleExpressedByFile(pair.toFile, recordedTitles);
+  const retitled = options.filenameAsTitle && (newTitle !== titleFromNoteFileName(pair.entry.file) || keyRemoved);
+  return { newTitle: retitled ? newTitle : undefined, keyRemoved, recordedTitle: intent.recordedTitle, notice: intent.notice };
+}
+
+/** Whether a note's file name may be one `uniqueFileName` numbered: it ends
+ * in " 2" onwards *and* the unnumbered name is taken in the same directory,
+ * which is the only reason pull would have numbered it. A name that merely
+ * ends in a number (`Q3-Q4 2024.md`) with no such sibling is the user's. */
+function mayBeNumberedName(file: string, takenFiles: ReadonlySet<string>): boolean {
+  const match = /^(.*) ([0-9]+)$/.exec(path.posix.basename(file, ".md"));
+  if (match?.[1] === undefined || match[2] === undefined || Number(match[2]) < 2) {
+    return false;
+  }
+  const sibling = path.posix.join(path.posix.dirname(file), `${match[1]}.md`).toLowerCase();
+  return takenFiles.has(sibling);
+}
+
+/**
  * What a retitle leaves for the reader to expect, since push never renames a
  * file: the name catches up on the next `pull`, along exactly the path a
  * retitle made on another device takes. A title no file name can hold has no
@@ -1818,6 +1993,25 @@ function requestedRetitle(classified: OkNoteRecordResult, requestedTitle: string
     return undefined;
   }
   return requestedTitle === classified.format?.[0]?.text ? undefined : requestedTitle;
+}
+
+/**
+ * `parseNoteMarkdown`, plus the read-back check literal lines owe: markdown
+ * Apple Notes can't express is pushed as literal text, which is only safe
+ * if the next pull renders it into a file that parses back to the same
+ * note - otherwise the push would leave the note read-only. Notes with no
+ * literal lines skip the check; nothing about them changed.
+ */
+function parseLocalMarkdown(markdown: string): ParseNoteMarkdownResult {
+  const parsed = parseNoteMarkdown(markdown);
+  if (parsed.status === "ok" && parsed.literalLines > 0 && !readsBackFaithfully(parsed.paragraphs)) {
+    return {
+      status: "unsupported",
+      reason:
+        "markdown Apple Notes can't express would be carried as literal text, but it wouldn't read back as the same note on the next pull",
+    };
+  }
+  return parsed;
 }
 
 /**
@@ -1911,8 +2105,12 @@ type NoteTextUpdate = { status: "ok"; payloadBase64: string } | { status: "uncha
  * placeholder, and the rebuilt document must decode to the same slots it
  * started with. The rebuilt document must also decode to the desired
  * formatting projection - the write-side half of Step 2's round-trip gate.
+ *
+ * Exported for its test: the `TextDataAsset` refusal below is the last gate
+ * every note-text write passes through, and must hold even for a record
+ * that also carries inline text.
  */
-function prepareNoteTextUpdate(
+export function prepareNoteTextUpdate(
   record: CloudKitRecord,
   currentBodyText: string,
   desired: { text: string; paragraphs: FormatParagraph[] },
@@ -1926,9 +2124,11 @@ function prepareNoteTextUpdate(
     summary.refused.push(`${entry.file}: remote note has no readable text data`);
     return undefined;
   }
-  if (record.fields.TextDataAsset?.value != null) {
+  if (storesTextAsAsset(record)) {
     // Very large notes move their text into a separate asset; that write
-    // path is completely unexplored, so leave those alone.
+    // path is completely unexplored, so leave those alone - even when the
+    // record also carries inline text, as one with its asset body inlined
+    // (see `inlineAssetBodies`) would.
     summary.refused.push(`${entry.file}: remote note stores its text as an asset - refusing to edit`);
     return undefined;
   }

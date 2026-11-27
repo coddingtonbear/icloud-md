@@ -28,12 +28,18 @@
  *   escapes can't suppress it - see `markdownTable.ts`) are *not* link
  *   spans: only bracket/angle syntax is. Apple's own bare-URL links
  *   round-trip as plain text by the same rule (`normalizeSpans`).
- * - Constructs Apple Notes can't express degrade in one of two ways:
- *   inline constructs (inline code, images, ...) contribute their raw
- *   source text literally, like `markdownTable.ts`'s cell fallback; block
- *   constructs (thematic breaks, html blocks, deep headings, ...) refuse
- *   the parse with a precise reason - push surfaces it, and the read-side
- *   round-trip gate never produces them.
+ * - Constructs Apple Notes can't express degrade to their own source
+ *   text, so the note carries the markdown verbatim and nothing is lost:
+ *   inline constructs (inline code, images, footnote references, ...)
+ *   contribute their raw source slice, like `markdownTable.ts`'s cell
+ *   fallback; block constructs (thematic breaks, html blocks, deep
+ *   headings, fenced code with a language or other info string, footnote
+ *   and link definitions, tables that aren't one of the
+ *   note's own, code or quotes inside list items, ...) become one Body
+ *   paragraph per source line holding that line's text (see
+ *   `degradeBlock`). The renderer writes those lines back unescaped when
+ *   doing so provably reparses to the same note (`renderNoteMarkdown`), so
+ *   the construct comes back as markdown on the next pull.
  */
 
 import type { Heading, List, Paragraph, PhrasingContent, RootContent } from "mdast";
@@ -53,7 +59,15 @@ import {
 const processor = unified().use(remarkParse).use(remarkGfm, { tablePipeAlign: false });
 
 export type ParseNoteMarkdownResult =
-  | { status: "ok"; paragraphs: FormatParagraph[]; text: string }
+  | {
+      status: "ok";
+      paragraphs: FormatParagraph[];
+      text: string;
+      /** How many source lines were carried as literal text because their
+       * block construct has no Apple Notes equivalent (see `degradeBlock`).
+       * Push uses it to decide whether a read-back check is owed. */
+      literalLines: number;
+    }
   | { status: "unsupported"; reason: string };
 
 /** Internal control flow for "this markdown can't be represented in Apple
@@ -87,7 +101,12 @@ export function parseNoteMarkdown(markdown: string): ParseNoteMarkdownResult {
     paragraph.start = offset;
     offset += paragraph.text.length + 1;
   }
-  return { status: "ok", paragraphs, text: paragraphs.map((paragraph) => paragraph.text).join("\n") };
+  return {
+    status: "ok",
+    paragraphs,
+    text: paragraphs.map((paragraph) => paragraph.text).join("\n"),
+    literalLines: parser.literalLines,
+  };
 }
 
 /** A run of same-styled text within one line, or a line boundary. */
@@ -108,6 +127,16 @@ class Parser {
    * underlines). Untouched lines become empty paragraphs in `sweep`. */
   private readonly lineOutput: (FormatParagraph[] | "syntax" | undefined)[];
 
+  /** Source lines `degradeBlock` (or `sweep`) carried as literal text. */
+  literalLines = 0;
+
+  /** 1-based source lines `degradeBlock` has claimed, blank ones included. */
+  private readonly literalLineSet = new Set<number>();
+
+  /** The line `degradeBlock` is recording right now - the one write
+   * `record` allows onto a literal line. */
+  private recordingLiteral: number | undefined;
+
   constructor(
     private readonly source: string,
     private readonly lines: readonly string[],
@@ -116,8 +145,9 @@ class Parser {
   }
 
   /** Emits everything in source-line order; a line no construct claimed
-   * must be blank apart from blockquote markers and becomes a real empty
-   * paragraph at its marker depth. */
+   * becomes a real empty paragraph at its marker depth when it is blank
+   * apart from blockquote markers, and a literal Body line otherwise (the
+   * same degradation as `degradeBlock` - nothing in the file is dropped). */
   sweep(): FormatParagraph[] {
     const out: FormatParagraph[] = [];
     for (let index = 0; index < this.lines.length; index += 1) {
@@ -130,15 +160,24 @@ class Parser {
         continue;
       }
       const raw = this.lines[index]!;
-      if (stripQuoteMarkers(raw).trim() !== "") {
-        throw new Unsupported(`line ${index + 1} wasn't recognized as any markdown construct this tool can represent`);
+      const level = countQuoteMarkers(raw);
+      const text = stripQuoteMarkers(raw, level);
+      if (text.trim() === "") {
+        out.push(makeParagraph("body", level, "", [], BODY_SEED));
+      } else {
+        this.literalLines += 1;
+        out.push(makeParagraph("body", level, text, plainSpans(text), BODY_SEED));
       }
-      out.push(makeParagraph("body", countQuoteMarkers(raw), "", [], BODY_SEED));
     }
     return out;
   }
 
   private record(lineNumber: number, paragraph: FormatParagraph): void {
+    // A line carried literally holds its whole source text already; adding
+    // another construct's output to it would push that text twice.
+    if (this.literalLineSet.has(lineNumber) && this.recordingLiteral !== lineNumber) {
+      throw new Unsupported(`line ${lineNumber} would be carried both as literal text and as formatted content`);
+    }
     const index = lineNumber - 1;
     const existing = this.lineOutput[index];
     if (existing === undefined || existing === "syntax") {
@@ -164,7 +203,15 @@ class Parser {
         this.recordHeading(node, blockQuoteLevel);
         return;
       case "code":
-        this.recordCode(node.value, nodeLines(node), blockQuoteLevel);
+        // Monospaced paragraphs have nowhere to keep a fence's info string
+        // (```` ```itinerary ````, ```` ```js title="x" ````), and dropping it
+        // silently breaks whatever reads the block - an Obsidian plugin, a
+        // highlighter. Such a block is carried literally instead.
+        if (node.lang != null || node.meta != null) {
+          this.degradeBlock(node, blockQuoteLevel);
+        } else {
+          this.recordCode(node.value, nodeLines(node), blockQuoteLevel);
+        }
         return;
       case "blockquote":
         for (const child of node.children) {
@@ -174,16 +221,57 @@ class Parser {
       case "list":
         this.walkList(node, blockQuoteLevel, 0);
         return;
-      case "thematicBreak":
-        throw new Unsupported("a thematic break (---/***) has no Apple Notes equivalent");
-      case "html":
-        throw new Unsupported(
-          "raw HTML blocks can't be represented in Apple Notes (underline's <u> tags are supported inline, within a line of text)",
-        );
-      case "table":
-        throw new Unsupported("a markdown table doesn't correspond to any table in this note");
       default:
-        throw new Unsupported(`markdown construct "${node.type}" has no Apple Notes equivalent`);
+        // Thematic breaks, html blocks, tables that aren't one of the
+        // note's own (those were spliced out to placeholders before this
+        // parse), footnote and link definitions, and anything else.
+        this.degradeBlock(node, blockQuoteLevel);
+    }
+  }
+
+  /**
+   * Carries a block construct Apple Notes can't express as literal text:
+   * one Body paragraph per source line, holding that line with the
+   * container's blockquote markers removed (and nothing else - list
+   * indentation, fences and pipes all stay, so the line reads back as the
+   * same markdown). A blank line inside the construct is an ordinary empty
+   * paragraph. A lazily continued line carries fewer `>` markers than its
+   * container and keeps its own depth, as in `recordParagraphLines`.
+   *
+   * A line another literal construct already carried is skipped (remark
+   * can end an unclosed fence on the line the next construct starts on);
+   * any other overlap would duplicate text, so it refuses instead.
+   */
+  private degradeBlock(node: RootContent, blockQuoteLevel: number): void {
+    const position = nodeLines(node);
+    // remark ends a fence left unclosed inside a list item at column 1 of
+    // the next item's marker line; that line belongs to the next item.
+    if (position.end > position.start && node.position?.end.column === 1) {
+      position.end -= 1;
+    }
+    for (let line = position.start; line <= position.end; line += 1) {
+      if (this.lineOutput[line - 1] !== undefined && !this.literalLineSet.has(line)) {
+        throw new Unsupported(
+          `line ${line} holds a "${node.type}" construct alongside other content, which this tool can't carry as literal text`,
+        );
+      }
+    }
+    for (let line = position.start; line <= position.end; line += 1) {
+      if (this.literalLineSet.has(line)) {
+        continue;
+      }
+      this.literalLineSet.add(line);
+      const raw = this.lines[line - 1]!;
+      const level = Math.min(countQuoteMarkers(raw), blockQuoteLevel);
+      const text = stripQuoteMarkers(raw, level);
+      this.recordingLiteral = line;
+      if (text.trim() === "") {
+        this.record(line, makeParagraph("body", level, "", [], BODY_SEED));
+      } else {
+        this.literalLines += 1;
+        this.record(line, makeParagraph("body", level, text, plainSpans(text), BODY_SEED));
+      }
+      this.recordingLiteral = undefined;
     }
   }
 
@@ -191,9 +279,9 @@ class Parser {
     const kind: ParagraphKind | undefined =
       node.depth === 1 ? "title" : node.depth === 2 ? "heading" : node.depth === 3 ? "subheading" : undefined;
     if (kind === undefined) {
-      throw new Unsupported(
-        `a depth-${node.depth} heading has no Apple Notes equivalent (only # through ### map to Title/Heading/Subheading)`,
-      );
+      // Only # through ### map to Title/Heading/Subheading.
+      this.degradeBlock(node, blockQuoteLevel);
+      return;
     }
     // Headings are single-line in Apple's model; a hand-written setext
     // heading's soft-wrapped lines collapse into one with spaces, and its
@@ -268,7 +356,14 @@ class Parser {
         } else if (child.type === "list") {
           this.walkList(child, blockQuoteLevel, indent + 1);
         } else {
-          throw new Unsupported(`markdown construct "${child.type}" inside a list item has no Apple Notes equivalent`);
+          // Code, quotes, deep headings, ... inside an item. Apple's list
+          // paragraphs can't hold them, so they ride along as literal lines
+          // (indentation included, which is what keeps them inside the item
+          // when the file is read back). One starting on the marker line
+          // takes the marker with it, so a later paragraph of the item is a
+          // continuation, not the item's own first line.
+          this.degradeBlock(child, blockQuoteLevel);
+          firstParagraphSeen ||= nodeLines(child).start === itemStartLine;
         }
       }
     }
@@ -463,9 +558,11 @@ export function countQuoteMarkers(rawLine: string): number {
   }
 }
 
-function stripQuoteMarkers(rawLine: string): string {
+/** `rawLine` with its first `limit` blockquote markers (and the optional
+ * space after each) removed - all of them when `limit` is omitted. */
+function stripQuoteMarkers(rawLine: string, limit = Number.POSITIVE_INFINITY): string {
   let at = 0;
-  for (;;) {
+  for (let stripped = 0; stripped < limit; stripped += 1) {
     let spaces = 0;
     while (spaces < 3 && rawLine[at + spaces] === " ") {
       spaces += 1;
@@ -478,4 +575,9 @@ function stripQuoteMarkers(rawLine: string): string {
       at += 1;
     }
   }
+  return rawLine.slice(at);
+}
+
+function plainSpans(text: string): InlineSpan[] {
+  return [{ ...PLAIN_STYLE, length: text.length }];
 }

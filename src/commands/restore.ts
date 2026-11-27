@@ -3,6 +3,7 @@ import path from "node:path";
 import { readBaseCopy } from "../notes/baseCopy.js";
 import { openVault } from "../notes/vaultMigrations.js";
 import { joinFrontmatter, splitFrontmatter } from "../notes/frontmatter.js";
+import { composeNoteFile, setNoteTitle } from "../notes/noteIdFrontmatter.js";
 import { isEnoent } from "../fsUtil.js";
 import { resolveTrackedNote } from "../notes/trackedFile.js";
 import { NotClonedDirectoryError } from "../errors.js";
@@ -39,23 +40,33 @@ export async function runRestore(targetDir: string, fileArg: string): Promise<Re
   }
 
   // A deleted working file is a supported restore target (arguably the most
-  // useful one) and has no envelope to keep, so a missing file yields an empty
-  // frontmatter rather than an error - matching how `pull` handles its own
-  // "missing locally" branch.
+  // useful one) and has no envelope to keep, so it gets a fresh one the way
+  // `pull` writes its own "missing locally" branch: the note's id, plus the
+  // `apple-note-title` the last sync recorded. Without the key, `push` would
+  // read its absence as a request to retitle the note to its file name.
   const filePath = path.join(targetDir, entry.file);
-  let existing = "";
+  let existing: string;
   try {
     existing = await readFile(filePath, "utf-8");
   } catch (cause) {
     if (!isEnoent(cause)) {
       throw cause;
     }
+    await writeFile(filePath, composeNoteFile("", base, recordName, entry.frontmatterTitle), "utf-8");
+    return { file: entry.file };
   }
 
   // Split with the vault's shape in mind: under filename-as-title the body
   // can begin with a blank line, and folding it into the envelope here would
   // put it back *above* the restored body on every restore.
-  const { frontmatter } = splitFrontmatter(existing, { filenameAsTitle: state.titleMode === "filename" });
-  await writeFile(filePath, joinFrontmatter(frontmatter, base), "utf-8");
+  const filenameAsTitle = state.titleMode === "filename";
+  const { frontmatter } = splitFrontmatter(existing, { filenameAsTitle });
+  // There the key is part of what's restored: a removed or edited
+  // `apple-note-title` is a pending retitle, so the file isn't back to clean
+  // until it says what the last sync recorded. Only a recorded key is put
+  // back - state that predates `frontmatterTitle` can't say a key is wrong.
+  const restoredFrontmatter =
+    filenameAsTitle && entry.frontmatterTitle !== undefined ? setNoteTitle(frontmatter, entry.frontmatterTitle) : frontmatter;
+  await writeFile(filePath, joinFrontmatter(restoredFrontmatter, base), "utf-8");
   return { file: entry.file };
 }

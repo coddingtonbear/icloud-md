@@ -7,7 +7,8 @@ import { writeCloneState, type CloneState } from "../notes/cloneState.js";
 import { listEpochs, recordEpoch } from "../notes/noteEpoch.js";
 import { REAL_PLAIN_NOTE } from "../notes/realFixtures.js";
 import { recordVersion } from "../notes/versionHistory.js";
-import { renderRevertResult, runRevert } from "./revert.js";
+import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
+import { renderRevertResult, runRevert, verifyRecordRevertible } from "./revert.js";
 
 // Same real capture attachmentSync.test.ts/diff.test.ts use for "Test Table
 // Note (2)" (dev notes, 2026-07-14T10:46/14:41) - decodes cleanly as a table,
@@ -179,3 +180,14 @@ test("revert (unconfirmed, epoch id) reports nothing to revert when every record
     assert.ok(lines.some((line) => /Nothing to revert for Test Note\.md at epoch/.test(line)));
     assert.ok(lines.some((line) => /no snapshot was ever captured/.test(line)));
   }));
+
+test("revert refuses to write onto a note that now keeps its text in a TextDataAsset", () => {
+  // Revert sends TextDataEncrypted alone, which would leave the record
+  // carrying both fields - a shape no client has been seen to write.
+  const note = (fields: CloudKitRecord["fields"]): CloudKitRecord => ({ recordName: "REC1", recordType: "Note", fields });
+  const asset = { value: { downloadURL: "https://cvws.icloud-content.example/B/asset-1" }, type: "ASSETID" };
+
+  assert.throws(() => verifyRecordRevertible(note({ TextDataAsset: asset }), "Test Note.md"), /can't be reverted.*separate file/);
+  assert.doesNotThrow(() => verifyRecordRevertible(note({ TextDataAsset: { value: null, type: "ASSETID" } }), "Test Note.md"));
+  assert.doesNotThrow(() => verifyRecordRevertible(note({}), "Test Note.md"));
+});
