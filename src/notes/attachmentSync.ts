@@ -7,6 +7,7 @@ import {
   type CloudKitRecord,
   type CloudKitZoneID,
 } from "../cloudkit/databaseClient.js";
+import { CloudKitRequestFailedError } from "../errors.js";
 import { isEnoent } from "../fsUtil.js";
 import type { IcloudSession } from "../session.js";
 import type { CloneStateAttachmentEntry, CloneStateTableAttachmentEntry } from "./cloneState.js";
@@ -46,7 +47,73 @@ export interface MatchedAttachment {
   linkPath: string;
   needsDownload: boolean;
   downloadURL: string;
+  /** The asset's byte length as the server reports it, when it does. */
+  assetSize?: number;
   entry: CloneStateAttachmentEntry;
+}
+
+/** An attachment the server won't hand over, and why - see
+ * `downloadAttachmentBytes`. */
+export interface UndownloadableAttachment {
+  /** The Attachment record's recordName. */
+  recordName: string;
+  reason: string;
+}
+
+/**
+ * The warning for a note whose attachments the server wouldn't hand over,
+ * shared by `clone` and `pull` so the two can't drift. `noteLabel` is
+ * whatever identifies the note to the user (its file, or its title when it
+ * has no file yet).
+ */
+export function undownloadableAttachmentsNotice(
+  noteLabel: string,
+  undownloadable: readonly UndownloadableAttachment[],
+): string {
+  const reasons = [...new Set(undownloadable.map((attachment) => attachment.reason))].join("; ");
+  return (
+    `${noteLabel}: ${undownloadable.length} attachment(s) couldn't be downloaded (${reasons}) - ` +
+    "the rest of the note is here, with a placeholder where each one belongs"
+  );
+}
+
+/** Statuses that mean "this URL will never work", as opposed to a server
+ * error or a throttle, which the next run may well get past. */
+const PERMANENT_REFUSAL_STATUSES = new Set([400, 404, 410]);
+
+/**
+ * Downloads one attachment's bytes, or says why the server won't hand them
+ * over. Two cases count as that, both seen on one real record (a 2016
+ * drawing, issue #55): an asset the server lists as zero bytes long, which
+ * isn't asked for at all, and a download the server refuses outright (HTTP
+ * 400, 404 or 410).
+ *
+ * Neither is going to be different on a retry, and letting one of them throw
+ * used to abort a whole clone over a single attachment. Anything else - a
+ * server error, a throttle that outlasted its retries, a dropped connection -
+ * still throws: those are worth failing the run for, since giving up on the
+ * attachment would leave a placeholder where a working link could have been,
+ * with nothing to prompt another try until the note next changes.
+ */
+export async function downloadAttachmentBytes(
+  attachment: Pick<MatchedAttachment, "downloadURL" | "assetSize">,
+  fetchBytes: (downloadURL: string) => Promise<Buffer> = fetchAssetBytes,
+): Promise<{ bytes: Buffer } | { refused: string }> {
+  if (attachment.assetSize === 0) {
+    return { refused: "the server lists it as empty" };
+  }
+  try {
+    return { bytes: await fetchBytes(attachment.downloadURL) };
+  } catch (error) {
+    if (
+      error instanceof CloudKitRequestFailedError &&
+      error.status !== undefined &&
+      PERMANENT_REFUSAL_STATUSES.has(error.status)
+    ) {
+      return { refused: `the server refused the download (HTTP ${error.status})` };
+    }
+    throw error;
+  }
 }
 
 /**
@@ -131,6 +198,7 @@ export function matchAttachmentRecords(
       linkPath: path.posix.relative(noteDir, relativeFile),
       needsDownload: !existing || existing.mediaFileChecksum !== asset.fileChecksum,
       downloadURL: asset.downloadURL,
+      ...(asset.size === undefined ? {} : { assetSize: asset.size }),
       entry: { file: relativeFile, mediaRecordName, mediaFileChecksum: asset.fileChecksum, noteRecordName },
     });
   }
@@ -169,6 +237,11 @@ export interface AttachmentSyncResult {
   /** One entry per table reference that resolved this call - the caller
    * (`pull`) feeds these into `versionHistory.ts`'s `recordVersion`. */
   tableAttachmentSnapshots: TableAttachmentSnapshotSource[];
+  /** File attachments the server wouldn't hand over this call. A new one is
+   * left out of `attachments` and gets an embed marker in `bodyText`; one
+   * already on disk keeps its file, link and old entry. The caller turns
+   * each into a warning. */
+  undownloadable: UndownloadableAttachment[];
 }
 
 /**
@@ -222,6 +295,7 @@ export async function resolveNoteAttachments(
       tableAttachments: {},
       staleTableAttachmentRecordNames: previousTableForNote,
       tableAttachmentSnapshots: [],
+      undownloadable: [],
     };
   }
 
@@ -282,6 +356,7 @@ export async function resolveNoteAttachments(
   }
 
   const attachments: Record<string, CloneStateAttachmentEntry> = {};
+  const undownloadable: UndownloadableAttachment[] = [];
   if (fileRefs.length > 0) {
     const mediaRecordNames = extractMediaRecordNames(fileRefs, attachmentRecords);
     const knownMediaRecordNames = mediaRecordNames.filter((name): name is string => name !== undefined);
@@ -316,9 +391,23 @@ export async function resolveNoteAttachments(
         continue;
       }
       if (attachment.needsDownload) {
-        const bytes = await fetchAssetBytes(attachment.downloadURL);
+        const download = await downloadAttachmentBytes(attachment);
+        if ("refused" in download) {
+          undownloadable.push({ recordName: attachment.recordName, reason: download.refused });
+          const previous = existingAttachments[attachment.recordName];
+          if (previous) {
+            // The copy already on disk is the best there is. Keeping its old
+            // entry (old checksum) means the next change to the note tries
+            // the download again.
+            attachments[attachment.recordName] = previous;
+            replacements[index] = formatAttachmentMarkdown(ref, attachment.linkPath);
+          } else {
+            replacements[index] = formatEmbedMarker(ref);
+          }
+          continue;
+        }
         await mkdir(path.dirname(path.join(targetDir, attachment.relativeFile)), { recursive: true });
-        await writeFile(path.join(targetDir, attachment.relativeFile), bytes);
+        await writeFile(path.join(targetDir, attachment.relativeFile), download.bytes);
       }
       attachments[attachment.recordName] = attachment.entry;
       replacements[index] = formatAttachmentMarkdown(ref, attachment.linkPath);
@@ -337,6 +426,7 @@ export async function resolveNoteAttachments(
     tableAttachments,
     staleTableAttachmentRecordNames,
     tableAttachmentSnapshots,
+    undownloadable,
   };
 }
 

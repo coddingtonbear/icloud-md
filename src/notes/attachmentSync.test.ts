@@ -210,6 +210,7 @@ test("matchAttachmentRecords resolves a new audio attachment's filename and down
       linkPath: "attachments/Call with Janice Elkins.m4a",
       needsDownload: true,
       downloadURL: "https://cvws.icloud-content.com/B/audio-asset",
+      assetSize: 51432744,
       entry: {
         file: "attachments/Call with Janice Elkins.m4a",
         mediaRecordName: "0B8509A3-A5FC-470B-A777-03BFFFDFB5F9",

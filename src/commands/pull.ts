@@ -16,6 +16,7 @@ import {
   removeAttachmentsForNote,
   removeTableAttachmentsForNote,
   resolveNoteAttachments,
+  undownloadableAttachmentsNotice,
   untrackAttachmentsForNote,
   type AttachmentAuth,
 } from "../notes/attachmentSync.js";
@@ -454,6 +455,15 @@ export async function runPull(
             noteDir,
           );
           bodyText = resolved.bodyText;
+          if (resolved.undownloadable.length > 0) {
+            summary.notices.push({
+              level: "warn",
+              message: undownloadableAttachmentsNotice(
+                existing?.file ?? `"${decoded.titleLine}"`,
+                resolved.undownloadable,
+              ),
+            });
+          }
           for (const stale of resolved.staleAttachmentRecordNames) {
             const staleEntry = attachments[stale];
             if (staleEntry) {

@@ -3,7 +3,12 @@ import path from "node:path";
 import { bindKnownAccount, bindNewFolderAccount } from "../auth/folderAuth.js";
 import { describeMissingNotes, fetchAllNoteRecords, fetchSharedNoteRecords } from "../cloudkit/databaseClient.js";
 import type { CloudKitRecord, SkippedSharedZone } from "../cloudkit/databaseClient.js";
-import { resolveNoteAttachments, type AttachmentAuth } from "../notes/attachmentSync.js";
+import {
+  resolveNoteAttachments,
+  undownloadableAttachmentsNotice,
+  type AttachmentAuth,
+  type UndownloadableAttachment,
+} from "../notes/attachmentSync.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { noteFileNameFor, titleNeedingFrontmatter, uniqueFileName } from "../notes/filename.js";
 import { buildVaultLayout, placeNote, type SharedZoneRecords } from "../notes/folderLayout.js";
@@ -180,6 +185,7 @@ export async function runClone(
 
         let bodyText = decoded.markdownText;
         const unpublishableReason = decoded.unpublishableReason;
+        let undownloadable: UndownloadableAttachment[] = [];
         if (decoded.embedSlots.length > 0) {
           const zoneID = source.sharedZoneOwner
             ? { zoneName: PRIVATE_NOTES_ZONE.zoneName, ownerRecordName: source.sharedZoneOwner }
@@ -198,6 +204,7 @@ export async function runClone(
             placement.dir,
           );
           bodyText = resolved.bodyText;
+          undownloadable = resolved.undownloadable;
           Object.assign(attachments, resolved.attachments);
           summary.attachmentsDownloaded += Object.keys(resolved.attachments).length;
           Object.assign(tableAttachments, resolved.tableAttachments);
@@ -207,6 +214,12 @@ export async function runClone(
         const fileName = uniqueFileName(noteFileNameFor(decoded.titleLine, titleMode), usedInDir);
         usedInDir.add(fileName);
         const relativeFile = path.posix.join(placement.dir, fileName);
+        if (undownloadable.length > 0) {
+          summary.notices.push({
+            level: "warn",
+            message: undownloadableAttachmentsNotice(relativeFile, undownloadable),
+          });
+        }
 
         const filePath = path.join(targetDir, relativeFile);
         // The rare title a file name can't hold is recorded in

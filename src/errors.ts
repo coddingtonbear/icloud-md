@@ -314,14 +314,21 @@ export class AccountMismatchError extends IcloudNotesSyncError {
  * operation/status detail for anyone filing an issue.
  */
 export class CloudKitRequestFailedError extends IcloudNotesSyncError {
-  constructor(message: string, options: IcloudNotesSyncErrorOptions = {}) {
+  /** The HTTP status the request came back with, where there was one - for
+   * a caller that can do something better than give up on a specific answer
+   * (see `downloadAttachmentBytes`). */
+  readonly status: number | undefined;
+
+  constructor(message: string, options: IcloudNotesSyncErrorOptions & { status?: number } = {}) {
+    const { status, ...rest } = options;
     super(message, {
-      ...options,
+      ...rest,
       hint:
-        options.hint ??
+        rest.hint ??
         "This may be a transient network or iCloud-service issue - wait a moment and try again. If it keeps " +
           "happening, please open a GitHub issue including this message.",
     });
+    this.status = status;
   }
 }
 
