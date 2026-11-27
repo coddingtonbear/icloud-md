@@ -273,6 +273,39 @@ test("a title paragraph holding an embed placeholder is never stripped", () => {
   assert.ok(result.markdownText.includes("￼"));
 });
 
+for (const title of ["Drawing title", "\uFFFC Named drawing", "", " \uFFFC "]) {
+  test(`an object-only first line uses display title ${JSON.stringify(title)} without removing its body`, () => {
+    const text = "\uFFFC\nBody text";
+    const record = makeRecord({
+      TitleEncrypted: { type: "ENCRYPTED_BYTES", value: Buffer.from(title).toString("base64") },
+      TextDataEncrypted: encodeTextField(text, [
+        { length: 1, attachmentInfo: { attachmentIdentifier: "A-1", typeUTI: "com.apple.paper" } },
+        { length: text.length - 1 },
+      ]),
+    });
+    const result = classifyNoteRecord(record, { titleMode: "filename" });
+    assert.equal(result.status, "ok");
+    if (result.status !== "ok") return;
+    const display = title.replaceAll("\uFFFC", "");
+    assert.equal(result.titleLine, display.trim() ? display : "Untitled");
+    assert.equal(result.title, title);
+    assert.equal(result.bodyText, text);
+    assert.equal(result.titleStripped, false);
+    assert.equal(result.attachments[0]?.attachmentIdentifier, "A-1");
+    assert.ok(result.markdownText.includes("\uFFFC"));
+  });
+}
+
+test("a mixed text-and-object first line remains the filename title", () => {
+  const text = "Caption \uFFFC\nBody";
+  const result = classifyNoteRecord(makeRecord({
+    TitleEncrypted: { type: "ENCRYPTED_BYTES", value: Buffer.from("Independent title").toString("base64") },
+    TextDataEncrypted: encodeTextField(text),
+  }), { titleMode: "filename" });
+  assert.equal(result.status, "ok");
+  if (result.status === "ok") assert.equal(result.titleLine, "Caption \uFFFC");
+});
+
 test("a single-line note strips to an empty body", () => {
   const record = makeRecord({
     TextDataEncrypted: encodeTextField("Just a title", [{ length: 12, paragraphStyle: { style: 0 } }]),

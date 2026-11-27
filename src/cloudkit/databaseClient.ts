@@ -157,6 +157,7 @@ async function postDatabase(
   database: CloudKitDatabase,
   operation: string,
   body: unknown,
+  options: Pick<RequestInit, "signal" | "redirect"> = {},
 ): Promise<unknown> {
   const params = new URLSearchParams({
     ckjsBuildVersion: CKJS_BUILD_VERSION,
@@ -182,6 +183,7 @@ async function postDatabase(
         Accept: "application/json",
       },
       body: JSON.stringify(body),
+      ...options,
     },
     {
       describeFailure: (failure) => `${operation} request failed (${database} db): HTTP ${failure.status}`,
@@ -1110,7 +1112,7 @@ export interface RecordUpdate {
   recordName: string;
   /** Unlike the single-record `updateNoteRecord`, not hardcoded to "Note" -
    * a table write needs to update a Note record and an Attachment record
-   * (the table's own `MergeableDataEncrypted`) atomically in one call. */
+   * (the table's own `MergeableDataEncrypted`) in one call. */
   recordType: string;
   /** Optimistic-concurrency token; see `NoteUpdate`. */
   recordChangeTag: string;
@@ -1123,15 +1125,10 @@ export type RecordUpdateResult = NoteUpdateResult;
 /**
  * Updates any number of records in one zone via a single `records/modify`
  * call with one `update` operation per record - the real CloudKit endpoint
- * already accepts multiple operations atomically per zone; `updateNoteRecord`
- * used to hardcode a single-element operations array as a self-imposed
- * limitation, not a server one. Results come back in the same order as
- * `updates`, each independently `ok`/refused (a changeTag conflict on one
- * record doesn't fail the others) - though a caller relying on the *write*
- * being atomic (e.g. a note's text and its table changing together) should
- * still treat any non-`ok` result as "nothing in this batch should be
- * trusted as applied", since CloudKit only guarantees atomicity of the
- * write itself, not of how per-record failures are reported back.
+ * accepts multiple operations per zone. Each response entry is parsed as
+ * `ok`/refused; callers must validate their expected records before settling
+ * local state. One request does not itself establish atomic commit or native
+ * import ordering. Optional fetch controls leave the request body unchanged.
  */
 export async function updateRecords(
   session: IcloudSession,
@@ -1140,6 +1137,7 @@ export async function updateRecords(
   database: CloudKitDatabase,
   zoneID: CloudKitZoneID,
   updates: RecordUpdate[],
+  options: Pick<RequestInit, "signal" | "redirect"> = {},
 ): Promise<RecordUpdateResult[]> {
   const operations = updates.map((update) => {
     const record: Record<string, unknown> = {
@@ -1162,6 +1160,7 @@ export async function updateRecords(
     database,
     "records/modify",
     { operations, zoneID },
+    options,
   );
   return parseRecordUpdateResponse(body);
 }

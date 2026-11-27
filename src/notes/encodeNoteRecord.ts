@@ -1,4 +1,11 @@
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
+import { OBJECT_REPLACEMENT_CHARACTER } from "./noteAttachments.js";
+
+/** An object-only first line carries its independent title in metadata. */
+export function hasEmbedOnlyFirstLine(text: string): boolean {
+  const firstLine = text.split(/\r\n?|\n/)[0] ?? "";
+  return firstLine.includes(OBJECT_REPLACEMENT_CHARACTER) && firstLine.replaceAll(OBJECT_REPLACEMENT_CHARACTER, "").trim() === "";
+}
 
 /**
  * Builds the field set for a `records/modify` update of a note, mirroring
@@ -13,8 +20,8 @@ import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
  * boundary when the line is long. A captured 255-character first line was
  * cut to 66 characters, at the last space before the next word would have
  * ended at 78 - so the real limit is somewhere in 67..77; 76 reproduces the
- * capture. Cosmetic metadata (list views), not note content: devices
- * re-derive it whenever they edit the note themselves.
+ * capture. Object-only first lines instead have an independent metadata
+ * title, which content updates preserve.
  */
 const TITLE_MAX_LENGTH = 76;
 
@@ -75,8 +82,8 @@ const NULL_FIELDS = ["FirstAttachmentThumbnail", "FirstAttachmentUTIEncrypted", 
 
 /**
  * Assembles the full update field set: the new text data (already
- * re-encoded and zlib-compressed, passed base64), freshly derived display
- * metadata, and everything else echoed verbatim from the looked-up record.
+ * re-encoded and zlib-compressed, passed base64), display metadata preserving
+ * independent object-first titles, and fields echoed from the current record.
  */
 /**
  * The Folder reference every deletion stage points at. Apple's own client
@@ -238,7 +245,11 @@ export function buildNoteUpdateFields(
 ): Record<string, UpdateFieldValue> {
   const fields: Record<string, UpdateFieldValue> = {
     ModificationDate: { value: modificationDateMs },
-    TitleEncrypted: { value: Buffer.from(deriveNoteTitle(newText), "utf-8").toString("base64") },
+    TitleEncrypted: {
+      value: hasEmbedOnlyFirstLine(newText) && typeof current.fields.TitleEncrypted?.value === "string"
+        ? current.fields.TitleEncrypted.value
+        : Buffer.from(deriveNoteTitle(newText), "utf-8").toString("base64"),
+    },
   };
 
   for (const name of ECHOED_FIELDS) {

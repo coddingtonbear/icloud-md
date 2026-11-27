@@ -18,7 +18,7 @@ import {
   type RecordUpdate,
 } from "../cloudkit/databaseClient.js";
 import { readBaseCopy, writeBaseCopy } from "../notes/baseCopy.js";
-import { writeCloneState, type CloneState, type CloneStateNoteEntry, type TitleMode } from "../notes/cloneState.js";
+import { writeCloneState, type CloneState, type CloneStateFolderEntry, type CloneStateNoteEntry, type TitleMode } from "../notes/cloneState.js";
 import { migrationReporter, openVault } from "../notes/vaultMigrations.js";
 import { pendingRenameTarget, settlePendingRenames } from "../notes/pendingRename.js";
 import {
@@ -59,6 +59,9 @@ import {
 } from "../notes/noteTitleParagraph.js";
 import { reconcileNoteFormat } from "../notes/formatReconcile.js";
 import { prepareTableAttachmentUpdate } from "../notes/tablePushEdit.js";
+import { prepareDrawingTitleRename, confirmedDrawingTitleRename } from "../notes/drawingTitleRename.js";
+import { hasEmbedOnlyFirstLine } from "../notes/encodeNoteRecord.js";
+import { decodeFolderRecord } from "../notes/folderTree.js";
 import { historyRecordNames } from "../notes/trackedFile.js";
 import { recordVersion } from "../notes/versionHistory.js";
 import { applyLocalNoteDeletion, isInTrash, isPurged, rememberTrashedNote } from "./delete.js";
@@ -898,8 +901,8 @@ export async function buildPushPlan(
     }
   }
 
-  // Every write below builds CRDT operations, which need this clone's own
-  // replica identity - moves included now that one can carry a retitle.
+  // Content writes below build CRDT operations using this clone's replica
+  // identity; metadata-only drawing retitles need no document operations.
   const replicaId = state.replicaId ?? randomBytes(16).toString("base64");
   state.replicaId = replicaId;
   const replicaIdBytes = new Uint8Array(Buffer.from(replicaId, "base64"));
@@ -929,6 +932,74 @@ export async function buildPushPlan(
         ...base,
         reason: `this note ${TEXT_AS_ASSET_REASON}, so it can't be moved from here - rename the file back to ${pair.entry.file}, or move the note in Notes instead`,
       });
+      continue;
+    }
+
+    const drawing = filenameAsTitle && !pair.relocated && pair.newTitle !== undefined ? classifyNoteRecord(record, { titleMode }) : undefined;
+    if (drawing?.status === "ok" && pair.newTitle !== undefined && hasEmbedOnlyFirstLine(drawing.bodyText)) {
+      try {
+        const filePath = path.join(targetDir, pair.toFile);
+        const contents = await readFile(filePath, "utf8");
+        const local = splitFrontmatter(contents, { filenameAsTitle: true });
+        if (readNoteId(local.frontmatter) !== pair.recordName || readNoteTitleKey(local.frontmatter).kind !== "absent" || pair.keyRemoved) {
+          throw Error("Only an unchanged identified drawing's filename can request this rename");
+        }
+        const folders: Array<{ id: string; parent: string | undefined }> = [];
+        let folderId: string | undefined = pair.folderRecordName;
+        while (folderId !== undefined) {
+          const folder: CloneStateFolderEntry | undefined = state.folders?.[folderId];
+          if (!folder || folder.sharedZoneOwner !== undefined || folders.some(item => item.id === folderId) || folders.length >= 32) {
+            throw Error("Drawing folder ancestry must be known and private");
+          }
+          folders.push({ id: folderId, parent: folder.parentRecordName });
+          folderId = folder.parentRecordName;
+        }
+        const privateFolders = async () => {
+          const records = await lookupRecords(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, folders.map(folder => folder.id));
+          return records.length === folders.length && folders.every(folder => {
+            const current = records.find(record => record.recordName === folder.id);
+            const decoded = current && decodeFolderRecord(current);
+            const deleted = current?.fields.Deleted;
+            return current && decoded && !current.deleted && !current.shareRecordName && current.recordChangeTag &&
+              (deleted === undefined || (deleted.type === "INT64" && deleted.value === 0)) &&
+              decoded.parentRecordName === folder.parent && current.parentRecordName === folder.parent;
+          });
+        };
+        if (!await privateFolders()) throw Error("Drawing folder ancestry changed or is shared");
+        const attachmentId = drawing.attachments.length === 1 ? drawing.attachments[0]!.attachmentIdentifier : undefined;
+        if (!attachmentId) throw Error("Expected exactly one drawing");
+        const attachments = await lookupRecords(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, [attachmentId]);
+        if (attachments.length !== 1) throw Error("Drawing attachment is missing or ambiguous");
+        const baseText = await readBaseCopy(targetDir, pair.recordName);
+        const prepared = prepareDrawingTitleRename(record, attachments[0]!, {
+          recordName: pair.recordName, entry: pair.entry, localText: local.body, baseText,
+          newTitle: pair.newTitle, modificationDateMs: Date.now(),
+        });
+        if (!prepared.ok) throw Error(prepared.reason);
+        entries.push({ ...base, resolution: "ready", remark: "metadata-only drawing title rename",
+          execute: async () => {
+            try {
+              if (!await privateFolders()) throw Error("Drawing folder ancestry changed");
+              try { await stat(path.join(targetDir, pair.entry.file)); throw Error("Original drawing path reappeared"); }
+              catch (error) { if (!isEnoent(error)) throw error; }
+              const [currentContents, currentBase] = await Promise.all([readFile(filePath, "utf8"), readBaseCopy(targetDir, pair.recordName)]);
+              if (currentContents !== contents || currentBase !== baseText) throw Error("Local drawing intent changed");
+              const results = await updateRecords(session, ckdatabasewsUrl, dsid, "private", PRIVATE_NOTES_ZONE, prepared.updates,
+                { redirect: "error", signal: AbortSignal.timeout(60_000) });
+              const current = confirmedDrawingTitleRename(prepared.updates, results);
+              if (!current) throw Error("Drawing rename response was incomplete or rejected");
+              state.notes[pair.recordName] = { ...pair.entry, file: pair.toFile, frontmatterTitle: pair.recordedTitle,
+                recordChangeTag: current.recordChangeTag!, modificationDate: modificationDateOf(current) };
+              await applyNoteFileTimes(filePath, current);
+              return { succeeded: true, message: `Retitled ${pair.entry.file} -> ${pair.toFile}` };
+            } catch {
+              return { succeeded: false, message: `${pair.toFile}: drawing rename was not confirmed; run pull to reconcile before trying again` };
+            }
+          },
+        });
+      } catch (error) {
+        entries.push({ ...base, reason: error instanceof Error ? error.message : "Drawing rename could not be validated" });
+      }
       continue;
     }
 

@@ -18,6 +18,8 @@ import {
   type AttachmentAuth,
 } from "../notes/attachmentSync.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
+import { hasEmbedOnlyFirstLine } from "../notes/encodeNoteRecord.js";
+import { titleFromNoteFileName } from "../notes/noteTitleParagraph.js";
 import { NotClonedDirectoryError, NotesUnavailableError } from "../errors.js";
 import { isEnoent } from "../fsUtil.js";
 import { claimFreeFileName, fileNameCarriesTitle, noteFileNameFor, titleNeedingFrontmatter } from "../notes/filename.js";
@@ -320,7 +322,13 @@ export async function runPull(
         // frontmatter. Undefined for everything else, which is what
         // *removes* the key from a note that has just been retitled to
         // something a name can carry after all.
-        const recordedTitle = titleNeedingFrontmatter(decoded.titleLine, titleMode);
+        // Replaying an unchanged object note must not adopt a newly readable
+        // filename as an incidental migration. Existing pending renames still
+        // follow the remote title through the normal path below.
+        const preserveName = titleMode === "filename" && existing !== undefined && atTrackedTag(record, existing) &&
+          existing.pendingRename === undefined && hasEmbedOnlyFirstLine(decoded.bodyText);
+        const titleLine = preserveName ? titleFromNoteFileName(existing.file) : decoded.titleLine;
+        const recordedTitle = preserveName ? existing.frontmatterTitle : titleNeedingFrontmatter(titleLine, titleMode);
         // The changelist line already shows the "Untitled.md" this landed at,
         // which is baffling on its own - the note isn't untitled. Say where
         // its real title went, and why it had to go there.
@@ -343,7 +351,7 @@ export async function runPull(
         const placement = placeNote(layout, record, source.sharedZoneOwner);
         // Built once, so the two skips below can't drift apart.
         const derived: DerivedNoteFields = {
-          titleLine: decoded.titleLine,
+          titleLine,
           folderRecordName: placement.folderRecordName,
           frontmatterTitle: recordedTitle,
           unpublishableReason: decoded.unpublishableReason,
@@ -462,7 +470,7 @@ export async function runPull(
         }
 
         if (!existing) {
-          const relativeFile = await newNoteFile(targetDir, noteDir, decoded.titleLine, titleMode, usedFileNames);
+          const relativeFile = await newNoteFile(targetDir, noteDir, titleLine, titleMode, usedFileNames);
 
           const filePath = path.join(targetDir, relativeFile);
           await writeFile(
@@ -575,7 +583,7 @@ export async function runPull(
         // new title, so a name that silently disagrees with the note is a
         // retitle waiting to be reverted by whoever next touches the file.
         // Deliberately after `localFileState`, which reads the old path.
-        const { file, pendingRename } = await renameForRemoteTitle(targetDir, existing.file, decoded.titleLine, titleMode, {
+        const { file, pendingRename } = preserveName ? { file: existing.file, pendingRename: undefined } : await renameForRemoteTitle(targetDir, existing.file, titleLine, titleMode, {
           usedFileNames,
           onDisk: local !== "missing",
           defer: deferRenames,

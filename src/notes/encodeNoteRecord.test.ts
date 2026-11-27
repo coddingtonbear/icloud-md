@@ -55,6 +55,25 @@ function makeRecord(fields: CloudKitRecord["fields"]): CloudKitRecord {
   return { recordName: "R1", recordType: "Note", fields, recordChangeTag: "1a" };
 }
 
+for (const text of ["\uFFFC\nEdited prose", " \uFFFC \r\nEdited prose"]) {
+  test(`content updates preserve independent title for ${JSON.stringify(text)}`, () => {
+    const title = Buffer.from("Independent drawing title").toString("base64");
+    const record = makeRecord({ TitleEncrypted: { type: "ENCRYPTED_BYTES", value: title } });
+    const fields = buildNoteUpdateFields(record, "new-document", text, 222);
+    assert.equal(fields.TitleEncrypted?.value, title);
+    assert.equal(fields.TextDataEncrypted?.value, "new-document");
+    assert.equal(fields.ModificationDate?.value, 222);
+  });
+}
+
+for (const text of ["New text title\n\uFFFC", "Caption \uFFFC\nBody"]) {
+  test(`content updates derive a title for text-first content ${JSON.stringify(text)}`, () => {
+    const record = makeRecord({ TitleEncrypted: { type: "ENCRYPTED_BYTES", value: "b2xk" } });
+    const fields = buildNoteUpdateFields(record, "new-document", text, 222);
+    assert.equal(Buffer.from(String(fields.TitleEncrypted?.value), "base64").toString(), deriveNoteTitle(text));
+  });
+}
+
 test("buildNoteUpdateFields overrides content fields and echoes the rest", () => {
   const record = makeRecord({
     TitleEncrypted: { value: "b2xk", type: "ENCRYPTED_BYTES" }, // "old"
