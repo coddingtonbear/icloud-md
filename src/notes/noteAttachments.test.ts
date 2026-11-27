@@ -153,11 +153,20 @@ test("decodeAttachmentFilename falls back to a synthesized name when absent", ()
   assert.equal(decodeAttachmentFilename(undefined, "REC3", "some.unknown.uti"), "REC3");
 });
 
-test("parseAssetField extracts downloadURL and fileChecksum from an ASSETID field", () => {
+test("parseAssetField extracts downloadURL, fileChecksum and size from an ASSETID field", () => {
   const field = {
     value: { downloadURL: "https://cvws.icloud-content.com/x", fileChecksum: "abc123", size: 42 },
     type: "ASSETID",
   };
+  assert.deepEqual(parseAssetField(field), {
+    downloadURL: "https://cvws.icloud-content.com/x",
+    fileChecksum: "abc123",
+    size: 42,
+  });
+});
+
+test("parseAssetField leaves size out when the field doesn't carry one", () => {
+  const field = { value: { downloadURL: "https://cvws.icloud-content.com/x", fileChecksum: "abc123" }, type: "ASSETID" };
   assert.deepEqual(parseAssetField(field), { downloadURL: "https://cvws.icloud-content.com/x", fileChecksum: "abc123" });
 });
 

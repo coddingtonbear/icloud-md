@@ -305,6 +305,11 @@ resolution live.
   remote file's checksum actually changes. An `attachments/` directory is
   reserved for them, so a note saved inside one is never pushed; `status`
   and `push` warn about it.
+  An attachment the server won't hand over — one it lists as empty, or
+  whose download it refuses outright (HTTP 400, 404 or 410) — doesn't stop
+  the run: the note is written with a placeholder where that attachment
+  belongs, and `clone` or `pull` warns about it. A copy already on disk is
+  kept as it is.
 - **Table edits.** Cell edits, and inserting/deleting a contiguous run of
   rows or columns, round-trip both ways. Row/column *reordering*, and any
   edit that adds/removes rows and columns in the same save, are refused

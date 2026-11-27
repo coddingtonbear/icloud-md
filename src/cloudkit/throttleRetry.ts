@@ -186,7 +186,9 @@ export async function fetchWithThrottleRetry(
     if (!failure.throttled || attempt >= maxAttempts) {
       throw new CloudKitRequestFailedError(
         options.describeFailure(failure),
-        failure.throttled ? { hint: throttleExhaustedHint(failure) } : {},
+        failure.throttled
+          ? { hint: throttleExhaustedHint(failure), status: failure.status }
+          : { status: failure.status },
       );
     }
 
