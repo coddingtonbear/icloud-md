@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { link, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { CloneState } from "./cloneState.js";
@@ -8,6 +8,7 @@ import { buildVaultLayout } from "./folderLayout.js";
 import { reconcileNotePlacements, removeStaleDirs } from "./folderReconcile.js";
 import { writeBaseCopy, readBaseCopy } from "./baseCopy.js";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
+import { aliasCase } from "../testSupport.js";
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), "folderreconcile-test-"));
@@ -146,10 +147,11 @@ test("a case-only folder rename doesn't suffix the notes for colliding with them
       REC: { file: "recipes/Pie.md", recordChangeTag: "a", modificationDate: 1, folderRecordName: "R" },
     };
     await writeVaultFile(root, "recipes/Pie.md", "moving");
-    // On APFS or NTFS, "Recipes/Pie.md" resolves to "recipes/Pie.md". A hard
-    // link reproduces that here: the target name is the source file itself.
-    await mkdir(path.join(root, "Recipes"));
-    await link(path.join(root, "recipes/Pie.md"), path.join(root, "Recipes/Pie.md"));
+    // On APFS or NTFS, "Recipes/Pie.md" resolves to "recipes/Pie.md".
+    // `aliasCase` reproduces that here: the target name is the source file
+    // itself. (`recursive`, because there "Recipes" already exists too.)
+    await mkdir(path.join(root, "Recipes"), { recursive: true });
+    await aliasCase(path.join(root, "recipes/Pie.md"), path.join(root, "Recipes/Pie.md"));
 
     const relocations = await reconcileNotePlacements(root, layout, notes, {});
 
