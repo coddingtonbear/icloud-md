@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { link, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { aliasCase } from "../testSupport.js";
 import {
   claimFreeFileName,
   fileNameCarriesTitle,
@@ -69,10 +70,10 @@ test("claimFreeFileName treats a dangling symlink as taken", async () => {
 test("claimFreeFileName lets a candidate that is the file being moved through, and nothing else", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "filename-test-"));
   try {
-    // A hard link stands in for a case-insensitive filesystem, where
-    // "Pie.md" and "pie.md" are one file.
+    // On a case-insensitive filesystem "Pie.md" and "pie.md" are one file;
+    // `aliasCase` hard-links them on one that isn't.
     await writeFile(path.join(dir, "pie.md"), "moving", "utf-8");
-    await link(path.join(dir, "pie.md"), path.join(dir, "Pie.md"));
+    await aliasCase(path.join(dir, "pie.md"), path.join(dir, "Pie.md"));
     await writeFile(path.join(dir, "other.md"), "someone else", "utf-8");
 
     assert.equal(await claimFreeFileName(dir, "Pie.md", new Set(), path.join(dir, "pie.md")), "Pie.md");
