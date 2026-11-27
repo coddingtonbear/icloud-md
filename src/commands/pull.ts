@@ -49,6 +49,7 @@ import { applyNoteFileTimes, modificationDateOf } from "../notes/noteTimestamps.
 import { listVersions, recordVersion } from "../notes/versionHistory.js";
 import type { SyncNotice, SyncProgress } from "../progress.js";
 import { isPurged } from "./delete.js";
+import { backfillNewPrivateNoteBodies } from "./privateNoteBodies.js";
 
 const PRIVATE_NOTES_ZONE = { zoneName: "Notes" };
 
@@ -149,14 +150,26 @@ export async function runPull(
     state.syncToken,
     onPage,
   );
-  const { zones: sharedZones, skippedZones } = await fetchSharedNoteRecords(
-    auth.session,
-    auth.ckdatabasewsUrl,
-    auth.dsid,
-    state.sharedZoneSyncTokens ?? {},
-    onPage,
-  );
-  await backfillSharePermissions(auth.session, auth.ckdatabasewsUrl, auth.dsid, state.folders ?? {}, sharedZones);
+  // The private lookup only needs the private walk, so it runs alongside the
+  // shared fetch rather than after it.
+  const ckdatabasewsUrl = auth.ckdatabasewsUrl;
+  const [{ zones: sharedZones, skippedZones }, privateBackfill] = await Promise.all([
+    fetchSharedNoteRecords(auth.session, ckdatabasewsUrl, auth.dsid, state.sharedZoneSyncTokens ?? {}, onPage).then(
+      async (shared) => {
+        await backfillSharePermissions(auth.session, ckdatabasewsUrl, auth.dsid, state.folders ?? {}, shared.zones);
+        return shared;
+      },
+    ),
+    backfillNewPrivateNoteBodies(
+      auth.session,
+      ckdatabasewsUrl,
+      auth.dsid,
+      records,
+      state.notes,
+      state.pendingBodyLookups,
+    ),
+  ]);
+  const pendingBodies = new Set(privateBackfill.pending);
 
   const notes: CloneState["notes"] = { ...state.notes };
   const attachments: NonNullable<CloneState["attachments"]> = { ...state.attachments };
@@ -240,6 +253,19 @@ export async function runPull(
     summary.notices.push({ level: "warn", message: skippedZoneNotice(skipped, owner) });
   }
 
+  if (pendingBodies.size > 0) {
+    const why =
+      privateBackfill.lookupError === undefined
+        ? "came through without their text, even when looked up"
+        : `came through without their text, and looking them up failed (${privateBackfill.lookupError})`;
+    summary.notices.push({
+      level: "warn",
+      message:
+        `${pendingBodies.size} new note(s) ${why} - they were skipped, ` +
+        "and the next pull will look them up again",
+    });
+  }
+
   // Rebuild the directory layout from carried state + this run's folder
   // records: new folders (own or shared) materialize as directories, a
   // renamed folder gets a freshly derived directory name, and everything
@@ -301,15 +327,18 @@ export async function runPull(
           // listings omit bodies; a lookup backfill can fail). Untracking on
           // it would sever the sync relationship over a transient gap, so a
           // tracked note is left exactly as it is; the shared-database fetch
-          // already holds back whole zones with missing bodies, so this is
-          // the last line of defense, not the usual path.
+          // already holds back whole zones with missing bodies, and a new
+          // private note is looked up and kept pending (see
+          // `backfillNewPrivateNoteBodies`), so this is the last line of
+          // defense, not the usual path.
           if (decoded.reason === "missing-body") {
             if (existing) {
               summary.notices.push({
                 level: "warn",
                 message: `${existing.file}: the server sent this note without its text this run - left unchanged and still tracked`,
               });
-            } else {
+            } else if (!pendingBodies.has(record.recordName)) {
+              // A pending note is only waiting, and has its own notice.
               summary.skippedNewUnsyncable += 1;
             }
             continue;
@@ -768,6 +797,9 @@ export async function runPull(
     attachments,
     tableAttachments,
     trashed,
+    // Replaced, not merged: the backfill was handed the stored list and
+    // returned everything still waiting.
+    pendingBodyLookups: pendingBodies.size > 0 ? [...pendingBodies] : undefined,
   });
 
   return summary;

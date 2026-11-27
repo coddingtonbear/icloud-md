@@ -229,6 +229,16 @@ export interface CloneState {
    * files written before the trash registry existed.
    */
   trashed?: Record<string, CloneStateTrashedEntry> | undefined;
+  /**
+   * recordNames of private notes that are new to this vault and that the
+   * server has so far only sent without their text, even when looked up by
+   * id. The private sync token moves past them regardless, so this list is
+   * what makes the next `pull` ask for them again - see
+   * `backfillNewPrivateNoteBodies`. An id leaves once its note arrives or is
+   * gone. Absent whenever nothing is waiting, which is nearly always, and in
+   * state files written before the list existed.
+   */
+  pendingBodyLookups?: string[] | undefined;
 }
 
 export const STATE_DIR_NAME = ".icloud-md";
@@ -444,6 +454,15 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
     }
   }
 
+  let pendingBodyLookups: string[] | undefined;
+  if (value.pendingBodyLookups !== undefined) {
+    const names: unknown = value.pendingBodyLookups;
+    if (!Array.isArray(names) || !names.every((name): name is string => typeof name === "string")) {
+      throw new CorruptStateFileError(`${filePath} has a malformed "pendingBodyLookups" field.`);
+    }
+    pendingBodyLookups = names.length > 0 ? names : undefined;
+  }
+
   let account: CloneStateAccount | undefined;
   if (value.account !== undefined) {
     if (!isRecord(value.account) || typeof value.account.appleId !== "string" || typeof value.account.dsid !== "string") {
@@ -466,6 +485,7 @@ function assertCloneState(value: unknown, filePath: string): CloneState {
     attachments,
     tableAttachments,
     trashed,
+    pendingBodyLookups,
   };
 }
 
