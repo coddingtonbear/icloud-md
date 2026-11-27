@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fileNameCarriesTitle, noteFileName, noteFileNameFor, titleNeedingFrontmatter, uniqueFileName } from "./filename.js";
+import { link, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import {
+  claimFreeFileName,
+  fileNameCarriesTitle,
+  noteFileName,
+  noteFileNameFor,
+  titleNeedingFrontmatter,
+  uniqueFileName,
+} from "./filename.js";
 
 test("noteFileName derives a plain name from the title's first line", () => {
   assert.equal(noteFileName("Grocery list\nmilk, eggs"), "Grocery list.md");
@@ -26,6 +36,64 @@ test("uniqueFileName appends a Finder-style counter on collision", () => {
 test("uniqueFileName keeps counting past multiple collisions", () => {
   const used = new Set(["New Note.md", "New Note 2.md", "New Note 3.md"]);
   assert.equal(uniqueFileName("New Note.md", used), "New Note 4.md");
+});
+
+test("claimFreeFileName skips names taken on disk as well as claimed ones, and claims its answer", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "filename-test-"));
+  try {
+    await writeFile(path.join(dir, "New Note 2.md"), "untracked", "utf-8");
+    // A directory squatting on a name is just as taken as a file.
+    await mkdir(path.join(dir, "New Note 3.md"));
+    const used = new Set(["New Note.md"]);
+
+    assert.equal(await claimFreeFileName(dir, "New Note.md", used), "New Note 4.md");
+    assert.deepEqual([...used].sort(), ["New Note 2.md", "New Note 3.md", "New Note 4.md", "New Note.md"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("claimFreeFileName treats a dangling symlink as taken", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "filename-test-"));
+  try {
+    // stat() would follow it and see nothing; writing through it would
+    // create a file wherever it points.
+    await symlink(path.join(dir, "nowhere.md"), path.join(dir, "New Note.md"));
+
+    assert.equal(await claimFreeFileName(dir, "New Note.md", new Set()), "New Note 2.md");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("claimFreeFileName lets a candidate that is the file being moved through, and nothing else", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "filename-test-"));
+  try {
+    // A hard link stands in for a case-insensitive filesystem, where
+    // "Pie.md" and "pie.md" are one file.
+    await writeFile(path.join(dir, "pie.md"), "moving", "utf-8");
+    await link(path.join(dir, "pie.md"), path.join(dir, "Pie.md"));
+    await writeFile(path.join(dir, "other.md"), "someone else", "utf-8");
+
+    assert.equal(await claimFreeFileName(dir, "Pie.md", new Set(), path.join(dir, "pie.md")), "Pie.md");
+    assert.equal(await claimFreeFileName(dir, "Pie.md", new Set(), path.join(dir, "other.md")), "Pie 2.md");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("claimFreeFileName treats a hard link under a different name as taken", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "filename-test-"));
+  try {
+    // Same inode, but not a case-only alias: rename() between two links of
+    // one file is a no-op, so moving onto it would leave the old name behind.
+    await writeFile(path.join(dir, "Tart.md"), "moving", "utf-8");
+    await link(path.join(dir, "Tart.md"), path.join(dir, "Pie.md"));
+
+    assert.equal(await claimFreeFileName(dir, "Pie.md", new Set(), path.join(dir, "Tart.md")), "Pie 2.md");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("fileNameCarriesTitle accepts the name a title derives", () => {

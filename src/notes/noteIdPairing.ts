@@ -83,6 +83,25 @@ export interface ResolveNoteIdsInput {
   isTrackedFilePresent: (recordName: string) => boolean;
 }
 
+/** The untracked files claiming each id, in input order. A file with no
+ * usable id claims nothing. Shared by push's pairing and pull's search for
+ * a note moved by hand, so the two can't disagree about who claims what. */
+export function groupNoteIdClaims(untracked: readonly UntrackedFile[]): Map<string, string[]> {
+  const claimsById = new Map<string, string[]>();
+  for (const candidate of untracked) {
+    if (candidate.noteId === undefined) {
+      continue;
+    }
+    const files = claimsById.get(candidate.noteId);
+    if (files) {
+      files.push(candidate.file);
+    } else {
+      claimsById.set(candidate.noteId, [candidate.file]);
+    }
+  }
+  return claimsById;
+}
+
 /**
  * Sorts untracked files into moves, creates, and unresolvable duplicates.
  *
@@ -96,18 +115,7 @@ export function resolveNoteIds(input: ResolveNoteIdsInput): NoteIdResolution {
 
   // Group claimants by id first: a decision about any one file depends on
   // how many others claim the same note.
-  const claimsById = new Map<string, string[]>();
-  for (const candidate of input.untracked) {
-    if (candidate.noteId === undefined) {
-      continue;
-    }
-    const files = claimsById.get(candidate.noteId);
-    if (files) {
-      files.push(candidate.file);
-    } else {
-      claimsById.set(candidate.noteId, [candidate.file]);
-    }
-  }
+  const claimsById = groupNoteIdClaims(input.untracked);
 
   const resolvedAsMove = new Set<string>();
   const refused = new Set<string>();

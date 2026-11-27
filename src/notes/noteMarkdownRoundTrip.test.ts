@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { formatsRoundTripEqual, PLAIN_STYLE, type FormatParagraph, type InlineSpan } from "./noteFormat.js";
 import { parseNoteMarkdown } from "./parseNoteMarkdown.js";
-import { renderNoteMarkdown } from "./renderNoteMarkdown.js";
+import { readsBackFaithfully, renderNoteMarkdown } from "./renderNoteMarkdown.js";
 
 function p(kind: FormatParagraph["kind"], text: string, extra: Partial<FormatParagraph> = {}): FormatParagraph {
   const spans: InlineSpan[] = text.length ? [{ ...PLAIN_STYLE, length: text.length }] : [];
@@ -151,18 +151,75 @@ test("U+FFFC placeholders pass through rendering and parsing untouched", () => {
   assertRoundTrips([p("body", "￼"), p("body", "text ￼ inline")]);
 });
 
-test("parser refuses constructs Apple Notes can't express, with precise reasons", () => {
-  const deep = parseNoteMarkdown("#### too deep");
-  assert.equal(deep.status, "unsupported");
-  if (deep.status === "unsupported") assert.match(deep.reason, /depth-4 heading/);
+/** Parses `markdown`, asserting that it parses, and that it renders back
+ * byte-identically - the property literal degradation exists for. */
+function assertLiteral(markdown: string): FormatParagraph[] {
+  const parsed = parseNoteMarkdown(markdown);
+  assert.equal(parsed.status, "ok", parsed.status === "ok" ? undefined : parsed.reason);
+  if (parsed.status !== "ok") throw new Error("unreachable");
+  assert.ok(parsed.literalLines > 0, "expected literal lines");
+  assert.equal(renderNoteMarkdown(parsed.paragraphs), markdown);
+  return parsed.paragraphs;
+}
 
-  const rule = parseNoteMarkdown("a\n\n---\n\nb");
-  assert.equal(rule.status, "unsupported");
-  if (rule.status === "unsupported") assert.match(rule.reason, /thematic break/);
+test("parser carries block constructs Apple Notes can't express as literal Body lines", () => {
+  const deep = assertLiteral("#### too deep");
+  assert.deepEqual(
+    deep.map((x) => [x.kind, x.text]),
+    [["body", "#### too deep"]],
+  );
 
-  const html = parseNoteMarkdown("<div>\nblock\n</div>");
-  assert.equal(html.status, "unsupported");
-  if (html.status === "unsupported") assert.match(html.reason, /HTML block/);
+  const rule = assertLiteral("a\n\n---\n\nb");
+  assert.deepEqual(
+    rule.map((x) => [x.kind, x.text]),
+    [["body", "a"], ["body", ""], ["body", "---"], ["body", ""], ["body", "b"]],
+  );
+
+  assertLiteral("<div>\nblock\n</div>");
+  assertLiteral("| a | b |\n|---|---|\n| 1 | 2 |");
+  assertLiteral("See a[^1].\n\n[^1]: The footnote.");
+  assertLiteral("See [x][ref].\n\n[ref]: https://example.com");
+  assertLiteral("##### five\n###### six");
+});
+
+test("literal lines keep their own blockquote depth and list indentation", () => {
+  const quoted = assertLiteral("> #### Deep quoted\n> ---\n>\n> after");
+  assert.deepEqual(
+    quoted.map((x) => [x.kind, x.blockQuoteLevel, x.text]),
+    [
+      ["body", 1, "#### Deep quoted"],
+      ["body", 1, "---"],
+      ["body", 1, ""],
+      ["body", 1, "after"],
+    ],
+  );
+
+  const fenced = assertLiteral("- item\n  ```\n  code\n  ```\n- next");
+  assert.deepEqual(
+    fenced.map((x) => [x.kind, x.text]),
+    [
+      ["bulletList", "item"],
+      ["body", "  ```"],
+      ["body", "  code"],
+      ["body", "  ```"],
+      ["bulletList", "next"],
+    ],
+  );
+
+  assertLiteral("- item\n\n  > quoted in list");
+  assertLiteral("1. one\n   #### deep in ordered");
+});
+
+test("a construct on a list item's marker line takes the marker with it", () => {
+  const parsed = parseNoteMarkdown("- #### heading item\n\n  para");
+  assert.equal(parsed.status, "ok");
+  if (parsed.status !== "ok") return;
+  // The item's later paragraph is a continuation, not the item's first line.
+  assert.deepEqual(
+    parsed.paragraphs.map((x) => [x.kind, x.text]),
+    [["body", "- #### heading item"], ["body", ""], ["body", "para"]],
+  );
+  assertRoundTrips(parsed.paragraphs);
 });
 
 test("parser degrades unsupported inline constructs to their literal source text", () => {
@@ -298,16 +355,19 @@ test("ordinary words keep the punctuation GFM autolink literals make ambiguous",
   );
 });
 
-test("tokens that aren't safe to write raw keep their escapes", () => {
+test("tokens that aren't safe to write raw still round-trip, and real markdown keeps its escapes", () => {
   // Emphasis-active characters and entity-shaped runs can't ride along in a
-  // raw node, so the whole token falls back to escaped text.
-  assert.equal(assertRoundTrips([p("body", "www.exa_mple.com")]), "www\\.exa\\_mple.com");
-  assert.equal(assertRoundTrips([p("body", "www.exa*mple*.com")]), "www\\.exa\\*mple\\*.com");
-  assert.equal(assertRoundTrips([p("body", "www.example.com/?a&amp;b")]), "www\\.example.com/?a\\&amp;b");
-  // Same boundary rule as bare URLs: what follows a raw run must be
-  // whitespace or the end of the line, because an autolink literal would
-  // swallow it on reparse.
-  assert.equal(assertRoundTrips([p("body", 'say "www.example.com" ok')]), 'say "www\\.example.com" ok');
+  // raw token, and a raw run must end at whitespace or the end of the line
+  // (an autolink literal would swallow what follows). These lines still come
+  // out unescaped - as literal lines, which reparse as GFM autolink literals
+  // and collapse back to the same plain text - but only because the reparse
+  // check says so; see "literal lines" below.
+  assert.equal(assertRoundTrips([p("body", "www.exa_mple.com")]), "www.exa_mple.com");
+  assert.equal(assertRoundTrips([p("body", "www.exa*mple*.com")]), "www.exa*mple*.com");
+  assert.equal(assertRoundTrips([p("body", 'say "www.example.com" ok')]), 'say "www.example.com" ok');
+  // Inside an autolink literal an entity-shaped run stays text, so even
+  // this line passes the check.
+  assert.equal(assertRoundTrips([p("body", "www.example.com/?a&amp;b")]), "www.example.com/?a&amp;b");
   // Real markdown still gets its escapes, even carrying a token.
   assert.equal(assertRoundTrips([p("body", "# heading www.example.com")]), "\\# heading www.example.com");
 });
@@ -318,8 +378,9 @@ test("each unescaping rule stands on its own when the other one fails", () => {
   // unrelated `flow.ts`, which is why the spellings are tried in combination.
   assert.equal(assertRoundTrips([p("bulletList", "[ ]"), p("body", "flow.ts")]), "- \\[ ]\nflow.ts");
   // The mirror image: the token here can't be written raw (`_`), and the
-  // wikilink still keeps its brackets.
-  assert.equal(assertRoundTrips([p("body", "[[Note]] and www.exa_mple.com")]), "[[Note]] and www\\.exa\\_mple.com");
+  // wikilink still keeps its brackets - and then the whole line can be
+  // literal anyway.
+  assert.equal(assertRoundTrips([p("body", "[[Note]] and www.exa_mple.com")]), "[[Note]] and www.exa_mple.com");
 });
 
 test("Obsidian wikilinks keep their bare brackets and round-trip as plain text", () => {
@@ -382,8 +443,11 @@ test("bracket runs that aren't safe to emit raw stay escaped but still round-tri
   ]);
   // A bracket run that would become a link if written bare.
   assert.equal(assertRoundTrips([p("body", "[a](b)")]), "\\[a]\\(b)");
-  assert.equal(assertRoundTrips([p("body", "[a][b]")]), "\\[a][b]");
-  assert.equal(assertRoundTrips([p("body", "[a]: https://example.com")]), "\\[a]: https://example.com");
+  // These two only *look* like links: a reference with no definition is
+  // text, and a definition degrades to its literal line on parse - so as
+  // whole literal lines they are safe.
+  assert.equal(assertRoundTrips([p("body", "[a][b]")]), "[a][b]");
+  assert.equal(assertRoundTrips([p("body", "[a]: https://example.com")]), "[a]: https://example.com");
 });
 
 test("Obsidian callouts, tags, highlights and footnotes keep their notation too", () => {
@@ -417,12 +481,13 @@ test("markup that really is markdown stays escaped", () => {
   assert.equal(assertRoundTrips([p("body", "# Real heading")]), "\\# Real heading");
   assert.equal(assertRoundTrips([p("body", "#")]), "\\#");
   assert.equal(assertRoundTrips([p("body", "#\tTabbed")]), "\\#\tTabbed");
-  // A line of nothing but `=` is a setext underline; `---` a thematic break.
+  // A line of nothing but `=` (or `-`) under prose is a setext underline.
   assert.equal(assertRoundTrips([p("body", "intro"), p("body", "===")]), "intro\n\\===");
-  assert.equal(assertRoundTrips([p("body", "---")]), "\\---");
-  // Character references and raw html are not Obsidian notation.
+  assert.equal(assertRoundTrips([p("body", "intro"), p("body", "---")]), "intro\n\\---");
+  // A character reference would decode.
   assert.equal(assertRoundTrips([p("body", "&amp;")]), "\\&amp;");
-  assert.equal(assertRoundTrips([p("body", "<div>x</div>")]), "\\<div>x\\</div>");
+  // Emphasis typed as text on a device would become real emphasis.
+  assert.equal(assertRoundTrips([p("body", "*not italic*")]), "\\*not italic\\*");
 });
 
 test("the Obsidian spelling is dropped whole when it would change the document", () => {
@@ -432,9 +497,54 @@ test("the Obsidian spelling is dropped whole when it would change the document",
   const rendered = assertRoundTrips([p("bulletList", "[ ]")]);
   assert.notEqual(rendered, "- [ ]");
 
-  // The fallback is per *note*, not per run: this note's wikilink loses its
-  // bare brackets because of the checkbox-shaped bullet sharing the file.
-  assert.equal(assertRoundTrips([p("bulletList", "[ ]"), p("body", "[[Note]]")]), "- \\[ ]\n\\[\\[Note]]");
+  // The fallback is per *note*, not per run - but literal lines are then
+  // tried line by line, so the wikilink sharing the file gets its bare
+  // brackets back anyway.
+  assert.equal(assertRoundTrips([p("bulletList", "[ ]"), p("body", "[[Note]]")]), "- \\[ ]\n[[Note]]");
+});
+
+test("literal lines: markdown stored as note text comes back as that markdown", () => {
+  // What `parseNoteMarkdown` carries literally - and what someone might type
+  // on a device - is written back unescaped wherever reparsing provably
+  // yields the same note.
+  assert.equal(assertRoundTrips([p("body", "Use `npm test` here")]), "Use `npm test` here");
+  assert.equal(assertRoundTrips([p("bulletList", "run `npm test`")]), "- run `npm test`");
+  assert.equal(assertRoundTrips([p("heading", "The `x` flag")]), "## The `x` flag");
+  assert.equal(assertRoundTrips([p("body", "![alt](image.png)")]), "![alt](image.png)");
+  assert.equal(assertRoundTrips([p("body", "#### Deep")]), "#### Deep");
+  assert.equal(assertRoundTrips([p("body", "<div>x</div>")]), "<div>x</div>");
+  assert.equal(assertRoundTrips([p("body", "[^1]: the footnote")]), "[^1]: the footnote");
+  assert.equal(assertRoundTrips([p("body", "intro"), p("body", ""), p("body", "---")]), "intro\n\n---");
+  assert.equal(assertRoundTrips([p("body", "#### Quoted", { blockQuoteLevel: 1 })]), "> #### Quoted");
+  assert.equal(
+    assertRoundTrips([p("body", "| a | b |"), p("body", "|---|---|"), p("body", "| 1 | 2 |")]),
+    "| a | b |\n|---|---|\n| 1 | 2 |",
+  );
+  // Inside one styled span, the piece is still literal.
+  assert.equal(
+    assertRoundTrips([
+      {
+        ...p("body", "run `x` now"),
+        spans: [
+          { ...PLAIN_STYLE, length: 4 },
+          { ...PLAIN_STYLE, bold: true, length: 3 },
+          { ...PLAIN_STYLE, length: 4 },
+        ],
+      },
+    ]),
+    "run **`x`** now",
+  );
+});
+
+test("literal lines are judged per line, in context, and fall back to escaping", () => {
+  // A lone fence would swallow the rest of the note; a pair would make a
+  // code block. Neither is the same note, so both stay escaped - and the
+  // unrelated line still goes literal.
+  assert.equal(assertRoundTrips([p("body", "```"), p("body", "x"), p("body", "```")]), "\\`\\`\\`\nx\n\\`\\`\\`");
+  assert.equal(assertRoundTrips([p("body", "```"), p("body", "`y`")]), "\\`\\`\\`\n`y`");
+  // A first line of exactly `---` would read as a frontmatter fence.
+  assert.equal(assertRoundTrips([p("body", "---"), p("body", "x")]), "\\---\nx");
+  assert.equal(assertRoundTrips([p("body", "---")]), "\\---");
 });
 
 test("URLs that could open inline constructs fall back to escaped text but still round-trip", () => {
@@ -446,4 +556,107 @@ test("URLs that could open inline constructs fall back to escaped text but still
   assertRoundTrips([p("body", "foohttps://example.com")]);
   // Emphasis-active characters in the URL.
   assertRoundTrips([p("body", "https://example.com/*star*")]);
+});
+
+test("a fence's info string is kept by carrying the block literally", () => {
+  // Monospaced paragraphs can't hold a language, and dropping it broke the
+  // Obsidian plugin reading the block: this used to come back as a bare
+  // fence.
+  const paragraphs = assertLiteral("```js\nconst x = 1;\n```");
+  assert.deepEqual(
+    paragraphs.map((x) => [x.kind, x.text]),
+    [["body", "```js"], ["body", "const x = 1;"], ["body", "```"]],
+  );
+  assertLiteral('```js title="x.js"\nx\n```');
+  assertLiteral("> ```dataview\n> LIST\n> ```");
+
+  // A fence without one is still a monospaced block.
+  const plain = parseNoteMarkdown("```\nconst x = 1;\n```");
+  assert.equal(plain.status, "ok");
+  if (plain.status !== "ok") return;
+  assert.deepEqual(
+    plain.paragraphs.map((x) => [x.kind, x.text]),
+    [["monospaced", "const x = 1;"]],
+  );
+  assert.equal(plain.literalLines, 0);
+});
+
+test("an Obsidian itinerary note round-trips byte for byte", () => {
+  // A real note: plugin blocks keyed by their fence's language, between
+  // headings and prose, including a prose line directly above a heading.
+  const itinerary = [
+    "```itinerary",
+    "initialDate: 2026-12-16",
+    "```",
+    "",
+    "# ORD -> TOK",
+    "```itinerary-event",
+    "title: ORD->HND (UA 881)",
+    "start: 2026-12-16T13:05",
+    "end: 2026-12-17T17:45",
+    "startTimeZone: America/Chicago",
+    "endTimeZone: Asia/Tokyo",
+    "tag:",
+    "- flight",
+    "```",
+    "",
+    "United confirmation EM8E7E; seats 55K and 55L.",
+    "# Tokyo",
+    "```itinerary-event",
+    "start: 2026-12-17",
+    "end: 2026-12-21",
+    "title: Tokyo",
+    "tag: city",
+    "```",
+    "",
+    "# TOK -> LAX",
+    "",
+    "```itinerary-event",
+    "title: NRT->LAX (UA 33)",
+    "start: 2026-12-29T17:30",
+    "color: blue",
+    "tag:",
+    "- flight",
+    "```",
+    "",
+    "Departs from Narita, not Haneda.",
+  ].join("\n");
+  const paragraphs = assertLiteral(itinerary);
+  assert.equal(readsBackFaithfully(paragraphs), true);
+  // The headings are still real headings in the note.
+  assert.deepEqual(
+    paragraphs.filter((x) => x.kind === "title").map((x) => x.text),
+    ["ORD -> TOK", "Tokyo", "TOK -> LAX"],
+  );
+});
+
+test("readsBackFaithfully reports whether a note survives the pull-side round trip", () => {
+  assert.equal(readsBackFaithfully([p("body", "---"), p("body", "#### Deep")]), true);
+  // A list nested two levels deeper than its parent has no markdown
+  // spelling that parses back to the same indents.
+  assert.equal(readsBackFaithfully([p("bulletList", "a"), p("bulletList", "b", { indent: 2 })]), false);
+});
+
+test("a fence left unclosed in a list item doesn't take the next item's line with it", () => {
+  // remark ends the fence at column 1 of the next item's marker line; that
+  // line must reach the note once, as the item it is.
+  for (const markdown of ["- ```js\n  a\n- b", "- a\n  ```js\n  x\n- b", "> - ```js\n>   a\n> - b"]) {
+    const parsed = parseNoteMarkdown(markdown);
+    assert.equal(parsed.status, "ok");
+    if (parsed.status !== "ok") continue;
+    const texts = parsed.paragraphs.map((x) => x.text);
+    assert.equal(texts.filter((text) => text.endsWith("b")).length, 1, `duplicated a line: ${JSON.stringify(texts)}`);
+    assert.equal(parsed.paragraphs[parsed.paragraphs.length - 1]!.kind, "bulletList");
+    assert.equal(renderNoteMarkdown(parsed.paragraphs), markdown);
+  }
+});
+
+test("in a note with embeds, literal lines never add table- or marker-shaped text", () => {
+  // Push finds each embed's table block by scanning the text and refuses on
+  // an extra one, so phone-typed pipes stay escaped next to a real embed...
+  const withEmbed = renderNoteMarkdown([p("body", "￼"), p("body", "|a|b|"), p("body", "|-|-|"), p("body", "Use `x`")]);
+  assert.match(withEmbed, /\\\|-\|-\|/);
+  assert.match(withEmbed, /Use `x`/);
+  // ...and are literal without one.
+  assert.equal(assertRoundTrips([p("body", "|a|b|"), p("body", "|-|-|")]), "|a|b|\n|-|-|");
 });

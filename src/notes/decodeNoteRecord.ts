@@ -82,9 +82,33 @@ export interface ClassifyNoteOptions {
   titleMode?: TitleMode;
 }
 
+/**
+ * Whether Apple keeps this note's text in a separate `TextDataAsset` file
+ * rather than inline in `TextDataEncrypted` - what it does past some size.
+ * No client write to such a record has been captured, so every write path
+ * (edit, revert, move, delete) refuses one.
+ */
+export function storesTextAsAsset(record: CloudKitRecord): boolean {
+  return record.fields.TextDataAsset?.value != null;
+}
+
+/** The `unpublishableReason` (and refusal wording) for a `storesTextAsAsset` note. */
+export const TEXT_AS_ASSET_REASON = "is so large that Apple keeps its text in a separate file, which can't be written back yet";
+
 /** Shared skip/decode rules used by `clone`, `pull`, and `push` so they can't drift apart. */
 export function classifyNoteRecord(record: CloudKitRecord, options: ClassifyNoteOptions = {}): NoteDecodeResult {
-  if (isDeleted(record)) {
+  const result = classifyNoteBody(record, options);
+  // A note whose text Apple moved into a TextDataAsset reads like any other
+  // once `inlineAssetBodies` has fetched it, but writing it back would mean
+  // uploading a new asset - a path never captured - so it arrives read-only.
+  if (result.status === "ok" && result.publishable && storesTextAsAsset(record)) {
+    return { ...result, publishable: false, unpublishableReason: TEXT_AS_ASSET_REASON };
+  }
+  return result;
+}
+
+function classifyNoteBody(record: CloudKitRecord, options: ClassifyNoteOptions): NoteDecodeResult {
+  if (isDeletedNote(record)) {
     return { status: "deleted" };
   }
 
@@ -190,7 +214,9 @@ export function classifyNoteRecord(record: CloudKitRecord, options: ClassifyNote
   return { ...base, markdownText: rendered, format: format.paragraphs, titleStripped: stripTitle, publishable: true };
 }
 
-function isDeleted(record: CloudKitRecord): boolean {
+/** Whether a note record is gone for sync purposes: a tombstone, marked
+ * `Deleted`, or sitting in Recently Deleted. */
+export function isDeletedNote(record: CloudKitRecord): boolean {
   if (record.deleted === true) {
     return true;
   }

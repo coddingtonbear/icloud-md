@@ -1,4 +1,5 @@
 import path from "node:path";
+import { lstatIfPresent } from "../fsUtil.js";
 import { carriedTitleSpelling, encodeTitleStem, titleIsRepresentable } from "./titleFilename.js";
 
 /**
@@ -119,4 +120,62 @@ export function uniqueFileName(fileName: string, usedFileNames: ReadonlySet<stri
     candidate = `${stem} ${n}${ext}`;
   }
   return candidate;
+}
+
+/**
+ * `uniqueFileName` for a name about to be written into `dirPath`: also steers
+ * clear of anything already on disk there, then claims the result in
+ * `usedFileNames`. Tracked names alone aren't enough wherever pull writes or
+ * moves a file - a file the user created and hasn't pushed is untracked, and
+ * a plain `writeFile`/`rename` onto its name destroys it. Names found taken on
+ * disk are claimed too, so later calls in the same run skip them without
+ * another stat.
+ *
+ * `ownPath` is the file being moved or renamed, when there is one. A
+ * candidate that turns out to *be* that file isn't taken: on a
+ * case-insensitive filesystem (APFS, NTFS) a case-only change - folder
+ * "recipes" retitled "Recipes", note "groceries" retitled "Groceries" -
+ * resolves the new name to the very file being moved, and counting that as
+ * a collision would give it a needless " 2" suffix. Identity is device plus
+ * inode, so the check doesn't need to know how the filesystem folds case.
+ * The two paths must also differ only by case, though: a real hard link
+ * under another name is the same inode too, but `rename()` between two links
+ * of one file does nothing, which would leave the old name behind as an
+ * untracked copy - so a hard link counts as taken like any other file.
+ */
+export async function claimFreeFileName(
+  dirPath: string,
+  fileName: string,
+  usedFileNames: Set<string>,
+  ownPath?: string,
+): Promise<string> {
+  const own = ownPath === undefined ? undefined : await lstatIfPresent(ownPath);
+  let candidate = uniqueFileName(fileName, usedFileNames);
+  for (;;) {
+    const candidatePath = path.join(dirPath, candidate);
+    const found = await lstatIfPresent(candidatePath);
+    if (found === undefined) {
+      break;
+    }
+    if (
+      own !== undefined &&
+      ownPath !== undefined &&
+      found.dev === own.dev &&
+      found.ino === own.ino &&
+      foldCase(candidatePath) === foldCase(ownPath)
+    ) {
+      break;
+    }
+    usedFileNames.add(candidate);
+    candidate = uniqueFileName(fileName, usedFileNames);
+  }
+  usedFileNames.add(candidate);
+  return candidate;
+}
+
+/** A path as a case- and normalization-insensitive filesystem would compare
+ * it, close enough to tell a case-only alias of a file from a hard link under
+ * a genuinely different name. */
+function foldCase(filePath: string): string {
+  return filePath.normalize("NFC").toLowerCase();
 }

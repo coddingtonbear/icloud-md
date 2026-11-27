@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildNoteCreateFields, buildNotePurgeFields, buildNoteTrashFields, buildNoteUpdateFields, deriveNoteSnippet, deriveNoteTitle } from "./encodeNoteRecord.js";
+import {
+  buildNoteCreateFields,
+  buildNoteMoveFields,
+  buildNotePurgeFields,
+  buildNoteTrashFields,
+  buildNoteUpdateFields,
+  deriveNoteSnippet,
+  deriveNoteTitle,
+} from "./encodeNoteRecord.js";
 import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
 
 test("title is the first line for short notes", () => {
@@ -121,6 +129,18 @@ test("buildNotePurgeFields additionally sets Deleted: 1, matching the captured p
   assert.deepEqual(fields.Deleted, { value: 1 });
   assert.equal(fields.Folder !== undefined, true);
   assert.equal(fields.TextDataEncrypted?.value, "RE9D");
+});
+
+test("move and deletion field builders refuse a note that keeps its text in a TextDataAsset", () => {
+  // They send `TextDataAsset: {}`, captured only on notes whose asset was
+  // null; on one that keeps its text there it might clear it.
+  const record = makeRecord({
+    TextDataAsset: { value: { downloadURL: "https://cvws.icloud-content.example/B/asset-1" }, type: "ASSETID" },
+  });
+
+  assert.throws(() => buildNoteTrashFields(record, 999), /separate file/);
+  assert.throws(() => buildNotePurgeFields(record, 999), /separate file/);
+  assert.throws(() => buildNoteMoveFields(record, "F-RECIPES", 999), /separate file/);
 });
 
 test("deletion field builders tolerate a broken record missing echoable fields entirely", () => {

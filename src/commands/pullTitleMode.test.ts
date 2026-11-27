@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { renameForRemoteTitle } from "./pull.js";
@@ -75,6 +75,22 @@ test("a uniquified name is already an acceptable spelling, so it isn't walked up
     });
 
     assert.equal(file, "Notes/Groceries 2.md");
+  }));
+
+test("a case-only retitle isn't suffixed for colliding with its own file", () =>
+  withVault(async (dir) => {
+    // On APFS or NTFS, "Notes/Groceries.md" *is* "Notes/groceries.md". A hard
+    // link reproduces that on a case-sensitive test filesystem: two names,
+    // one file.
+    await writeFile(path.join(dir, "Notes/groceries.md"), "Milk", "utf-8");
+    await link(path.join(dir, "Notes/groceries.md"), path.join(dir, "Notes/Groceries.md"));
+
+    const { file } = await renameForRemoteTitle(dir, "Notes/groceries.md", "Groceries", "filename", {
+      usedFileNames: used("Notes/groceries.md"),
+      onDisk: true,
+    });
+
+    assert.equal(file, "Notes/Groceries.md");
   }));
 
 test("a rename never lands on top of a file the vault doesn't track", () =>

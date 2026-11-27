@@ -267,6 +267,9 @@ resolution live.
   folder renames/moves by moving the note's file rather than the
   directory, and `push` picks up local moves between folders (a rename or
   `mv` of a tracked file) and sends the matching folder change upstream.
+  A note you've moved but not pushed yet can still change on another
+  device: `pull` finds it at its new path by its `apple-note-id` and
+  merges the change in there, so the move still goes up on the next `push`.
   A directory the account doesn't have yet becomes a real Notes folder,
   nesting included — `mkdir Recipes/Desserts`, drop a note in, and `push`
   creates both folders ahead of the note.
@@ -299,7 +302,9 @@ resolution live.
 - **Attachments** (images and audio confirmed): downloaded and rewritten
   into note text as `attachments/`-relative links (attachments live
   alongside the note in its own folder); re-downloaded only when the
-  remote file's checksum actually changes.
+  remote file's checksum actually changes. An `attachments/` directory is
+  reserved for them, so a note saved inside one is never pushed; `status`
+  and `push` warn about it.
 - **Table edits.** Cell edits, and inserting/deleting a contiguous run of
   rows or columns, round-trip both ways. Row/column *reordering*, and any
   edit that adds/removes rows and columns in the same save, are refused
@@ -310,11 +315,24 @@ resolution live.
   (`> [!NOTE] Title`), tags (`#project`), highlights (`==like this==`), and
   footnotes (`[^1]`) keep their notation in the local file instead of
   picking up the backslashes plain CommonMark would want
-  (`\[\[Note]]`, `\#project`). Markup that really *is* markdown — a `#`
-  heading, `[a](b)`, a `---` rule — still gets escaped, and every note is
-  re-parsed before the friendlier spelling is kept, so it can never cost
-  fidelity. Inside a table cell an alias pipe is written `[[Note\|alias]]`,
-  the form Obsidian itself requires there.
+  (`\[\[Note]]`, `\#project`). Text that would turn into different
+  formatting if written bare — a `#` heading typed as text on a phone,
+  `[a](b)`, `*stars*` — still gets escaped, and every note is re-parsed
+  before the friendlier spelling is kept, so it can never cost fidelity.
+  Inside a table cell an alias pipe is written `[[Note\|alias]]`, the form
+  Obsidian itself requires there.
+- **Markdown Apple Notes can't express is kept as text, not refused.**
+  Inline code, images, `---` rules, `####`–`######` headings, HTML blocks,
+  footnote and link definitions, pipe tables that aren't one of the note's
+  own tables, code or quotes nested in a list item, and fenced blocks with
+  a language (` ```dataview `, ` ```itinerary `) all push as their literal
+  markdown — you'll see the raw syntax in Notes — and come back from the
+  next pull as the same markdown. A push that couldn't come back that way
+  is refused, so this can never leave a note read-only. A fence's language
+  is the one case that used to be *silently dropped* (the block pushed as
+  monospace and came back as a plain ` ``` `); such a block now shows as
+  plain text in Notes instead of monospace, which is the price of keeping
+  its language.
 - **Ordinary words keep their punctuation.** Because GFM turns `www.…`,
   `https://…` and `name@host` into links on sight, plain CommonMark escapes
   the punctuation that *might* start one — anywhere, in any word. That gave
@@ -334,6 +352,13 @@ resolution live.
   cleaning up notes this tool (or anything else) leaves in a broken state.
 - **`history`/`diff`/`revert`**, and push-time auto-merge via version
   history — the safety net for inspecting or undoing a bad edit.
+- **Apple's throttling is retried with bounded waits.** A long `push` can
+  receive `TRY_AGAIN_LATER` with a `Retry-After`. Database requests and
+  attachment downloads retry throttled responses up to five attempts.
+  Exponential backoff is capped at 30 seconds; longer server hints are
+  honoured up to five minutes per wait. Persistent throttling still fails
+  with advice to wait and check partial results before trying again.
+  Anything that isn't a throttle still fails on the first attempt.
 
 ## Where the title lives
 
@@ -366,7 +391,13 @@ A few consequences worth knowing before you pick:
   note asks for that title, which is the only way to give a note a title no
   file name could spell. `push` sends the retitle; the file itself is
   renamed on the next `pull`, which then drops the key again if the new
-  title turns out to be one a name can carry after all.
+  title turns out to be one a name can carry after all. Deleting the key
+  asks for the other title: the one the file name spells, so an
+  `Untitled.md` whose key you remove becomes a note titled "Untitled".
+  (Not when `pull` numbered the name, like an `Untitled 2.md` sitting next
+  to an `Untitled.md`: there `push` keeps the old title, still syncs the
+  rest of the note, and warns until you rename the file to the title you
+  want or put the key back. `restore` puts the key back too.)
 - **A note retitled on your phone gets its file renamed on the next
   `pull`**, since there is nowhere else for the new title to go. A retitle
   you asked for locally takes the same road, which is why renaming is always
@@ -401,6 +432,14 @@ integration never gets to it.
   parse that part of a note's internal format and editing one back risks
   corrupting it. `restore <file>` discards any local edit to get back to a
   clean copy. (Tables are the one exception — see above.)
+- **Very large notes are read-only.** Past some size (seen on a note of
+  ~830 KB compressed, most of it edit history) Apple moves a note's text
+  out of the record and into a separate file. `clone` and `pull` download
+  it and write the note like any other, but `push` and `revert` refuse to
+  edit it, and `push` and `delete` refuse to move or delete it: writing one
+  back means uploading a new file, a path that hasn't been captured from a
+  real client yet. `diff` and `object show` don't fetch that file, so they
+  still report such a note as having no text.
 - **Attachment upload is not supported, and isn't planned.** The iCloud web
   Notes editor itself has no way to attach a new file to a note, so there's
   no legitimate client behavior to reverse-engineer here.

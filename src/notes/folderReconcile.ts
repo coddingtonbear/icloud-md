@@ -3,7 +3,7 @@ import path from "node:path";
 import { isEnoent } from "../fsUtil.js";
 import { readBaseCopy, writeBaseCopy } from "./baseCopy.js";
 import type { CloneState } from "./cloneState.js";
-import { uniqueFileName } from "./filename.js";
+import { claimFreeFileName, uniqueFileName } from "./filename.js";
 import { expectedNoteDir, noteDirOf, type VaultLayout } from "./folderLayout.js";
 
 export interface Relocation {
@@ -59,18 +59,27 @@ export async function reconcileNotePlacements(
       continue;
     }
     const fromFile = entry.file;
+    // Claimed names only cover tracked notes; the disk check keeps the move
+    // from landing on an untracked file the user created in the target
+    // directory (rename() would replace it without a word). Passing the
+    // source keeps a case-only folder rename from colliding with itself.
     const targetNames = names(claimedNames, move.toDir);
-    const baseName = uniqueFileName(path.posix.basename(fromFile), targetNames);
+    const baseName = await claimFreeFileName(
+      path.join(targetDir, move.toDir),
+      path.posix.basename(fromFile),
+      targetNames,
+      path.join(targetDir, fromFile),
+    );
     const toFile = path.posix.join(move.toDir, baseName);
 
     await mkdir(path.dirname(path.join(targetDir, toFile)), { recursive: true });
     if (!(await tryRename(path.join(targetDir, fromFile), path.join(targetDir, toFile)))) {
       // Missing locally (deleted or moved by hand); leave tracking at the
       // old path - push/status own that conversation.
+      targetNames.delete(baseName);
       claim(claimedNames, noteDirOf(fromFile), path.posix.basename(fromFile));
       continue;
     }
-    targetNames.add(baseName);
     notes[move.recordName] = { ...entry, file: toFile };
     relocations.push({ from: fromFile, to: toFile });
 

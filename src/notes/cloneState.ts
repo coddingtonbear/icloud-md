@@ -289,7 +289,25 @@ export async function readRawStateFile(targetDir: string): Promise<RawStateFile 
 export async function writeRawStateFile(targetDir: string, state: RawStateFile | CloneState): Promise<void> {
   const dir = path.join(targetDir, STATE_DIR_NAME);
   await mkdir(dir, { recursive: true });
-  await writeFile(path.join(dir, STATE_FILE_NAME), JSON.stringify(state, null, 2) + "\n", "utf-8");
+  const filePath = path.join(dir, STATE_FILE_NAME);
+  const serialized = JSON.stringify(state, null, 2) + "\n";
+  // A pull that changed nothing leaves the file alone, so its mtime only
+  // moves when the vault's sync state actually did.
+  if ((await readFileIfExists(filePath)) === serialized) {
+    return;
+  }
+  await writeFile(filePath, serialized, "utf-8");
+}
+
+async function readFileIfExists(filePath: string): Promise<string | undefined> {
+  try {
+    return await readFile(filePath, "utf-8");
+  } catch (cause) {
+    if (isEnoent(cause)) {
+      return undefined;
+    }
+    throw cause;
+  }
 }
 
 export async function readCloneState(targetDir: string): Promise<CloneState | undefined> {

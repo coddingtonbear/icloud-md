@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { CorruptStateFileError, UnsupportedVaultLayoutError } from "../errors.js";
@@ -14,6 +14,25 @@ async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
     await rm(dir, { recursive: true, force: true });
   }
 }
+
+test("writing unchanged state leaves the file (and its mtime) alone; a real change still lands", () =>
+  withTempDir(async (dir) => {
+    const state: CloneState = {
+      syncToken: "token-1",
+      notes: { REC: { file: "Note.md", recordChangeTag: "a", modificationDate: 1 } },
+    };
+    await writeCloneState(dir, state);
+    const statePath = path.join(dir, ".icloud-md", "state.json");
+    const past = new Date("2020-01-01T00:00:00Z");
+    await utimes(statePath, past, past);
+
+    await writeCloneState(dir, { ...state, notes: { ...state.notes } });
+    assert.equal((await stat(statePath)).mtimeMs, past.getTime());
+
+    await writeCloneState(dir, { ...state, syncToken: "token-2" });
+    assert.notEqual((await stat(statePath)).mtimeMs, past.getTime());
+    assert.equal((await readCloneState(dir))?.syncToken, "token-2");
+  }));
 
 test("round-trips shared-zone owners and per-zone syncTokens", () =>
   withTempDir(async (dir) => {

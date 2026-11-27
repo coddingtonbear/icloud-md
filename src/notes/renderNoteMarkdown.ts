@@ -54,7 +54,10 @@ import {
   type InlineSpan,
   type ParagraphKind,
 } from "./noteFormat.js";
+import { findMarkdownTableBlocks } from "./markdownTable.js";
+import { OBJECT_REPLACEMENT_CHARACTER } from "./noteAttachments.js";
 import { parseNoteMarkdown } from "./parseNoteMarkdown.js";
+import { parseEmbedMarkers } from "./unknownContent.js";
 
 /** Same plugin set as the parser and `markdownTable.ts`, so escaping
  * decisions and construct recognition always agree. */
@@ -130,13 +133,147 @@ export function renderNoteMarkdown(rawParagraphs: readonly FormatParagraph[]): s
   // Trailing whitespace is outside the projection (`trimTrailingWhitespace`);
   // rendering it would need `&#x20;` references to survive reparsing.
   const paragraphs = rawParagraphs.map(trimTrailingWhitespace);
+  let chosen = CONSERVATIVE_SPELLING;
   for (const spelling of spellingCandidates(paragraphs.map((paragraph) => paragraph.text))) {
-    const rendered = renderLines(paragraphs, spelling);
-    if (projectionSurvives(paragraphs, rendered)) {
-      return rendered;
+    if (projectionSurvives(paragraphs, renderLines(paragraphs, spelling, NO_LITERAL))) {
+      chosen = spelling;
+      break;
     }
   }
-  return renderLines(paragraphs, CONSERVATIVE_SPELLING);
+  return renderWithLiteralLines(paragraphs, chosen);
+}
+
+/** No paragraph written literally. */
+const NO_LITERAL: ReadonlySet<FormatParagraph> = new Set();
+
+/** After the all-at-once attempt fails, literal lines are tried one at a
+ * time - each try a full reparse of the note - at most this many times; a
+ * note whose lines interact that much keeps the rest escaped. */
+const MAX_LITERAL_TRIALS = 16;
+
+/** What `remark-stringify` may escape, or what opens a construct when
+ * written bare: punctuation, leading whitespace (written as `&#x20;`), the
+ * autolink-literal shapes (`www.`, `@`; see `findAutolinkEscapeRanges`),
+ * and a line-leading number followed by `.` or `)` (an ordered-list
+ * marker). A paragraph with none of them renders identically either way,
+ * so it isn't worth a render to find out. */
+const LITERAL_TRIGGER = /[\\`*_[\]<>#!|~&=+:@-]|[Ww]\.|^\s|^\d+[.)]/;
+
+/**
+ * Layers *literal* lines on top of the chosen spelling: a paragraph whose
+ * text is written exactly as stored, with no escaping at all, so markdown
+ * that reached the note as text - typed on a phone, or carried there by
+ * `parseNoteMarkdown`'s literal degradation of constructs Apple can't
+ * express (`---`, `#### Deep`, a pipe table, `` `code` ``) - comes back to
+ * the file as that same markdown instead of `\\---` and `` \\`code\\` ``.
+ *
+ * Whether a literal line is safe depends on what reparsing makes of it,
+ * and sometimes on its neighbours (a `---` under a line of prose is a
+ * setext underline; a lone ```` ``` ```` swallows everything after it). So,
+ * like the spellings above, nothing is trusted. A paragraph is a candidate
+ * only if writing it literally changes its rendering, and is noted as
+ * *standalone* if it also round-trips literally on its own (a cheap
+ * one-line parse that weeds out the common
+ * failure, text like `*stars*` that would become real formatting). The
+ * candidates are then tried against the whole note: all of them at once
+ * (a fenced block's lines only pass together); then only those that pass
+ * on their own; then those one at a time, each kept only if the whole note
+ * still round-trips with it. A line that never passes stays escaped, so this can
+ * only ever make the file read better, never cost fidelity.
+ *
+ * Two more constraints the round trip can't see, because they are about
+ * scanners that read the file as text before any markdown parse:
+ * - a file whose first line is exactly `---` reads as opening a frontmatter
+ *   envelope (`splitFrontmatter`), so a literal spelling may never produce
+ *   one;
+ * - in a note with embeds (U+FFFC placeholders), push locates each embed's
+ *   marker or table block by scanning the text (`planEmbedRepresentations`)
+ *   and refuses on any extra one, so a literal spelling may not add text
+ *   shaped like either - phone-typed pipes, say, or a pasted marker.
+ */
+function renderWithLiteralLines(paragraphs: readonly FormatParagraph[], spelling: RawSpelling): string {
+  const baseline = renderLines(paragraphs, spelling, NO_LITERAL);
+  const candidates: FormatParagraph[] = [];
+  const standalone: FormatParagraph[] = [];
+  for (const paragraph of paragraphs) {
+    if (paragraph.kind === "monospaced" || paragraph.text.length === 0 || !LITERAL_TRIGGER.test(paragraph.text)) {
+      continue;
+    }
+    // Judged at the top level: a nested list item alone would fail on its
+    // missing parent, which says nothing about its text.
+    const alone = { ...paragraph, indent: 0 };
+    const literal = renderLines([alone], spelling, new Set([alone]));
+    if (literal === renderLines([alone], spelling, NO_LITERAL)) {
+      continue;
+    }
+    candidates.push(paragraph);
+    if (projectionSurvives([alone], literal)) {
+      standalone.push(paragraph);
+    }
+  }
+  if (candidates.length === 0) {
+    return baseline;
+  }
+  const hasEmbeds = paragraphs.some((paragraph) => paragraph.text.includes(OBJECT_REPLACEMENT_CHARACTER));
+  const baselineScans = hasEmbeds ? embedScanCounts(baseline) : undefined;
+  const accepts = (literal: ReadonlySet<FormatParagraph>): string | undefined => {
+    const rendered = renderLines(paragraphs, spelling, literal);
+    if (rendered.split("\n", 1)[0] === FRONTMATTER_FENCE) {
+      return undefined;
+    }
+    if (baselineScans !== undefined) {
+      const scans = embedScanCounts(rendered);
+      if (scans.markers > baselineScans.markers || scans.tables > baselineScans.tables) {
+        return undefined;
+      }
+    }
+    return projectionSurvives(paragraphs, rendered) ? rendered : undefined;
+  };
+  const all = accepts(new Set(candidates));
+  if (all !== undefined) {
+    return all;
+  }
+  if (standalone.length === 0) {
+    return baseline;
+  }
+  if (standalone.length < candidates.length) {
+    const fromStandalone = accepts(new Set(standalone));
+    if (fromStandalone !== undefined) {
+      return fromStandalone;
+    }
+  }
+  const accepted = new Set<FormatParagraph>();
+  let best = baseline;
+  for (const candidate of standalone.slice(0, MAX_LITERAL_TRIALS)) {
+    accepted.add(candidate);
+    const rendered = accepts(accepted);
+    if (rendered === undefined) {
+      accepted.delete(candidate);
+    } else {
+      best = rendered;
+    }
+  }
+  return best;
+}
+
+/** How many embed markers and table blocks push's text scanners would find. */
+function embedScanCounts(markdown: string): { markers: number; tables: number } {
+  return { markers: parseEmbedMarkers(markdown).length, tables: findMarkdownTableBlocks(markdown).length };
+}
+
+/** The line that opens a frontmatter envelope - see `frontmatter.ts`. */
+const FRONTMATTER_FENCE = "---";
+
+/**
+ * Whether the note these paragraphs make would come back from a pull as
+ * the same note - the round trip `classifyNoteRecord` gates publishability
+ * on, checked *before* a push instead of after it. Push asks this of any
+ * markdown `parseNoteMarkdown` carried literal lines for, so that literal
+ * degradation can never turn a note read-only on the next pull.
+ */
+export function readsBackFaithfully(paragraphs: readonly FormatParagraph[]): boolean {
+  const trimmed = paragraphs.map(trimTrailingWhitespace);
+  return projectionSurvives(trimmed, renderNoteMarkdown(trimmed));
 }
 
 /** Whether re-parsing `rendered` reproduces `paragraphs` exactly - the same
@@ -151,7 +288,13 @@ function projectionSurvives(paragraphs: readonly FormatParagraph[], rendered: st
   );
 }
 
-function renderLines(paragraphs: readonly FormatParagraph[], spelling: RawSpelling): string {
+/** `literal`: the paragraphs whose text is written verbatim, unescaped -
+ * see `renderWithLiteralLines`. */
+function renderLines(
+  paragraphs: readonly FormatParagraph[],
+  spelling: RawSpelling,
+  literal: ReadonlySet<FormatParagraph>,
+): string {
   const lines: string[] = [];
   let i = 0;
   while (i < paragraphs.length) {
@@ -174,7 +317,7 @@ function renderLines(paragraphs: readonly FormatParagraph[], spelling: RawSpelli
       while (end < paragraphs.length && isListParagraph(paragraphs[end]!) && paragraphs[end]!.blockQuoteLevel === bq) {
         end += 1;
       }
-      for (const list of buildListNodes(paragraphs.slice(i, end), spelling)) {
+      for (const list of buildListNodes(paragraphs.slice(i, end), spelling, literal)) {
         pushBlockLines(lines, list, bq);
       }
       i = end;
@@ -183,7 +326,11 @@ function renderLines(paragraphs: readonly FormatParagraph[], spelling: RawSpelli
 
     const depth = HEADING_DEPTHS[paragraph.kind];
     if (depth !== undefined) {
-      const heading: Heading = { type: "heading", depth, children: phrasingFromParagraph(paragraph, spelling) };
+      const heading: Heading = {
+        type: "heading",
+        depth,
+        children: phrasingFromParagraph(paragraph, spelling, literal.has(paragraph)),
+      };
       pushBlockLines(lines, heading, bq);
       i += 1;
       continue;
@@ -195,7 +342,7 @@ function renderLines(paragraphs: readonly FormatParagraph[], spelling: RawSpelli
     if (paragraph.text.length === 0) {
       lines.push(bq === 0 ? "" : ">".repeat(bq));
     } else {
-      const body: Paragraph = { type: "paragraph", children: phrasingFromParagraph(paragraph, spelling) };
+      const body: Paragraph = { type: "paragraph", children: phrasingFromParagraph(paragraph, spelling, literal.has(paragraph)) };
       pushBlockLines(lines, body, bq);
     }
     i += 1;
@@ -242,7 +389,11 @@ function pushBlockLines(lines: string[], node: BlockContent, blockQuoteLevel: nu
  * as the structure allows and is caught by the round-trip gate (Apple's own
  * editors only indent one step at a time).
  */
-function buildListNodes(paragraphs: readonly FormatParagraph[], spelling: RawSpelling): List[] {
+function buildListNodes(
+  paragraphs: readonly FormatParagraph[],
+  spelling: RawSpelling,
+  literal: ReadonlySet<FormatParagraph>,
+): List[] {
   const result: List[] = [];
   const stack: { list: List; indent: number }[] = [];
 
@@ -291,7 +442,7 @@ function buildListNodes(paragraphs: readonly FormatParagraph[], spelling: RawSpe
           type: "paragraph",
           children: emptyTodo
             ? [{ type: "html", value: paragraph.done === true ? "[x]" : "[ ]" }]
-            : phrasingFromParagraph(paragraph, spelling),
+            : phrasingFromParagraph(paragraph, spelling, literal.has(paragraph)),
         },
       ],
     };
@@ -538,7 +689,9 @@ export function textPhrasing(value: string, spelling: RawSpelling): PhrasingCont
   return textPieces(value, 0, findRawRanges(value, spelling), true);
 }
 
-function phrasingFromParagraph(paragraph: FormatParagraph, spelling: RawSpelling): PhrasingContent[] {
+/** `literal`: every styled piece is written raw, start to end, rather than
+ * just the ranges `findRawRanges` picks out - see `renderWithLiteralLines`. */
+function phrasingFromParagraph(paragraph: FormatParagraph, spelling: RawSpelling, literal = false): PhrasingContent[] {
   const spans = normalizeSpans(paragraph);
   const pieces: StyledText[] = [];
   let at = 0;
@@ -551,7 +704,9 @@ function phrasingFromParagraph(paragraph: FormatParagraph, spelling: RawSpelling
   return buildPhrasing(
     pieces,
     ["link", "bold", "italic", "strikethrough", "underline"],
-    findRawRanges(paragraph.text, spelling),
+    literal
+      ? pieces.map((piece) => ({ start: piece.start, end: piece.start + piece.text.length }))
+      : findRawRanges(paragraph.text, spelling),
   );
 }
 

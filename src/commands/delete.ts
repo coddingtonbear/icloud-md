@@ -12,6 +12,7 @@ import {
 } from "../notes/cloneState.js";
 import { migrationReporter, openVault } from "../notes/vaultMigrations.js";
 import { NoteDeleteRejectedError, NotClonedDirectoryError, NotesUnavailableError, UntrackedFileError } from "../errors.js";
+import { storesTextAsAsset, TEXT_AS_ASSET_REASON } from "../notes/decodeNoteRecord.js";
 import { buildNotePurgeFields, buildNoteTrashFields, TRASH_FOLDER_RECORD_NAME } from "../notes/encodeNoteRecord.js";
 import { isEnoent } from "../fsUtil.js";
 import { localFileState, type LocalFileState } from "../notes/localFileState.js";
@@ -90,6 +91,7 @@ export async function runDelete(targetDir: string, fileArg: string, options: Del
       await writeCloneState(targetDir, state);
       return { file: target.file, outcome: "already-trashed", localOutcome };
     }
+    refuseTextAsAsset(record, target.file);
     await trashNote(session, ckdatabasewsUrl, dsid, target.file, target.recordName, record);
     const localOutcome = await forgetNoteLocally(targetDir, target, state);
     rememberTrashedNote(state, target.recordName, target.file);
@@ -100,6 +102,7 @@ export async function runDelete(targetDir: string, fileArg: string, options: Del
   // --hard: Apple's own two-stage sequence, staying on captured precedent -
   // trash first (skipped when the note is already there), then purge using
   // the changeTag the trash-move's response handed back.
+  refuseTextAsAsset(record, target.file);
   let current = record;
   if (!isInTrash(current)) {
     current = await trashNote(session, ckdatabasewsUrl, dsid, target.file, target.recordName, current);
@@ -154,6 +157,15 @@ function resolveDeletionTarget(state: CloneState, fileArg: string, targetDir: st
       });
     }
     return { recordName, file: entry.file };
+  }
+}
+
+/** Both deletion stages send `TextDataAsset: {}`, captured only on notes
+ * whose asset was null - on a note that keeps its text there it might clear
+ * it, so such a note is refused (see `buildNoteRelocationFields`). */
+function refuseTextAsAsset(record: CloudKitRecord, file: string): void {
+  if (storesTextAsAsset(record)) {
+    throw new Error(`"${file}" can't be deleted from here: this note ${TEXT_AS_ASSET_REASON}. Delete it in Notes instead.`);
   }
 }
 

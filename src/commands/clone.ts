@@ -1,8 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { bindKnownAccount, bindNewFolderAccount } from "../auth/folderAuth.js";
-import { fetchAllNoteRecords, fetchSharedNoteRecords } from "../cloudkit/databaseClient.js";
-import type { CloudKitRecord } from "../cloudkit/databaseClient.js";
+import { describeMissingNotes, fetchAllNoteRecords, fetchSharedNoteRecords } from "../cloudkit/databaseClient.js";
+import type { CloudKitRecord, SkippedSharedZone } from "../cloudkit/databaseClient.js";
 import { resolveNoteAttachments, type AttachmentAuth } from "../notes/attachmentSync.js";
 import { classifyNoteRecord } from "../notes/decodeNoteRecord.js";
 import { noteFileNameFor, titleNeedingFrontmatter, uniqueFileName } from "../notes/filename.js";
@@ -113,16 +113,7 @@ export async function runClone(
     notices: [],
   };
   for (const skipped of skippedZones) {
-    summary.notices.push({
-      level: "warn",
-      message:
-        skipped.reason === "zone-not-found"
-          ? `Skipped a shared zone the server no longer has (owner ${skipped.zoneID.ownerRecordName ?? "unknown"}, ` +
-            `${skipped.serverErrorCode}) - its share was likely revoked or deleted; no notes from it were cloned`
-          : `Skipped the shared zone owned by ${skipped.zoneID.ownerRecordName ?? "unknown"}: ` +
-            `${skipped.missingRecordNames.length} note(s) came through without their text and looking them up didn't ` +
-            "fill it in - no notes from it were cloned; the first pull will retry it",
-    });
+    summary.notices.push({ level: "warn", message: skippedZoneNotice(skipped) });
   }
   const notes: CloneState["notes"] = {};
   const attachments: NonNullable<CloneState["attachments"]> = {};
@@ -255,6 +246,30 @@ export async function runClone(
   });
 
   return summary;
+}
+
+/** The warning a clone prints for a shared zone `fetchSharedNoteRecords` skipped. */
+function skippedZoneNotice(skipped: SkippedSharedZone): string {
+  const owner = skipped.zoneID.ownerRecordName ?? "unknown";
+  switch (skipped.reason) {
+    case "zone-not-found":
+      return (
+        `Skipped a shared zone the server no longer has (owner ${owner}, ${skipped.serverErrorCode}) - its share was ` +
+        "likely revoked or deleted; no notes from it were cloned"
+      );
+    case "missing-note-bodies":
+      return (
+        `Skipped the shared zone owned by ${owner}: ${describeMissingNotes(skipped.missingRecordNames)} came through ` +
+        "without their text and looking them up didn't fill it in - no notes from it were cloned; the first pull will " +
+        "retry it"
+      );
+    case "stalled-sync-token":
+      return (
+        `Skipped the shared zone owned by ${owner}: iCloud kept handing back the same page of changes for it - no ` +
+        "notes from it were cloned. Pulls will try it again, but each sends the same request, so if this keeps " +
+        "happening, please open a GitHub issue including this message"
+      );
+  }
 }
 
 /** The per-directory used-names set, created on first use. */
