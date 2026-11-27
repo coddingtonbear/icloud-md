@@ -29,7 +29,8 @@ export interface AttachmentAuth {
   dsid: string;
 }
 
-const ATTACHMENTS_DIR = "attachments";
+/** The directory, next to a note, that its attachment files are written into. */
+export const ATTACHMENTS_DIR = "attachments";
 
 /** One attachment resolved to a concrete local file, ready to be written
  * (if `needsDownload`) and tracked. Pure data - no I/O has happened yet. */
@@ -377,6 +378,19 @@ export async function removeAttachmentsForNote(
     removed.push(recordName);
   }
   return removed;
+}
+
+/** The recordNames of every attachment tracked for a note, for the caller to
+ * drop from `state.attachments` while leaving the files themselves on disk -
+ * `removeAttachmentsForNote`'s counterpart for a note that stays behind
+ * untracked, whose text still points at them. */
+export function untrackAttachmentsForNote(
+  noteRecordName: string,
+  attachments: Record<string, CloneStateAttachmentEntry>,
+): string[] {
+  return Object.entries(attachments)
+    .filter(([, entry]) => entry.noteRecordName === noteRecordName)
+    .map(([recordName]) => recordName);
 }
 
 /** Drops table-attachment tracking entries for a note - no file to delete (a
